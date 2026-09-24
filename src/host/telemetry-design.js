@@ -233,6 +233,7 @@ export class TurnTelemetryStore {
 
     const aggregate = aggregateTurn({
       turn: record.turn,
+      sessionId: record.sessionId,
       turnStartMs: record.startMs,
       turnEndMs: record.endMs,
       firstTokenMs: record.firstTokenMs,

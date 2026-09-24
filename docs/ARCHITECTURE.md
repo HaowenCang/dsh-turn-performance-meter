@@ -202,7 +202,10 @@ SessionEventWindow (change payloads)
   -> src/dsh/client-feed.js      window wire -> normalized events (the only DSH-wire parser)
   -> TurnTelemetryStore          (sessionId, turn) keyed statistics + per-session LiveMeter
   -> LivePresenter               per-session UI state machine + projection guards
-  -> React LiveMeter             one 200 ms presentation ticker; stored view state
+  -> controller.project()        precedence + memoized projection identity
+  -> MeterRoot (React)           one 200 ms ticker for live views, none for completed ones
+       ├─ LiveMeter pill
+       └─ CompletedMeter card
 ```
 
 Rejected alternatives and their reasons are recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 0 §"Host→client telemetry
@@ -213,6 +216,25 @@ DOM polling (forbidden).
 The exact mechanism was intentionally not hardcoded in the scaffold; Phase 0 recorded the chosen seam before any
 integration code was written, and Phase 3 verified it live.
 
+**Completed-view selection (frozen in Phase 4).** The card's data source is the settled snapshot
+`TurnTelemetryStore.endTurn` produces and caches on the turn record, read back through `latestSettled(sessionId)`. The
+card never re-reads raw events, never re-aggregates, and never computes a metric:
+
+```text
+DSH durable/live evidence
+  -> src/dsh (adapter + client-feed)          normalized events
+  -> TurnTelemetryStore                       per-(sessionId, turn) records
+  -> aggregateTurn + compressAttempts         settled snapshot (cached at turn/end)
+  -> completedViewModel                       the ONLY completed UI seam: values, `≈`, `—`, strings
+  -> completed-tree + CompletedMeter          render only
+```
+
+Precedence is one rule in one place (`controller.project`): **an open turn wins over a settled one**. A settled
+*state machine* is what unlocks the card, not merely a settled meter, and the settled snapshot is read in the same
+synchronous step as the live one — so `turn/end` replaces the pill with the card inside a single state advance, and a
+following `turn/start` replaces the card with the pill just as atomically. The projection is memoized by turn identity,
+so an unchanged settled turn returns the same object and a static card is never rebuilt per ingested delta.
+
 ## 10. Client/UI architecture
 
 Mount in `conversation.composer.dock` as an independent entry `turn-performance-meter` (`order: -10`, additive;
@@ -221,32 +243,40 @@ the native `stats` occupant at order `0` is untouched).
 One root component projects an explicit state machine onto one view:
 
 ```text
-MeterRoot (slot component)
-├─ hidden            inactive | settled | no session — renders null
-├─ LiveMeter pill
+MeterRoot (slot component) — owns subscription, ticker and the single style tag
+├─ hidden            no session | inactive machine — renders null
+├─ LiveMeter pill    while a turn is open
 │  ├─ pending-first-token   running first-response stopwatch (once per turn)
 │  ├─ streaming-reasoning   trailing-1s ≈TPS + turn elapsed
 │  ├─ streaming-output      (tool-call arguments included)
 │  ├─ tool-running          episode wall timer + tool label(s), no TPS field
 │  ├─ waiting-model         post-TTFT wait stopwatch, never the TTFT counter
 │  └─ transition            neutral 处理中…, no TPS field
-└─ (CompletedMeter + curve — later phases, placeholder types only)
+└─ CompletedMeter card   once that session's turn has settled
+   ├─ MetricCell Reasoning TPS     value + unit + `108.2s · ≈37,498`
+   ├─ MetricCell Output TPS        value + unit + `25.4s · ≈17,272`
+   ├─ MetricCell Generated Tokens  value + unit + `总用时 133.6s`
+   ├─ MetricCell TTFT              value + unit + status text
+   └─ footer                       `工具 4 · 12.8s · 模型调用 4 · 已完成`
 ```
 
 The projected view is stored state: only the 200 ms ticker (and mount/session changes) writes it, so the conversation
-dock's high-frequency re-renders cannot bypass the presentation throttle. Hover must not create a detached tooltip
-(completed view); keyboard focus provides equivalent access when that view arrives.
+dock's high-frequency re-renders cannot bypass the presentation throttle. The ticker exists for **live** views only;
+once the card is on screen the scheduler is stopped and the card is refreshed by events, not by a clock. Hover must
+not create a detached tooltip (completed view); keyboard focus provides equivalent access when the curve view arrives
+in Phase 5 — Phase 4's card has no interactive or hover behaviour at all.
 
 ## 11. Resource ownership
 
 All timers, listeners, subscriptions, styles, and observers must be effect-scoped and disposed when the plugin/client contribution unmounts. Avoid singleton browser intervals. Avoid duplicate React. Prefer CSS variables/inherited host theme values; only the output accent color should be plugin-defined if no suitable host token exists.
 
-Implemented ownership (Phase 3): the slot component owns exactly one presentation scheduler (cleared on hide and
-unmount), one eventSource subscription per attached session inside the controller (unsubscribed on controller
-dispose), and a reference-counted style tag (single `#dsh-tpm-live-style`, removed with the last unmount). The
-controller disposes every subscription, machine and store entry on fiber teardown (`ctx.effect` returns-disposer
-form — the callback runs as setup, its return value at teardown). React comes from the browser module table seed;
-`window.React` stays undefined and no duplicate-instance error appears in the console.
+Implemented ownership (Phase 3, extended in Phase 4): the slot component (`MeterRoot`) owns exactly one presentation
+scheduler (cleared on hide, on the completed card and on unmount), one eventSource subscription per attached session
+inside the controller (unsubscribed on controller dispose), and a reference-counted style tag (single
+`#dsh-tpm-live-style`, holding both the pill and card CSS, removed with the last unmount). The controller disposes
+every subscription, machine and store entry on fiber teardown (`ctx.effect` returns-disposer form — the callback runs
+as setup, its return value at teardown) and exposes `project`, `diagnostics`, `attachedSessions`. React comes from the
+browser module table seed; `window.React` stays undefined and no duplicate-instance error appears in the console.
 
 ## 12. Non-goals
 

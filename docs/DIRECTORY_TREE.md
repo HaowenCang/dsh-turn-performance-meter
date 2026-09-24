@@ -70,19 +70,24 @@ dsh-turn-performance-meter/
 │   │   └── telemetry-design.js       DSH-agnostic normalized store, session+turn keyed
 │   │
 │   └── client/
-│       ├── ui-model.js               Pure UI view-model shaping
+│       ├── ui-model.js               Pure UI view-model shaping (live + completed seams)
 │       ├── format.js                 Number/time formatting with `—` for absent evidence
-│       ├── styles.js                 Scoped style constants over host theme tokens
+│       ├── styles.js                 Early scaffold style constants (superseded by live-css.js)
 │       ├── main.js                   Browser entry: locale + controller + slot registration
-│       ├── live/                     Phase 3 live UI
+│       ├── live/                     Live meter + shared presentation lifecycle
+│       │   ├── MeterRoot.js          Slot component: routing, subscription, ticker, style tag
 │       │   ├── live-state.js         Eight-state UI machine (explicit transitions)
-│       │   ├── live-presenter.js     machine + LiveMeter snapshot -> view model
+│       │   ├── live-presenter.js     machine + LiveMeter snapshot + settled -> view model
 │       │   ├── live-format.js        ≈ TPS / stopwatches / tool labels
 │       │   ├── refresh.js            single presentation ticker (200 ms, coalesced lead)
 │       │   ├── controller.js         eventSource attach -> store + presenter, per session
 │       │   ├── locale.js             turnPerformanceMeter en/zh dictionary + fallback
-│       │   ├── live-css.js           scoped stylesheet string (light/dark accent)
-│       │   └── LiveMeter.js          React slot component (browser-only, imports react)
+│       │   ├── live-css.js           scoped pill stylesheet string (light/dark accent)
+│       │   └── LiveMeter.js          React pill (browser-only) + debug counters
+│       ├── completed/                Phase 4 completed card
+│       │   ├── completed-tree.js     React-free element tree: structure, text, aria, footer
+│       │   ├── CompletedMeter.js     React binding over the tree (browser-only)
+│       │   └── completed-css.js      scoped card stylesheet (4-column grid, 2-column wrap)
 │       └── README.md                 Client implementation constraints
 │
 ├── dev/                              Dev-only capture tooling (not in the bundle)
@@ -99,7 +104,8 @@ dsh-turn-performance-meter/
 ├── test/
 │   ├── helpers/
 │   │   ├── fixtures.js               Fixture loading contract
-│   │   └── equivalence.js            Live-vs-durable harness + metric tuple comparison
+│   │   ├── equivalence.js            Live-vs-durable harness + metric tuple comparison
+│   │   └── live-replay.js            Fake eventSource + fixture replay + ticker lifecycle
 │   ├── core …                        pure-engine tests (one per src/core module)
 │   ├── quality-model.test.js
 │   ├── dsh-adapter.test.js
@@ -108,24 +114,28 @@ dsh-turn-performance-meter/
 │   ├── dsh-fixtures.test.js           Fixture contract + synthetic provenance
 │   ├── dsh-degradation.test.js        The twelve required degradation/corruption cases
 │   ├── generation-tail.test.js        Frozen phase-duration evidence
-│   └── telemetry-store.test.js / format.test.js / ui-model.test.js
+│   ├── client-bundle.test.js          Bundle determinism, module table, slot, CSS contract
+│   ├── live-controller.test.js        Fixture replay, session isolation, ticker bounds
+│   ├── ui-model.test.js               Live + completed view models
+│   ├── completed-tree.test.js         Card element tree, aria, footer, no-chart contract
+│   ├── completed-lifecycle.test.js    Live/completed switching, durable reload, static card
+│   └── completed-format.test.js       Formatter edge cases (no NaN/Infinity/-0 in UI)
 │
 └── scripts/
     └── verify-structure.mjs
+    └── bundle-client.mjs / build-client.mjs
+
+dev/screenshots/                      git-ignored evidence captures (phase3/, phase4/)
 ```
 
 Expected evolution during implementation:
 
 ```text
 src/client/
-  meter-root.*                    Slot component tree (live pill / completed card)
-  live-meter.*
-  completed-card.*
-  tps-chart.*
-  locale.*                        Dictionary registration for `turnPerformanceMeter`
+  completed/curve/                Phase 5: SVG curve view + hover/focus alternate layout
 
 test/
-  component tests
+  completed-curve.test.js         Phase 5: compressed axis, bounded points, hover/focus
   browser/e2e tests (if local DSH harness supports them)
 ```
 

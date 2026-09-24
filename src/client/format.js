@@ -24,19 +24,37 @@ export function formatCountdown(ms, digits = 2) {
 }
 
 /**
- * TPS display. Three-significant-figure behaviour without exponent notation at
- * the low end, where token rates are most often read.
+ * Rate and magnitude display. Three-significant-figure behaviour without
+ * exponent notation at the low end, where token rates are most often read.
+ *
+ * The same function formats the card's TPS values and its token magnitudes,
+ * because both are "a number with a unit" and the specification freezes one
+ * formatter for the card rather than one per column. Counts of a thousand or more
+ * therefore keep locale grouping: `54,770` is the reference's number, and
+ * compacting it to `54770` would be a formatting accident rather than a layout
+ * decision. `formatTokens` remains the explicit integer formatter for secondary
+ * lines.
  */
 export function formatTps(value) {
   if (!Number.isFinite(value)) return DASH
-  if (value >= 100) return Math.round(value).toString()
-  if (value >= 10) return value.toFixed(1)
-  return value.toFixed(2)
+  /**
+   * Round **before** choosing the precision band. `9.999` must read `10.0`, not
+   * `10.00`: picking the band from the unrounded value would print a
+   * two-decimal number for a value already past ten.
+   */
+  const rounded = Math.round(value * 100) / 100
+  if (rounded >= 1000) return formatTokens(rounded)
+  if (rounded >= 100) return Math.round(rounded).toString()
+  if (rounded >= 10) return rounded.toFixed(1)
+  return rounded.toFixed(2)
 }
 
 export function formatTokens(value) {
   if (!Number.isFinite(value)) return DASH
-  return Math.round(value).toLocaleString('en-US')
+  const rounded = Math.round(value)
+  // `-0` is a display artefact of rounding, not a magnitude: it must not reach
+  // the DOM as `-0`.
+  return (rounded === 0 ? 0 : rounded).toLocaleString('en-US')
 }
 
 /** Compact elapsed form used on secondary lines: `133.6s`, `2m42s`. */

@@ -1143,7 +1143,137 @@ test dump `dev/verify-phase2.txt`, the ignored screenshot folder and `dev/scratc
 
 ### Phase 4
 
-- Completed summary:
+Completed turn summary card. Baseline before any change: `dsh --version` = `0.1.5-rc.2`, branch `main`, HEAD
+`3d90667` (`feat: complete phase 3 live performance meter`), `git remote -v` **empty**, `npm run verify` exit 0 with
+260 tests / 28 files / 0 failures (383.9 ms).
+
+#### 4.1 Fixture-recorder cleanup
+
+Phase 3's report claimed `dev/fixture-recorder` was still injected in the working `web` profile. Checking the three
+possible sources before removing anything:
+
+| Source | Finding |
+|---|---|
+| `dsh plugin --profile web list --depth 2` | 110 packages; no `@dsh-external/dsh-turn-meter-fixture-recorder` row |
+| profile `package.json` (`dependencies` + `dsh.profile.bundles`) | not present in either list |
+| profile `node_modules` (`dir /AL`) | no junction or symlink for it |
+| `dsh-super-injector` registry (`dev_injected_list`) | only `dsh-turn-performance-meter` |
+| runtime loader entries (`dev_plugin_status`) | no `fixture-recorder` entry |
+| `cordis.patch.yml` | `- id: dsh-turn-meter-fixture-recorder` / `disabled: true` — a disabled tombstone |
+
+So the recorded residue was already gone from the running profile; what remains is the **disabled tombstone**, which is
+deliberately kept so a bundle-layer patch cannot re-assemble the entry. It was verified disabled rather than assumed:
+the control route returns `404` — the same code as a control probe against a path that never existed, i.e. the
+webserver's own "unknown route", not the recorder's `404 {ok:false,error:"unknown route ..."}` JSON body.
+
+```text
+/turn-meter-fixture/status -> 404      (plugin route absent)
+/turn-meter-fixture/models -> 404
+/nonexistent-xyz           -> 404      (baseline)
+```
+
+The recorder declares no `dsh.client` entry and registers no slot, so there is no client module or slot residue to
+check beyond that. `fixtures/dsh-turns/`, `fixtures/derived/`, `dev/fixture-recorder/lib/index.js`, `dev/capture-scenario.ps1`
+and the rest of the Phase 2 tooling are **untouched** — only the production validation profile was cleaned.
+
+#### 4.2 Completed data path
+
+The card consumes the snapshot `TurnTelemetryStore.endTurn` already computes and caches on the turn record:
+
+```text
+DSH durable/live evidence
+  -> src/dsh (adapter + client-feed)          normalized events
+  -> TurnTelemetryStore                       per-(sessionId, turn) records
+  -> aggregateTurn (+ compressAttempts)       settled snapshot, cached at turn/end
+  -> LivePresenter.project(..., settled)      branch selection only
+  -> completedViewModel                       the single completed UI seam
+  -> completed-tree / CompletedMeter          render only
+```
+
+Three changes made that path complete:
+
+1. `controller.project(sessionId, atMs)` now reads `store.latestSettled(sessionId)` in the same synchronous step as
+   `store.liveSnapshot(...)` and passes it to `LivePresenter.project(snapshot, nowMs, settled)`. The presenter returns
+   the card when — and only when — its machine is in the settled state, so a settled *machine* unlocks the card and an
+   **open turn always wins**. `turn/end` invalidates the projection inside its own event handling, which is what makes
+   the handover atomic instead of a two-tick blank.
+2. The projection is memoized by identity (`projectionKey`): the settled branch keys on the turn alone, so an unchanged
+   settled turn returns the identical object; live branches include the machine state, meter phase, turn elapsed, the
+   rounded live TPS and the tool episode. A static card therefore cannot be rebuilt once per ingested delta.
+3. `aggregateTurn` now publishes the per-phase token magnitudes the card shows (`phaseTokens` + `phaseTokensQuality`)
+   and carries `sessionId` through, and `settle()` gained no new arithmetic.
+
+#### 4.3 The per-phase display decision (the one semantic change)
+
+Before Phase 4, a rate was published only when the provider had reported `reasoningTokens` on **every** contributing
+attempt; every other route showed `—` for both TPS columns. Measured against the fixtures that meant `t1` and `t2` — the
+two routes that actually represent the common case — displayed no rate at all, which contradicts the frozen reference
+layout and discards a real observed generation duration.
+
+The policy now implemented and written into `METRICS_SPEC.md` §3.1: the published per-phase magnitude is the provider
+counter when the provider reported it, and otherwise the **anchored allocation of the authoritative total**
+(`calibrateAttemptSamples` already rescales each attempt's phase weights so its phases sum to that attempt's total; the
+output phase absorbs the rounding residual, so the pair always adds up to the published total). The rate's quality
+follows its numerator: exact counters over complete measured timing stay `exact`, an anchored allocation is
+`calibrated`, a partial total is `estimated`, and a phase with no evidence at all stays `null` → `—`. Nothing is
+fabricated: the numbers are a division of a real total over real duration, and the weaker the derivation, the more
+markers it carries.
+
+Frozen consequences, all tested:
+
+| Fixture | Before | After |
+|---|---|---|
+| `t1` (no `reasoningTokens`, 134 tokens) | `—` / `—` | `—` (no reasoning phase) / `≈305 tokens/s · 0.4s · ≈134` |
+| `t2` (no `reasoningTokens`, 458 tokens) | `—` / `—` | `≈186 · 1.3s · ≈232` / `≈175 · 1.3s · ≈226` |
+| `t3` (interrupted, no usage) | `—` / `—` | `≈211 · 3.8s · ≈798` / `—`; total `—` |
+| `t4` (exact split) | `≈50.6` (timing-limited) / `138` | unchanged — `≈50.6` / `138 · 0.6s · 77` |
+| `t5` (exact split) | `39.5` / `35.7` | unchanged — `39.5 · 26.3s · 1,038` / `35.7 · 7.6s · 270` |
+
+Two Phase-2/3 assertions were deliberately amended rather than deleted, because the honest statement changed:
+`aggregate-turn.test.js` ("no complete split means no turn-level rate" → the anchored division and its quality) and
+`dsh-degradation.test.js` (the rate whose numerator is a partial sum now exists and is `estimated`, with the
+under-counted denominator asserted as the cause).
+
+#### 4.4 Reload reconstruction of a settled turn
+
+A window that contains only the durable plane never sees `ATTEMPT_START`, so before this round a settlement arriving
+with no in-memory attempt was dropped and the card could not be reconstructed after a page load. The controller now
+restores such an attempt from the compact stream embedded in the durable row (`attemptFromDecoded`), derives
+`firstTokenMs` from the earliest restored sample timestamp (so TTFT survives a reload), and counts it in diagnostics.
+When transient rows for the same attempt *are* present, the settlement is correlated to that attempt by
+`(turn, step)` only when exactly one unsettled attempt matches; with two candidates the correlation is unprovable and
+the durable row becomes its own attempt rather than being attached to a guess. If the window has lost `turn/start`
+entirely, TTFT and elapsed stay `null` and render `—` — no start time is invented.
+
+`test/completed-lifecycle.test.js` proves the property end-to-end through the real controller: the durable-only window
+of t1/t3/t4/t5 (and of every fixture) yields a view model identical to the live-observed path's.
+
+#### 4.5 Presentation lifecycle and HMR
+
+`MeterRoot.js` became the single slot component and owns the shared lifecycle: one subscription per attached session,
+one style tag (`#dsh-tpm-live-style`) holding **both** stylesheets, one presentation scheduler, and a distinct rule for
+the card — the ticker is started only for a live view, so a completed card leaves `timerCount === 0` (asserted on the
+t3 replay). While the card is on screen the scheduler is not even notified: an event re-projects directly, which is
+sound because the projection is memoized. The live pill became a pure `LivePill` render function; the card's structure
+lives in `completed-tree.js`, a React-free element tree so that structure, text and accessibility are testable in Node
+without a DOM or a React runtime.
+
+#### 4.6 Verification
+
+`npm run verify` exit 0: structure OK (14 required files, 14 core modules, 31 test files, bundle fresh),
+**317 tests / 0 failures / 437.8 ms** — up from 260 tests / 28 files. New files: `test/completed-tree.test.js` (14),
+`test/completed-lifecycle.test.js` (14), `test/completed-format.test.js` (11); `test/ui-model.test.js` rewritten
+from 8 to 23 tests; `test/live-presenter.test.js`, `test/live-controller.test.js`, `test/client-bundle.test.js`,
+`test/aggregate-turn.test.js`, `test/dsh-degradation.test.js` extended or amended as described above.
+
+Real DSH validation, partial and reported as such: after a runtime reload of the bundle, the live page
+`http://127.0.0.1:50001/` was inspected with Chrome DevTools and showed exactly one `style#dsh-tpm-live-style` element
+(4937 bytes of CSS, containing the card rules) and one `.dsh-tpm-root` in the live streaming state
+(`data-state="streaming-output"`, accessible name `输出 · 34m15s`, text `输出 | ≈141 | tokens/s | 34m15s`), beside the
+native statistics pill `1 轮 174 步 · 89 tok/s | 79.8M tok · 缓存命中 98%`. A pixel capture of the **completed card** was
+not obtained: the host serializes turns, so a fresh short turn could not run while this session's own turn was open,
+and the two DSH tabs used for reload-based verification stopped answering DevTools evaluation while re-rendering
+multi-megabyte conversations. That gap is recorded in `TEST_PLAN.md` §3 rather than papered over.
 
 ### Phase 5
 
@@ -1163,9 +1293,10 @@ Keep this current. Every approximation that can affect displayed numbers belongs
    `reconstructed` afterwards (exact phase integrals on an estimated local shape). Live TPS is never `exact`, and it is
    the temporal-shape axis that reports this: it has a hard ceiling of `reconstructed` (docs/METRICS_SPEC.md §11.2).
 2. `reasoningTokens` is optional at both usage carriers, and the local `command-goat` route never reports it. When it is
-   absent the generated-token total may still be `exact` while the reasoning/output split is `estimated`. When it is
-   absent the turn-level reasoning and output TPS values are not published at all, because a rate whose numerator is a
-   shape weight would be fabricated.
+   absent the generated-token total may still be `exact` while the reasoning/output split is `estimated`. Since Phase 4
+   the per-phase rates and token counts *are* published in that case, as the anchored division of the authoritative
+   total by the observed shape, and they carry `≈` because that division was never measured. A phase with no evidence
+   at all still renders `—`.
 3. The live 1-second window for a turn already streaming before a page reload cannot be reconstructed from the reconnect
    baseline (the baseline carries the compact detached stream, not a pre-reload wall-clock window). Provisionally
    `unavailable`; to be confirmed in Phase 6.
@@ -1181,9 +1312,10 @@ Keep this current. Every approximation that can affect displayed numbers belongs
    is unverified until Phase 7.
 8. The fixture set contains no tool-only turn, no provider-error retry and no tool-error turn. `d4` covers an unmatched
    call and the unit tests cover error status, but a recorded instance of each is still owed to Phase 6.
-9. `dev/fixture-recorder` is a dev-only package that stays injected in the local `web` profile until the remaining
-   fixtures are captured. It registers no tools, no listeners outside its two observational subscriptions, and no
-   `dsh.client` entry; it is not part of the plugin bundle.
+9. `dev/fixture-recorder` is a dev-only package that stays **unloaded** from the local `web` profile; only its
+   `disabled: true` patch tombstone remains, so a bundle-layer patch cannot re-assemble it. It registers no tools, no
+   listeners outside its two observational subscriptions, and no `dsh.client` entry; it is not part of the plugin
+   bundle. Verified inert in Phase 4 §4.1 (control route 404, no junction, no loader entry).
 10. Phase 3 added `dsh-turn-performance-meter` to the profile as a `link:` dependency (bundle layer entry present)
     *and* registered it through `dsh-super-injector` for same-session activation. The loader's dual-instance
     reconciliation is expected to keep exactly one active entry across a restart; if it ever reports a conflict,

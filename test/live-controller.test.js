@@ -53,11 +53,25 @@ test('t1 replay: pending -> streaming -> tool -> waiting -> streaming -> settled
     assert.ok(runs.includes(LiveUiState.TOOL_RUNNING), 'a tool stage occurred')
     assert.ok(runs.includes(LiveUiState.TRANSITION), 'settlement/tool gaps pass through the neutral stage')
     assert.ok(runs.includes(LiveUiState.WAITING_MODEL), 'post-tool model waits are waiting-model')
-    assert.equal(runs.at(-1), `hidden(${LiveUiState.SETTLED})`, 'turn/end exits live mode')
+    /**
+     * Phase 4: `turn/end` does not blank the dock, it hands the slot to the card.
+     * The handover is one state advance — the very next projection after the
+     * settlement is the completed view, never `hidden` followed by a card.
+     */
+    assert.equal(runs.at(-1), LiveUiState.SETTLED, 'turn/end hands the slot to the completed card')
+    assert.equal(keys.lastIndexOf('hidden(settled)'), -1, 'no blank frame exists between live and completed')
+    assert.equal(replay.captures.at(-1).kind, 'completed')
+    const firstCard = keys.indexOf(LiveUiState.SETTLED)
+    assert.ok(firstCard > 0, 'the card arrives after live stages, not at the start')
+    assert.equal(
+      keys.slice(firstCard).every(key => key === LiveUiState.SETTLED),
+      true,
+      'once settled, this session never returns to a live stage',
+    )
 
     // Every streaming run is a model phase; tools never leak a TPS view.
     for (const view of replay.captures) {
-      if (view.kind === 'tool' || view.kind === 'transition' || view.kind === 'waiting' || view.kind === 'ttft' || view.kind === 'hidden') {
+      if (view.kind === 'tool' || view.kind === 'transition' || view.kind === 'waiting' || view.kind === 'ttft' || view.kind === 'hidden' || view.kind === 'completed') {
         assert.equal('tps' in view, false, `no TPS field may exist on ${view.kind}`)
       }
       if (view.kind === 'streaming') {
@@ -87,23 +101,27 @@ test('t2 replay: the write, edit and pwsh tool stages are all visible with their
       if (view.kind === 'tool') assert.ok(view.count >= 1)
     }
     const runs = compressStates(replay.captures.map(viewKey))
-    assert.equal(runs.at(-1), `hidden(${LiveUiState.SETTLED})`)
+    assert.equal(runs.at(-1), LiveUiState.SETTLED, 'the card replaces the pill when the turn settles')
   } finally {
     replay.dispose()
   }
 })
 
-test('t3 replay: an interrupted turn exits live mode and leaves no ticker behind', () => {
+test('t3 replay: an interrupted turn still gets a card, and leaves no ticker behind', () => {
   const fixture = loadFixture('t3-interrupted-mid-reasoning')
   const replay = replayFixture(fixture, { withScheduler: true })
   try {
     const keys = replay.captures.map(viewKey)
-    assert.equal(keys.at(-1), `hidden(${LiveUiState.SETTLED})`, 'turn/end(aborted) settles regardless of status')
-    assert.equal(replay.controller.project(fixture.sessionId, replay.nowMs).kind, 'hidden')
+    assert.equal(keys.at(-1), LiveUiState.SETTLED, 'turn/end(aborted) settles to interrupted, not to a blank slot')
+    const card = replay.controller.project(fixture.sessionId, replay.nowMs)
+    assert.equal(card.kind, 'completed')
+    assert.equal(card.status, 'interrupted')
+    assert.equal(card.turn, 1)
+    assert.equal(card.columns.length, 4)
 
-    // The visibility effect stops the ticker when the view hides.
+    // A completed card is static: no interval and no leading timer survive it.
     const stats = replay.stats()
-    assert.equal(stats.timerCount, 0, 'no interval or leading timer survives the settled state')
+    assert.equal(stats.timerCount, 0, 'no interval or leading timer survives the completed card')
     assert.ok(stats.maxTimers <= 2, `at most two timers ever existed, saw ${stats.maxTimers}`)
     assert.ok(stats.renders >= 0)
   } finally {
@@ -180,12 +198,15 @@ test('session switch: A and B never share machines, subscriptions or resets', ()
   const viewB = controller.project('session-B', 250)
   assert.equal(viewB.kind, 'streaming', 'B streams')
 
-  // B settles: A must be untouched (no shared currentTurn, no wrong reset).
+  // B settles: it gets its own card, and A must be untouched (no shared
+  // currentTurn, no wrong reset, no cross-session card).
   sourceB.appendEntry(
     durableEntry('turn/end', 5, 500, { turn: 1, reason: { kind: 'completed' } }),
     (revision += 1),
   )
-  assert.equal(controller.project('session-B', 500).kind, 'hidden')
+  const cardB = controller.project('session-B', 500)
+  assert.equal(cardB.kind, 'completed', 'B settles into its own card')
+  assert.equal(cardB.turn, 1)
   assert.equal(controller.project('session-A', 500).kind, 'streaming', 'A still streams after B settled')
   assert.equal(controller.project('session-A', 500).turn, 1)
 
@@ -266,7 +287,17 @@ test('settle-assistant + llm/retry: durable attempts settle with separated conce
   source.settleAssistant('s:2', messageSettle, (revision += 1))
   push(durableEntry('step/end', 10, 2450, { turn: 1, step: 1 }))
   push(durableEntry('turn/end', 11, 2500, { turn: 1, reason: { kind: 'completed' } }))
-  assert.equal(controller.project('s-retry', 2500).kind, 'hidden')
+  const card = controller.project('s-retry', 2500)
+  assert.equal(card.kind, 'completed', 'the retried turn settles into a card')
+  /**
+   * The abandoned first attempt contributed observed generation time but no
+   * usage, so the total is approximate and the split is not exact. What matters
+   * here is that the card exists and says so, rather than disappearing.
+   */
+  assert.equal(card.status, 'completed')
+  assert.equal(card.attemptCount, 2)
+  assert.equal(card.quality.tokenTotalQuality === 'exact', false)
+  assert.equal(card.columns.find(column => column.key === 'generatedTokens').approximate, true)
 
   // Store-level audit: the three settlement concepts stayed separated, and
   // `retried` was derived from durable evidence rather than guessed.

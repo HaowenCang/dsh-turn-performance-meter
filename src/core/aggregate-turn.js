@@ -119,6 +119,7 @@ function phaseShapeSum(samples, phase) {
  *
  * @param {{
  *   turn?: number|null,
+ *   sessionId?: string|null,
  *   turnStartMs?: number,
  *   turnEndMs?: number|null,
  *   firstTokenMs?: number|null,
@@ -185,24 +186,67 @@ export function aggregateTurn(input = {}) {
   const reasoningMeasured = reasoningDurations.filter(ms => ms !== null && ms > 0).length
   const outputMeasured = outputDurations.filter(ms => ms !== null && ms > 0).length
 
-  // Per-attempt allocations summed across the turn. For an attempt with usage
-  // these are calibrated values anchored to the authoritative total; for an
-  // attempt without usage they are raw shape weights. Reported for diagnostics
-  // only — neither figure is a measured token count, so they never become a
-  // published TPS numerator.
-  const shapeTokens = reduced.reduce(
+  /**
+   * Per-attempt phase allocations summed across the turn. For an attempt with
+   * usage these are calibrated values anchored to the authoritative total, so
+   * their sum equals that total exactly; for an attempt without usage they are
+   * raw shape weights. They are the *only* per-phase token magnitudes this
+   * project has when the provider reports no `reasoningTokens`, and
+   * `calibrateAttemptSamples` already rescales them so each attempt's phases sum
+   * to that attempt's authoritative total — which is what makes an anchored
+   * division of a known total honest, and what makes the unanchored case read as
+   * `≈`. Rounding across many attempts can leave the sum a fraction off the
+   * total, so the output phase absorbs the residual; the reported pair therefore
+   * always adds up to the reported total.
+   */
+  const allocatedTokens = reduced.reduce(
     (sum, a) => ({
       reasoning: sum.reasoning + (a.reasoningTokens ?? a.shapeReasoning),
       output: sum.output + (a.outputTokens ?? a.shapeOutput),
     }),
     { reasoning: 0, output: 0 },
   )
+  const allocatedTotal = allocatedTokens.reasoning + allocatedTokens.output
+  /**
+   * The residual correction is applied **only** when an authoritative total
+   * exists to correct toward. Without one there is nothing to reconcile, and
+   * subtracting the allocation from a zero observed sum would manufacture a
+   * negative phase magnitude. Attempts that reported no usage contribute their
+   * raw shape weight instead, which is why the resulting phase pair is then a
+   * shape estimate rather than an anchored division.
+   */
+  const anchored = observedGeneratedTokens > 0
+  const shapeTokens = anchored ? {
+    reasoning: allocatedTokens.reasoning,
+    output: allocatedTokens.output + (observedGeneratedTokens - allocatedTotal),
+  } : allocatedTokens
 
-  const reasoningTps = observedReasoningTokens !== null && observedReasoningTokens > 0 && reasoningMs > 0
-    ? observedReasoningTokens * 1000 / reasoningMs
+  /**
+   * The per-phase totals the card publishes: the provider counters when the
+   * provider reported them, the anchored allocation otherwise. A phase with no
+   * evidence at all stays `null` and renders `—`; it is never shown as `0`.
+   */
+  const phaseTokens = splitComplete
+    ? { reasoning: observedReasoningTokens, output: observedNonReasoningTokens }
+    : {
+      reasoning: shapeTokens.reasoning > 0 ? shapeTokens.reasoning : null,
+      output: shapeTokens.output > 0 ? shapeTokens.output : null,
+    }
+  /** Whether those per-phase counters are measured, anchored, or absent. */
+  const phaseTokensQuality = splitComplete
+    ? MetricQuality.EXACT
+    : (usageComplete ? MetricQuality.ESTIMATED
+      : (withUsage.length > 0 ? MetricQuality.PARTIAL : MetricQuality.UNAVAILABLE))
+
+  // Phase rates divide whatever per-phase magnitude is published by the measured
+  // generation time of that phase. A rate whose numerator is not measured is
+  // reported at the quality of that numerator, so `≈` follows the number rather
+  // than the field name.
+  const reasoningTps = phaseTokens.reasoning !== null && phaseTokens.reasoning > 0 && reasoningMs > 0
+    ? phaseTokens.reasoning * 1000 / reasoningMs
     : null
-  const outputTps = observedNonReasoningTokens !== null && observedNonReasoningTokens > 0 && outputMs > 0
-    ? observedNonReasoningTokens * 1000 / outputMs
+  const outputTps = phaseTokens.output !== null && phaseTokens.output > 0 && outputMs > 0
+    ? phaseTokens.output * 1000 / outputMs
     : null
 
   const reasoningTokensReported = reduced.some(a => a.usage !== null && a.usage.reasoningTokens !== null)
@@ -253,6 +297,12 @@ export function aggregateTurn(input = {}) {
 
   return {
     turn: input.turn ?? null,
+    /**
+     * Carried through rather than re-derived: the card states which session's turn
+     * it describes, and the aggregation layer is the last place that knows it
+     * before the view model is built.
+     */
+    sessionId: input.sessionId ?? null,
     status,
     turnStartMs: Number.isFinite(input.turnStartMs) ? input.turnStartMs : null,
     turnEndMs: Number.isFinite(input.turnEndMs) ? input.turnEndMs : null,
@@ -273,6 +323,13 @@ export function aggregateTurn(input = {}) {
       : (withUsage.length > 0 ? MetricQuality.ESTIMATED : MetricQuality.UNAVAILABLE),
     reasoningTokens: observedReasoningTokens,
     nonReasoningTokens: observedNonReasoningTokens,
+    /**
+     * Per-phase token magnitudes actually fit to publish: the provider counters
+     * when it reported them, otherwise the anchored phase allocation of the
+     * authoritative total. `null` means "no evidence for this phase", never `0`.
+     */
+    phaseTokens,
+    phaseTokensQuality,
     splitQuality: splitConflict
       ? MetricQuality.ESTIMATED
       : (splitComplete
@@ -297,7 +354,7 @@ export function aggregateTurn(input = {}) {
     reasoningMeasuredAttempts: reasoningMeasured,
     outputMs,
     outputMeasuredAttempts: outputMeasured,
-    /** Shape-weighted token sums; diagnostics only, never a published rate numerator. */
+    /** Shape-weighted token sums; their phase pair sums to the observed total. */
     shapeTokens,
 
     // Coverage / diagnostics.

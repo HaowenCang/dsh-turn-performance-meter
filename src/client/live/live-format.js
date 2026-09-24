@@ -51,7 +51,9 @@ export function truncateToolName(name, max = 20) {
  */
 export function formatToolLabel(names, count) {
   const list = Array.isArray(names) ? names.filter(name => typeof name === 'string' && name.length > 0) : []
-  const total = Number.isFinite(count) && count > 0 ? count : list.length
+  // A count is a number of calls: it is rounded before use so a fractional input
+  // can never render as `+1.7000000000000002`.
+  const total = Number.isFinite(count) && count > 0 ? Math.round(count) : list.length
   if (total <= 0) return DASH
   if (total === 1) return truncateToolName(list[0] ?? DASH)
   const first = list.length > 0 ? `${truncateToolName(list[0])} ` : ''

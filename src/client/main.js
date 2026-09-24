@@ -17,7 +17,8 @@
  */
 
 import { createController } from './live/controller.js'
-import { makeMeterSlot, meterDiagnostics } from './live/LiveMeter.js'
+import { makeMeterSlot } from './live/MeterRoot.js'
+import { meterDiagnostics } from './live/LiveMeter.js'
 import { LOCALE_DICTS, LOCALE_NS, wrapTranslate } from './live/locale.js'
 
 export const inject = ['slots', 'sessions', 'locale']

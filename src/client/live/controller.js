@@ -24,12 +24,46 @@
 
 import { TurnTelemetryStore } from '../../host/telemetry-design.js'
 import { turnKey } from '../../core/types.js'
-import { NORMALIZED_KIND, applyRetryOutcomes } from '../../dsh/index.js'
+import { NORMALIZED_KIND, applyRetryOutcomes, attemptFromDecoded } from '../../dsh/index.js'
 import { SessionEventFeed } from '../../dsh/client-feed.js'
 import { LivePresenter } from './live-presenter.js'
 
 /** Presentation refresh cadence: 200 ms == at most ~5 rendered updates/s. */
 export const DEFAULT_REFRESH_MS = 200
+
+/**
+ * Identity of a projected view: equal keys mean the picture is unchanged.
+ *
+ * The point of the key is the completed card. A settled turn's projection depends
+ * on nothing that ticks, so its key is constant and the card is built exactly once
+ * per settled turn even though events keep arriving. Every live field that can
+ * change the rendering is enumerated, and anything not enumerated (per-delta
+ * counters, sample arrays) deliberately cannot change a live value on its own —
+ * the live view is a one-second window plus a wall clock, both of which are in
+ * the key.
+ */
+function projectionKey(state, snapshot, atMs) {
+  const machine = state.presenter.machine
+  const phase = snapshot?.phase ?? 'none'
+  if (machine.state === 'settled') return `settled:${machine.turn ?? ''}`
+  const clock = Number.isFinite(atMs) ? atMs : 0
+  /**
+   * `turnElapsedMs` is in the key because every live view prints a running
+   * elapsed value; a settled view prints none, which is why its key omits the
+   * clock entirely and stays stable while deltas keep arriving.
+   */
+  return [
+    machine.state,
+    machine.turn ?? '',
+    phase,
+    Number.isFinite(snapshot?.turnElapsedMs) ? snapshot.turnElapsedMs : '',
+    phase === 'streaming' ? Math.round(snapshot.tps ?? 0) : '',
+    phase === 'tool' ? snapshot.runningToolCount ?? 0 : '',
+    phase === 'tool' ? Math.round(snapshot.toolElapsedMs ?? 0) : '',
+    machine.sinceMs ?? '',
+    clock,
+  ].join('|')
+}
 
 /**
  * @param {{
@@ -68,6 +102,12 @@ export function createController({
     return state.currentRecord
   }
 
+  /** Drop whatever the last projection cached, including its settled-turn read. */
+  function invalidate(state) {
+    state.viewCache = undefined
+    state.settledRead = undefined
+  }
+
   function applyEvent(state, event) {
     const sessionId = state.sessionId
     switch (event.kind) {
@@ -79,12 +119,15 @@ export function createController({
         state.presenter.apply({ type: 'reset' })
         state.currentRecord = null
         state.openAttemptId = null
+        invalidate(state)
         return
       }
 
       case NORMALIZED_KIND.TURN_START: {
         state.currentRecord = store.beginTurn({ sessionId, turn: event.turn, timeMs: event.timeMs })
         state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs })
+        /** A new turn supersedes the previous card in this same advance. */
+        state.settledRead = undefined
         log('turn open', sessionId, event.turn)
         return
       }
@@ -148,7 +191,21 @@ export function createController({
 
       case NORMALIZED_KIND.ATTEMPT_SETTLE: {
         const record = lookupRecord(state, event.turn)
-        const attemptId = event.attemptId ?? state.openAttemptId
+        let attemptId = event.attemptId ?? state.openAttemptId
+        /**
+         * A durable settlement arriving as a plain event carries no `attemptId`,
+         * so it is correlated to the one attempt of its `(turn, step)` that has
+         * not settled yet. The correlation demands a *unique* candidate: if two
+         * unsettled attempts share the step, the settlement belongs to neither
+         * provably, and the durable record is restored as its own attempt instead
+         * of being attached to a guess.
+         */
+        if ((attemptId === null || attemptId === undefined) && record !== null && Number.isFinite(event.step)) {
+          const open = record.attempts.filter(candidate => (
+            candidate.settlementKind === 'none' && candidate.step === event.step
+          ))
+          if (open.length === 1) attemptId = open[0].attemptId
+        }
         if (record !== null && attemptId !== null && attemptId !== undefined) {
           const attempt = record.attemptIndex.get(attemptId)
           if (attempt !== undefined) {
@@ -162,6 +219,48 @@ export function createController({
               settlementSeq: event.seq,
             })
           }
+        } else if (record !== null && event.decoded !== undefined) {
+          /**
+           * Durable-only settlement: the window carries the settlement (and its
+           * embedded compact stream), but the attempt's transient rows are gone —
+           * the reload case. The durable record is the complete evidence for that
+           * attempt, so it is restored from the decode rather than dropped: a
+           * refresh must be able to show the last completed turn without ever
+           * having observed it live. Nothing is invented here — the attempt's
+           * samples, usage and settlement metadata all come from the durable row.
+           */
+          const restored = attemptFromDecoded({
+            attemptId: `durable:${event.seq ?? record.attempts.length}`,
+            turn: record.turn,
+            step: event.step ?? null,
+            decoded: event.decoded,
+            usage: event.usage ?? null,
+            usageSource: event.usageSource ?? null,
+            settlementKind: event.settlementKind,
+            surfaceCommitted: event.surfaceCommitted,
+            attemptOutcome: event.attemptOutcome,
+            settledAtMs: event.timeMs,
+            settlementSeq: event.seq,
+            settlementEventType: event.eventType ?? null,
+            interrupted: event.interrupted === true,
+            issues: event.issues ?? [],
+          })
+          record.attempts.push(restored)
+          record.attemptIndex.set(restored.attemptId, restored)
+          /**
+           * The turn TTFT is `turn/start -> first non-empty model-producing
+           * delta`, and a restored attempt brings that delta with it. Taking the
+           * earliest sample timestamp here is what lets a card rebuilt after a
+           * reload report the same TTFT the live session froze, instead of `—`.
+           */
+          for (const sample of restored.samples) {
+            if (!Number.isFinite(sample.timeMs)) continue
+            record.firstTokenMs = record.firstTokenMs === null
+              ? sample.timeMs
+              : Math.min(record.firstTokenMs, sample.timeMs)
+          }
+          state.durableAttempts = (state.durableAttempts ?? 0) + 1
+          log('durable attempt restored', sessionId, restored.attemptId, restored.samples.length)
         }
         if (state.openAttemptId === attemptId) state.openAttemptId = null
         state.presenter.apply({
@@ -244,6 +343,13 @@ export function createController({
         state.currentRecord = null
         state.openAttemptId = null
         state.presenter.apply({ type: 'turn-end', turn: event.turn, timeMs: event.timeMs, status: event.status })
+        /**
+         * The settled turn is now readable. Both the settled snapshot and the
+         * settled machine are in place before the projection is invalidated, so
+         * the very next `project()` returns the completed card — never `null`
+         * followed by a card one tick later.
+         */
+        invalidate(state)
         log('turn close', sessionId, event.turn, event.status)
         if (Array.isArray(settled?.consistencyIssues) && settled.consistencyIssues.length > 0) {
           log('quality downgrade', ...settled.consistencyIssues)
@@ -333,13 +439,44 @@ export function createController({
       return () => listeners.delete(listener)
     },
 
-    /** The current presentation model for one session (hidden when unknown). */
+    /**
+     * The current presentation model for one session.
+     *
+     * Precedence, frozen in Phase 4: an open turn wins over a settled one. The
+     * completed card and the live meter are never both available, so the switch
+     * is a single state advance:
+     *
+     *   - a settled machine projects the latest settled turn (the card);
+     *   - a `turn/end` therefore replaces the pill with the card in the same
+     *     publish — there is no intermediate "nothing" frame;
+     *   - a following `turn/start` replaces the card with the pill in the same
+     *     publish — the old card never lingers beside a new turn.
+     *
+     * The result is memoized per `(session, projection identity)`: while nothing
+     * that can change the picture has changed, the same object is returned, so a
+     * static card cannot be rebuilt once per ingested delta. The identity of a
+     * completed card is its turn, which is exactly the rule "one card per settled
+     * turn".
+     */
     project(sessionId, atMs = nowMs()) {
-      if (disposed || typeof sessionId !== 'string' || !sessionsMap.has(sessionId)) {
+      const state = sessionsMap.get(sessionId)
+      if (disposed || typeof sessionId !== 'string' || state === undefined) {
         return { kind: 'hidden', state: 'inactive', turn: null }
       }
+      /**
+       * The settled turn is read as evidence, once per session state object, in
+       * the same synchronous step that reads the meter — which is what makes the
+       * live/completed handover atomic rather than a two-tick sequence.
+       */
+      if (state.settledRead === undefined) state.settledRead = store.latestSettled(sessionId)
       const snapshot = store.liveSnapshot(sessionId, atMs)
-      return sessionsMap.get(sessionId).presenter.project(snapshot, atMs)
+      const key = projectionKey(state, snapshot, atMs)
+      const cached = state.viewCache
+      if (cached !== undefined && cached.key === key && cached.sessionId === sessionId) return cached.view
+
+      const view = state.presenter.project(snapshot, atMs, state.settledRead)
+      state.viewCache = { key, sessionId, view }
+      return view
     },
 
     /** Diagnostics for tests and debug tooling. */

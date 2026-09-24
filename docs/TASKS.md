@@ -89,19 +89,36 @@ no-tool, pwsh and multi-tool turns. → met; see `IMPLEMENTATION_LOG.md` §3.
 
 ## Phase 4 — Completed summary
 
-- [ ] Turn end replaces live meter with completed card.
-- [ ] Four-column layout: Reasoning TPS / Output TPS / Generated Tokens / TTFT.
-- [ ] Reasoning/output values are turn-level weighted aggregates.
-- [ ] Generated Tokens uses correct provider output semantics.
-- [ ] Secondary lines show phase duration/token counts, total turn elapsed and tool wall timing/status.
-- [ ] Interrupted and errored turns are explicitly labeled.
-- [ ] Estimated/unavailable fields follow quality display rules.
+- [x] Turn end replaces live meter with completed card. → one state advance in `controller.project`; asserted by
+      `test/completed-lifecycle.test.js` (no blank frame between the pill and the card)
+- [x] Four-column layout: Reasoning TPS / Output TPS / Generated Tokens / TTFT. → fixed order, always four; tool
+      statistics live on the footer line (`src/client/ui-model.js` + `src/client/completed/`)
+- [x] Reasoning/output values are turn-level weighted aggregates. → `aggregateTurn` sums the turn; the card renders
+      only what the settled snapshot already computed
+- [x] Generated Tokens uses correct provider output semantics. → sum of `outputTokens` for contributing attempts;
+      `nonReasoningTokens = outputTokens - reasoningTokens`, never a sum
+- [x] Secondary lines show phase duration/token counts, total turn elapsed and tool wall timing/status. → the four
+      secondary lines plus the footer `工具 N · <wall> · 模型调用 N · <status>`
+- [x] Interrupted and errored turns are explicitly labeled. → `interrupted` / `errored` / `token limit reached` status
+      text, with the four columns intact and no card-wide error styling
+- [x] Estimated/unavailable fields follow quality display rules. → `exact` bare, anything weaker `≈`, `unavailable`
+      `—`; a phase token count on the same derivation chain as an approximate rate carries `≈` too
+- [x] Completed card consumes the settled snapshot only; `completedViewModel` is the single completed UI seam and
+      React performs no statistics
+- [x] Completed card is static: no ticker, no rolling value, no timer of any kind; the view is memoized per settled turn
+- [x] Reload reconstruction: a durable-only window (no transient plane at all) rebuilds the same card
+- [x] `dev/fixture-recorder` removed from the running web profile (disabled tombstone retained)
 
-Acceptance gate: a turn with at least three LLM calls and two tools computes the same totals as an independent fixture calculation.
+Acceptance gate: a turn with at least three LLM calls and two tools computes the same totals as an independent fixture
+calculation. → met; `t2` (4 attempts, 3 tools: write/edit/pwsh) and `t1` (2 attempts, 2 tools) are asserted from the
+recorded bytes through both the live-observed and the durable-only paths, and every fixture is additionally replayed
+through the real controller in `test/completed-lifecycle.test.js`.
 
 ## Phase 5 — Mandatory completed TPS curve
 
-- [ ] Build compressed active model-generation x-axis.
+- [ ] Build compressed active model-generation x-axis. (`TurnTelemetryStore.settle` already emits `curve` with
+      `durationMs`, segments, downsampled series and `peakTps`; the card carries it unused — reachable from
+      `src/client/` only as the settled snapshot's data, never recomputed)
 - [ ] Prove a long tool delay does not add chart width.
 - [ ] Preserve stalls within one model stream.
 - [ ] Generate reasoning/output rolling 1s series at bounded render cadence.

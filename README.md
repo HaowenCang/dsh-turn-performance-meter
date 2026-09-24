@@ -1,17 +1,20 @@
 # dsh-turn-performance-meter
 
-A turn-level performance meter for DeepSeek Harness (DSH) agent workflows. It is designed for turns that may contain multiple model invocations, tool calls, retries, shell commands, file writes/edits, and a final answer. The project provides two UI modes: a compact live meter during execution and a completed turn card that reveals a mandatory reasoning/output TPS curve on hover.
+A turn-level performance meter for DeepSeek Harness (DSH) agent workflows. It is designed for turns that may contain multiple model invocations, tool calls, retries, shell commands, file writes/edits, and a final answer. The project provides two UI modes: a compact live meter during execution and a completed turn card that aggregates the whole turn.
 
-面向 DeepSeek Harness（DSH）Agent 工作流的 turn 级性能统计插件。它适用于一个 turn 内存在多次模型调用、工具调用、重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计卡片；完成态卡片在悬停时切换到必选的 reasoning/output TPS 曲线。
+面向 DeepSeek Harness（DSH）Agent 工作流的 turn 级性能统计插件。它适用于一个 turn 内存在多次模型调用、工具调用、重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计卡片。完成态卡片按整个 turn 聚合。
 
-> Status: Phase 3 complete. The turn-level engine, the DSH adapter with both semantic preflight audits, and the
-> production Live Client integration are in place: the live meter runs inside the real DSH web client against
-> `ctx.sessions.binding().eventSource`, verified by 260 offline tests and a live browser session run. The completed
-> summary card and the mandatory hover curve are Phase 4/5.
+> Status: Phase 4 complete. The turn-level engine, the DSH adapter with both semantic preflight audits, the production
+> Live Client integration and the **completed turn summary card** are in place. The live meter and the completed card
+> run inside the real DSH web client against `ctx.sessions.binding().eventSource`, verified by 317 offline tests and a
+> live browser session run. The completed card is a static settled view: it aggregates the whole turn (all model
+> attempts, all tool calls) and never re-derives metrics in React. The mandatory hover/focus **TPS curve is Phase 5**
+> and is deliberately absent.
 >
-> 状态：Phase 3 已完成。指标口径、DSH adapter（含两项前置语义审计）与生产级实时 Client 集成均已落地：实时组件在真实
-> DSH Web 客户端中基于 `ctx.sessions.binding().eventSource` 运行，由 260 个离线测试与真实浏览器会话运行共同验证。
-> 完成态统计卡片与悬停 TPS 曲线属于 Phase 4/5。
+> 状态：Phase 4 已完成。指标口径、DSH adapter（含两项前置语义审计）、生产级实时 Client 集成与**完成态统计卡片**均已落地：
+> 实时组件与完成态卡片都在真实 DSH Web 客户端中基于 `ctx.sessions.binding().eventSource` 运行，由 317 个离线测试与真实
+> 浏览器会话运行共同验证。完成态卡片是静态的 settled 视图：它聚合整个 turn（全部模型 attempt、全部工具调用），且 React 层
+> 不重新计算任何指标。必选的悬停/聚焦 **TPS 曲线属于 Phase 5**，当前刻意不实现。
 
 ## 1. Frozen product requirements / 已冻结需求
 
@@ -23,9 +26,11 @@ During model generation, the live meter displays the **current trailing 1-second
 
 模型生成期间，实时组件显示**当前活动 attempt 最近 1 秒向后滑动窗口的 TPS**，且始终带 `≈` 近似标记，不显示曲线。工具返回后开始新的模型调用，或进入新的尝试边界时，窗口重置，禁止混合两个独立模型调用的数据。非模型解码阶段（工具执行、步骤间隙、重试退避）显示各自的计时器，不显示任何 TPS 数值。
 
-After the turn settles, the default card shows turn-level averages. Hovering the completed card replaces the default summary with the TPS curve view. Tool execution time occupies **zero horizontal width** in that curve: the x-axis is compressed model-generation time, because the curve is meant to diagnose model throughput stability rather than end-to-end latency.
+After the turn settles, the same slot shows the completed card instead: turn-level averages over every model attempt and tool call in that turn, with the reasoning/output split marked `≈` whenever the provider did not report `reasoningTokens`. The card is static — no ticker, no curve, no hover behaviour. Tool execution time occupies **zero horizontal width** on the Phase 5 curve, whose x-axis is compressed model-generation time, because the curve is meant to diagnose model throughput stability rather than end-to-end latency.
 
-turn 结束后，默认卡片显示 turn 级平均指标。鼠标悬停完成态卡片时，摘要视图切换为 TPS 曲线视图。工具执行时间在曲线横轴上占用**零宽度**；横轴采用压缩后的模型生成时间，因为曲线用于诊断模型吞吐率稳定性，而不是表现端到端时延。
+turn 结束后，同一 slot 切换为完成态卡片：对该 turn 内全部模型 attempt 与工具调用做 turn 级平均；当 provider 未报告
+`reasoningTokens` 时，reasoning/output 拆分标 `≈`。卡片是静态的——没有 ticker、没有曲线、没有悬停行为。Phase 5 曲线的横轴上，
+工具执行时间占用**零宽度**；横轴采用压缩后的模型生成时间，因为曲线用于诊断模型吞吐率稳定性，而不是表现端到端时延。
 
 Model-generated ordinary text and model-generated tool-call arguments count as model output. Therefore PowerShell commands, shell scripts, write-file payloads, edit patches/diffs, and other tool arguments belong to output accounting. Tool results such as stdout, file contents returned by a tool, or API responses do **not** count as model output; they may become input to a later model call.
 
@@ -42,11 +47,31 @@ Completed summary keeps four principal columns to preserve the reference layout:
 | Reasoning TPS / 思考 TPS | `sum(reasoning tokens) / sum(reasoning generation time)` across the turn | reasoning duration · reasoning tokens |
 | Output TPS / 输出 TPS | `sum(non-reasoning output tokens) / sum(output generation time)` across the turn | output duration · output tokens |
 | Generated Tokens / 生成 Tokens | sum of provider `outputTokens` for contributing attempts | total turn elapsed time |
-| TTFT / 首响应 | turn start → first non-empty reasoning/text/tool-call delta | tool calls · tool wall time · status |
+| TTFT / 首响应 | turn start → first non-empty reasoning/text/tool-call delta | turn status |
 
-Tool latency is tracked independently. `toolWorkMs` is the sum of all completed call durations; `toolWallMs` is the union of tool intervals and therefore does not double-count parallel tools. The compact UI should normally display `toolWallMs`; detail/debug surfaces may expose both.
+A footer line, not a fifth column, carries the tool summary (`tools 4 · 12.8s`, using the wall union) and the attempt
+count. A turn with no tool call hides the tool item entirely.
 
-工具耗时独立统计。`toolWorkMs` 是所有已完成工具调用时长之和；`toolWallMs` 是工具执行区间的并集，因此不会对并行工具重复计时。紧凑 UI 默认应显示 `toolWallMs`，详细/调试界面可以同时提供两者。
+卡片底部（而不是第五个栏位）承载工具摘要（`工具 4 · 12.8s`，使用 wall union）与模型调用次数；无工具调用的 turn 直接隐藏该
+项。
+
+Display follows metric quality, and only a genuinely measured value is printed bare:
+
+- `exact` → `54770` / `1.44 s` / `345`;
+- anything weaker → `≈54770` / `≈345`; a per-phase token count on the same derivation chain as an approximate rate
+  carries `≈` too, so `≈345 tokens/s` and `≈37,498 tokens` always agree;
+- `unavailable` → `—`, never `0`.
+
+显示遵循指标质量，只有真正测量到的值才不带标记：
+
+- `exact` → `54770` / `1.44 s` / `345`；
+- 更弱的等级 → `≈54770` / `≈345`；与近似速率同一条推导链的 phase token 数同样带 `≈`，因此 `≈345 tokens/s` 与
+  `≈37,498 tokens` 始终一致；
+- `unavailable` → `—`，绝不为 `0`。
+
+Tool latency is tracked independently. `toolWorkMs` is the sum of all completed call durations; `toolWallMs` is the union of tool intervals and therefore does not double-count parallel tools. The compact UI displays `toolWallMs`; the summed work stays in the view model for detail/debug surfaces.
+
+工具耗时独立统计。`toolWorkMs` 是所有已完成工具调用时长之和；`toolWallMs` 是工具执行区间的并集，因此不会对并行工具重复计时。紧凑 UI 显示 `toolWallMs`；求和值保留在 view model 中供详细/调试界面使用。
 
 ## 3. Measurement fidelity / 测量精度
 
@@ -100,9 +125,11 @@ dsh-turn-performance-meter/
 │  ├─ core/             pure metric engine — zero @deepseek-ai/* imports
 │  ├─ dsh/              DSH rc.2 raw evidence -> normalized events (+ client-feed)
 │  ├─ host/             TurnTelemetryStore (session+turn keyed)
-│  └─ client/           main.js entry + live/ (state machine, presenter, scheduler,
-│                       controller, locale, CSS, React LiveMeter)
-├─ test/                28 test files (core / dsh / live / bundle)
+│  └─ client/           main.js entry + presentation
+│     ├─ live/          state machine, presenter, scheduler, controller, MeterRoot,
+│     │                 React pill, locale, CSS
+│     └─ completed/     completed-card view tree + React binding + card CSS
+├─ test/                31 test files (core / dsh / live / completed / bundle)
 └─ scripts/             verify-structure, bundle-client, build-client
 
 dev/                    dev-only tooling, not part of the bundle
@@ -182,11 +209,20 @@ The scaffold client is invisible by default. For the **bootstrap-only** slot-loa
 localStorage.setItem('dsh-turn-performance-meter.debugPlaceholder', '1')
 ```
 
+Setting `dsh-turn-performance-meter.debug` to `1` instead enables the production diagnostics handle (lifecycle logs only, no per-delta logging):
+
+将 `dsh-turn-performance-meter.debug` 设为 `1` 则启用生产诊断句柄（仅记录生命周期事件，不记录每个 delta）：
+
+```js
+localStorage.setItem('dsh-turn-performance-meter.debug', '1')
+// window.__dshTurnPerformanceMeter.{controller,diagnostics,attachedSessions,meter}
+```
+
 ## 7. Build order / 构建顺序
 
-Do not start from visual polish. The order is: local API reconnaissance → telemetry normalization → pure metric tests → live rolling TPS → tool timing → completed turn aggregation → compressed timeline → calibrated curve → completed/hover UI → interruption/retry/error handling → browser/E2E verification. Phases 0–3 (reconnaissance, pure engine, DSH telemetry normalization, live client integration + live meter UI) are complete; Phase 4 (completed summary card) is next.
+Do not start from visual polish. The order is: local API reconnaissance → telemetry normalization → pure metric tests → live rolling TPS → tool timing → completed turn aggregation → compressed timeline → calibrated curve → completed/hover UI → interruption/retry/error handling → browser/E2E verification. Phases 0–4 (reconnaissance, pure engine, DSH telemetry normalization, live client integration + live meter UI, completed turn summary card) are complete; Phase 5 (the mandatory completed TPS curve and its hover/focus alternate view) is next.
 
-不要从视觉细节开始。顺序为：本机 API 勘察 → 遥测归一化 → 纯指标测试 → 实时滚动 TPS → 工具计时 → turn 完成态聚合 → 压缩时间轴 → 校准 TPS 曲线 → 完成态/悬停 UI → 中断/重试/错误处理 → 浏览器/E2E 验证。Phase 0–3（勘察、纯引擎、DSH 遥测归一化、实时 Client 集成 + 实时组件 UI）已完成，下一步为 Phase 4（完成态摘要卡片）。
+不要从视觉细节开始。顺序为：本机 API 勘察 → 遥测归一化 → 纯指标测试 → 实时滚动 TPS → 工具计时 → turn 完成态聚合 → 压缩时间轴 → 校准 TPS 曲线 → 完成态/悬停 UI → 中断/重试/错误处理 → 浏览器/E2E 验证。Phase 0–4（勘察、纯引擎、DSH 遥测归一化、实时 Client 集成 + 实时组件 UI、完成态统计卡片）已完成，下一步为 Phase 5（必选的完成态 TPS 曲线及其悬停/聚焦切换视图）。
 
 The executable task list and acceptance gates are in `docs/TASKS.md`. The prompt to start DeepSeek V4.1 Flash is in `docs/START_PROMPT.md`.
 

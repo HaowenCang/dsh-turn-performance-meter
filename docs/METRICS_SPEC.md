@@ -66,6 +66,18 @@ N_{nonreason}=\sum_i (N_{output,i}-N_{reason,i})
 
 If any contributing attempt lacks authoritative usage, the exact turn aggregate is not complete. Degrade quality; do not silently treat missing usage as zero.
 
+### 3.1 Per-phase magnitudes for display (frozen in Phase 4)
+
+The card publishes a per-phase token magnitude for each of the two phases. Its provenance depends on what the provider reported, and the published pair is always reconciled with the published total:
+
+| Provider evidence | Published reasoning / output magnitudes | Quality |
+|---|---|---|
+| `outputTokens` **and** `reasoningTokens` on every contributing attempt | the provider counters | `exact` |
+| `outputTokens` on every contributing attempt, no `reasoningTokens` | the anchored allocation of the authoritative total: `calibrateAttemptSamples` rescales each attempt's phase weights so its phases sum to that attempt's total, and the turn sums those allocations; the output phase absorbs any rounding residual | `estimated` (`partial` when only some attempts reported usage) |
+| no provider usage at all | the raw phase shape weights | `unavailable` quality; a rate derived from them is `estimated` |
+
+A phase with no evidence at all is `null` and renders `—`; it is never shown as `0`. This is what makes `phaseSplitQuality === estimated` an *approximate division of a known total* rather than a free-floating estimate, and it is why the card can state a rate for routes that never report `reasoningTokens` while still marking it `≈`.
+
 ## 4. TTFT
 
 Turn TTFT is defined once:
@@ -363,3 +375,12 @@ Evidence rules, verified in the installed runtime:
 - `abandoned` comes **only** from the transient `AssistantStreamFrame.end.outcome.kind === 'abandoned'`
   ("live abandonment without one [durable settlement]");
 - anything the durable evidence cannot derive stays `unknown`. Nothing is guessed.
+
+### 13.2 Reload reconstruction of the completed card (frozen in Phase 4)
+
+A card must be reachable from a window that contains **only** the durable plane. Two consequences are normative:
+
+1. The window does not need to carry `turn/start` for the turn to be *measured*; it needs it for TTFT and elapsed time. A settlement that arrives with no matching in-memory turn record therefore restores its attempt from the stream embedded in the durable row (`attemptFromDecoded`), derives `firstTokenMs` as the earliest restored sample timestamp, and can still report TTFT. When the window has lost `turn/start` altogether, `ttftMs` and `turnElapsedMs` are `null` and render `—`; no start time is fabricated, because a fabricated one would corrupt both values.
+2. When the window still holds transient rows for the same attempt, the durable settlement is correlated to that attempt by its `(turn, step)` **only if exactly one unsettled attempt matches**. With two candidates the correlation is unprovable, and the durable row is restored as its own attempt rather than attached to a guess.
+
+The card a reload produces must equal the card the live session produced. This is tested per recorded fixture in `test/completed-lifecycle.test.js` (durable-only window versus live-observed window, compared through the view model) and, for the underlying metrics, in `test/dsh-equivalence.test.js`.

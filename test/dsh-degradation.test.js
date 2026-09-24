@@ -51,10 +51,27 @@ test('missing usage: the turn total becomes unavailable, the partial sum stays d
   assert.equal(view.settled.quality.displayTokenTotal, 'approximate')
   assert.ok(view.settled.observedGeneratedTokens > 0, 'the observed prefix is still reported, as a diagnostic')
   assert.notEqual(view.settled.generatedTokens, view.settled.observedGeneratedTokens)
-  // The rate whose numerator is incomplete must not be published either.
-  assert.equal(view.settled.reasoningTps, null)
-  assert.equal(view.settled.outputTps, null)
-  assert.equal(view.settled.reasoningTpsQuality, 'unavailable')
+  /**
+   * The published rate exists but is never allowed to look measured: its
+   * numerator is the anchored division of the *observed prefix*, so the rate
+   * carries `≈` (`calibrated`, not `exact`) while the missing attempt contributes
+   * only the generation time it really took.
+   */
+  assert.ok(Number.isFinite(view.settled.reasoningTps))
+  /**
+   * The two rates degrade independently, and the reason is visible in the
+   * denominators: the attempt whose usage disappeared is a tool-argument attempt
+   * with a single reasoning delta, so reasoning loses a measurable interval
+   * (`estimated`) while every contributing attempt still supplies an output
+   * interval (`calibrated`). Neither may claim `exact`.
+   */
+  assert.equal(view.settled.reasoningTpsQuality, 'estimated')
+  assert.equal(view.settled.outputTpsQuality, 'calibrated')
+  assert.ok(view.settled.reasoningMeasuredAttempts < view.settled.contributingAttemptCount,
+    'the under-counted denominator is the documented cause')
+  assert.equal(view.settled.reasoningTpsQuality === 'exact', false, 'a partial numerator is never exact')
+  assert.equal(view.settled.outputTpsQuality === 'exact', false, 'a partial numerator is never exact')
+  assert.equal(view.settled.quality.phaseSplitQuality, 'estimated')
 })
 
 test('an in-stream usage chunk is an authoritative carrier, not a shape estimate', () => {

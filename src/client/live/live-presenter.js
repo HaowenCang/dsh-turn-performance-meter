@@ -23,6 +23,7 @@
  */
 
 import { MetricQuality, requiresApproximateMarker } from '../../core/quality-model.js'
+import { completedViewModel } from '../ui-model.js'
 import { LiveUiState, initialLiveUi, reduceLiveUi } from './live-state.js'
 
 const HIDDEN_STATES = new Set([LiveUiState.INACTIVE, LiveUiState.SETTLED])
@@ -42,12 +43,28 @@ export class LivePresenter {
   /**
    * Project the current presentation model.
    *
-   * @param {{sessionId?: string}} unused reserved for future per-session keys
+   * Precedence is frozen: an open turn always wins over a settled one, so a new
+   * `turn/start` removes the previous card in the same state advance that opens
+   * the new turn.
+   *
    * @param {object|null} snapshot `LiveMeter.snapshot(nowMs)` output
    * @param {number} nowMs presentation instant (wall clock)
+   * @param {object|null} [settled] this session's latest settled snapshot
    */
-  project(snapshot, nowMs) {
+  project(snapshot, nowMs, settled = null) {
     const machine = this.machine
+
+    /**
+     * Completed branch. It is reached from `settled`, never from the meter: the
+     * card is a static projection of the settled turn record, and the settled
+     * *machine* (not merely a settled meter) is what proves the turn this session
+     * most recently observed has ended. A session whose machine is still
+     * `inactive` has no card to show.
+     */
+    if (machine.state === LiveUiState.SETTLED) {
+      return completedViewModel(settled) ?? hidden(machine)
+    }
+
     if (HIDDEN_STATES.has(machine.state)) return hidden(machine)
     if (!snapshot || snapshot.phase === 'idle' || snapshot.phase === 'settled') return hidden(machine)
 

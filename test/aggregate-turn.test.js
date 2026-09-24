@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { aggregateTurn, reduceAttempt } from '../src/core/aggregate-turn.js'
 import { MetricQuality } from '../src/core/metric-quality.js'
+import { QualityLevel } from '../src/core/quality-model.js'
 import { compressAttempts } from '../src/core/time-axis.js'
 
 /** Attempt A: reasoning 0 -> 2000, then output 2000 -> 5000. */
@@ -115,7 +116,22 @@ test('one attempt without authoritative usage makes the exact turn total unavail
   assert.equal(result.usageComplete, false)
   assert.equal(result.usageAttemptCount, 1)
   assert.equal(result.contributingAttemptCount, 2)
-  assert.equal(result.reasoningTps, null, 'no complete split means no turn-level rate')
+  /**
+   * Frozen in Phase 4: when the split is not authoritative, the published
+   * per-phase magnitude is the anchored shape division of the observed total, and
+   * the rate carries the quality of that numerator rather than disappearing. The
+   * alternative — a bare `—` for every provider that omits `reasoningTokens` —
+   * would throw away a real observed generation duration.
+   */
+  assert.equal(result.quality.phaseSplitQuality, QualityLevel.ESTIMATED)
+  assert.equal(result.phaseTokens.reasoning, 40, 'the one attempt that reported reasoningTokens still contributes')
+  assert.equal(result.phaseTokens.output, 60, 'the rest of the observed total is allocated to output')
+  assert.equal(result.phaseTokens.reasoning + result.phaseTokens.output, result.observedGeneratedTokens,
+    'the phase pair never sums past the total that was actually observed')
+  assert.equal(result.reasoningTps, 20, '40 allocated tokens over the 2000 ms of measured reasoning time')
+  assert.equal(result.outputTps, 20, '60 allocated tokens over the 3000 ms of measured output time')
+  assert.equal(result.outputTpsQuality, MetricQuality.ESTIMATED,
+    'only one of the two contributing attempts had a measurable output phase')
   assert.equal(result.splitQuality, MetricQuality.ESTIMATED)
 })
 
@@ -138,8 +154,22 @@ test('missing reasoningTokens across every attempt keeps the total exact and the
   assert.equal(result.generatedTokensQuality, MetricQuality.EXACT)
   assert.equal(result.splitComplete, false)
   assert.equal(result.splitQuality, MetricQuality.ESTIMATED)
-  assert.equal(result.reasoningTokens, null, 'the split is not labelled exact')
-  assert.equal(result.reasoningTps, null)
+  assert.equal(result.reasoningTokens, null, 'the observed counter is absent, so no exact split is claimed')
+  assert.equal(result.nonReasoningTokens, null, 'the split is not labelled exact')
+  /**
+   * The anchored division of the exact total by the observed shape: half the
+   * shape weight was reasoning, so half of 500 tokens is allocated there, over the
+   * 1000 ms of measured reasoning time.
+   */
+  assert.equal(result.phaseTokens.reasoning, 250)
+  assert.equal(result.phaseTokens.output, 250)
+  assert.equal(result.phaseTokens.reasoning + result.phaseTokens.output, result.generatedTokens,
+    'the anchored phases still add up to the authoritative total')
+  assert.equal(result.reasoningTps, 250)
+  assert.equal(result.reasoningTpsQuality, MetricQuality.CALIBRATED,
+    'anchored to an exact total over complete measured timing, with an unmeasured division')
+  assert.equal(result.outputTps, 125, 'the same 250 allocated tokens over the 2000 ms output span')
+  assert.equal(result.outputTpsQuality, MetricQuality.CALIBRATED)
 })
 
 test('a single-delta attempt yields no rate rather than an infinite one', () => {
@@ -214,11 +244,17 @@ test('an interrupted turn still reports the throughput it was observed to reach'
   assert.equal(result.reasoningMs, 2000, 'observed generation time is real even without usage')
   assert.equal(result.ttftMs, 500, 'TTFT is defined for an interrupted turn too')
   assert.equal(result.generatedTokens, null, 'no usage means no exact total')
-  // Without authoritative usage no turn-level TPS is published, because the
-  // numerator would be a shape weight rather than a token count. The observed
-  // generation time and the shape sum are still exposed for diagnostics.
-  assert.equal(result.reasoningTps, null)
-  assert.equal(result.reasoningTpsQuality, MetricQuality.UNAVAILABLE)
+  /**
+   * The interrupted prefix is still real evidence. Without usage the published
+   * phase magnitude is the raw shape weight and the rate inherits `estimated`, so
+   * the card can show what the turn was reaching before it was stopped — always
+   * behind `≈`, never as an exact rate and never as a fabricated token count.
+   */
+  assert.equal(result.phaseTokens.reasoning, 6)
+  assert.equal(result.phaseTokens.output, null, 'the output phase has no evidence at all')
+  assert.equal(result.reasoningTps, 3, '6 shape tokens over the 2000 ms observed reasoning span')
+  assert.equal(result.reasoningTpsQuality, MetricQuality.CALIBRATED,
+    'the shape is anchored to a real observed span even with no provider counter')
   assert.ok(result.shapeTokens.reasoning > 0)
   assert.equal(result.shapeTokens.output, 0)
 })

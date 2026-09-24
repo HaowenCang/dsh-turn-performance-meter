@@ -90,8 +90,10 @@ This wait is not model generation time: it never enters the TPS denominator and 
 
 ### 3.6 Settled
 
-On the matching `turn/end` the live meter exits immediately (`settled` → hidden). The completed card is a later
-phase; no provisional summary is drawn here.
+On the matching `turn/end` the live meter hands the slot to the completed card **in the same state advance**: the next
+projection is the card, never a blank frame. The two views are mutually exclusive by construction — one projection
+function decides which of them exists — so a clock tick, a parent re-render or a late event can never show both or
+neither.
 
 ## 3A. Presentation throttling
 
@@ -100,21 +102,51 @@ acceptable). The projected view is *state*: parent re-renders reuse the stored v
 update cadence — is the only writer of visible numbers. Ticks are destroyed on hide, unmount and HMR; a hidden meter
 uses one coalesced zero-delay render per event burst. Deltas are never dropped to save renders.
 
+The ticker is a **live-view** resource. A completed card is static, so the ticker is stopped the moment the card
+appears and is never restarted for it: the card is projected once per incoming event and the projection is memoized by
+turn, so an unchanged settled turn returns the identical view object and React renders nothing. A settled session
+therefore holds no interval, no leading timer and no rolling value.
+
 ## 4. Completed default view
 
-Keep four principal columns with thin separators. Proposed content:
+Four principal columns with thin separators; the same four in the same order in every state, including `interrupted`
+and `errored`:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
 │ Reasoning TPS │ Output TPS │ Generated Tokens │ TTFT               │
 │ 345 token/s   │ 676 token/s│ 54,770           │ 1.44 s             │
-│ 108.2s·37,498 │ 25.4s·17,272│ elapsed 133.6s   │ tools 4 · 12.8s   │
+│ 108.2s·37,498 │ 25.4s·17,272│ elapsed 133.6s  │ completed          │
+├────────────────────────────────────────────────────────────────────┤
+│ tools 4 · 12.8s · attempts 4 · completed                           │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-Status (`completed`, `interrupted`, `errored`) can share the fourth-column secondary line if tool details move to a small detail affordance. Preserve four main columns; do not add a fifth permanent tool column.
+Implemented in Phase 4 and frozen here:
 
-`Generated Tokens` is preferred over `Total Tokens` when the number means provider output only. If product copy later uses `Total Tokens`, it must clearly mean generated/output total rather than prompt+output billing total.
+- the four columns are built by `src/client/ui-model.js::completedViewModel`, which is the **only** seam between the
+  settled snapshot and the card. The React layer renders fields; it performs no arithmetic, no quality inference and
+  no `≈` decision;
+- `Generated Tokens` is the provider output total for the turn (reasoning included, never `input + output`, never
+  `outputTokens + reasoningTokens`). The label is not `Total Tokens`;
+- each phase cell's secondary line is `<duration> · <tokens>`, and both halves of that line carry the *same*
+  approximate decision, because they are one derivation chain. The rate above the line keeps its own quality: a rate
+  can be unmeasurable while its numerator is an exact provider counter;
+- an absent value renders `—` with no unit; a `0 tokens/s` is never substituted for an unknown rate, and a measured
+  zero is never hidden;
+- the footer carries the tool summary using **`toolWallMs`** (the union of tool intervals, so parallel calls are not
+  double counted) and the attempt count. A turn with no tool call omits the tool item entirely rather than printing
+  `0 tools`. `toolWorkMs` stays in the view model for later detail surfaces;
+- the status is text: `completed` · `interrupted` · `errored` · `token limit reached` (a `max-tokens` settlement is a
+  completion with a ceiling, and says so). Failure states change the status text and its tone only — they never
+  recolour the metrics, because the card reports throughput, not an error;
+- the card is `role="group"` with a per-turn accessible name and per-cell accessible names built from label, value,
+  unit and secondary line. It has **no `aria-live` region**: a settled turn is not an announcement;
+- no chart, no hover behaviour, no `tabindex`, no interactive element. `view.curve` is carried for Phase 5 and is not
+  read by the Phase 4 render path.
+
+The card is a static projection of the settled record. It is never recomputed from raw events, and it does not rebuild
+itself on a timer.
 
 ## 5. Completed hover/focus curve view
 
@@ -150,11 +182,18 @@ The transition may use ~200–300 ms opacity/crossfade. Respect `prefers-reduced
 ## 7. Responsive behavior
 
 The live pill uses `width: 100%` / `max-width: content` inside a centered flex root — no fixed rem widths — and its
-inline-flex wrap allows the secondary value to drop to a second line before anything overflows. At narrow composer
-widths:
+inline-flex wrap allows the secondary value to drop to a second line before anything overflows.
+
+The completed card is a CSS grid: `repeat(4, minmax(0, 1fr))` at normal composer widths, collapsing to
+`repeat(2, minmax(0, 1fr))` below a single `34rem` breakpoint, where the separators are re-drawn as a top border on the
+second row and the outer padding is trimmed. `minmax(0, 1fr)` is what lets a cell shrink below its content width
+instead of forcing the row wider, so the card cannot overflow horizontally at any width and no column is ever crushed
+to unreadable. The breakpoint is expressed against the card's own container width, not against a browser width, and no
+fixed pixel width exists anywhere in the card. At narrow composer widths:
 
 - preserve readable primary values before secondary text;
-- allow secondary lines to truncate with title/accessible description if necessary;
+- allow secondary lines to truncate with an accessible description if necessary (they already carry the full text in
+  the cell's `aria-label`);
 - reduce chart right-side labels before collapsing main metrics;
 - never cause horizontal page overflow;
 - curve view may lower sample density but must not omit an entire series silently.
@@ -171,6 +210,43 @@ widths:
   high-frequency digits are ordinary text — so a screen reader is never read a new TPS five times a second;
 - `prefers-reduced-motion` disables the pill's only transition (verified in CSS).
 
+Phase 4 fixed the completed card's accessibility contract:
+
+- the root is `role="group"` with the accessible name `本轮性能统计 · 第 <turn> · <status>` (`Turn performance summary ·
+  turn <n> · <status>`), and it carries `data-kind`, `data-status`, `data-quality` and the turn/session as data
+  attributes for diagnostics;
+- each of the four cells is its own `role="group"` whose accessible name is `label, value unit, secondary line`
+  (for example `Reasoning TPS, ≈345 tokens/s, 108.2s · ≈37,498`), so the numbers are never announced unlabelled. The
+  visible text remains exactly the reference layout; the fuller phrase lives in the accessible name rather than in a
+  `title` tooltip;
+- the turn status is real text in both the status cell and the footer, so it does not depend on colour. Colour carries
+  a tone hint only (`data-tone="warn"` / `"error"` on the secondary line), and never repaints the card;
+- the card contains no interactive element and no `tabindex`, so there is nothing to focus in Phase 4; the Phase 5
+  curve must add a focus path of its own rather than relying on hover;
+- nothing in the card animates, so `prefers-reduced-motion` has nothing to disable here.
+
 ## 9. Localization
 
 Visible production strings must go through the DSH Client locale service or the locally verified equivalent. Required baseline locales: English and Simplified Chinese — implemented as the `turnPerformanceMeter` namespace (`ctx.locale.register(ns, {en, zh})` + `ctx.locale.bind(ns)`, with an in-module `en` fallback if the service is absent). Tool names, `tokens/s` and the `+N` count suffix are deliberately locale-independent. The debug scaffold string is temporary and must not survive production release — removed in Phase 3 together with the localStorage placeholder gate.
+
+Phase 4 extended the namespace with the card's strings; the frozen Chinese wording is:
+
+| Key | English | 中文 |
+|---|---|---|
+| `completedLabel` | Turn performance summary | 本轮性能统计 |
+| `colReasoningTps` | Reasoning TPS | 思考 TPS |
+| `colOutputTps` | Output TPS | 输出 TPS |
+| `colGeneratedTokens` | Generated Tokens | 生成 Tokens |
+| `colTtft` | TTFT | 首响应 |
+| `elapsed` | elapsed | 总用时 |
+| `tools` | tools | 工具 |
+| `attempts` | attempts | 模型调用 |
+| `status.completed` | completed | 已完成 |
+| `status.interrupted` | interrupted | 已中断 |
+| `status.errored` | errored | 出错 |
+| `status.max-tokens` | token limit reached | 达到 Token 上限 |
+| `unavailable` | unavailable | 不可用 |
+
+`≈` and `—` are locale-independent glyphs and are not translated; the status detail that follows a status word (for
+example `aborted:user`) is diagnostic metadata and stays in its recorded form. A missing key degrades to the key
+itself, never to `undefined`.

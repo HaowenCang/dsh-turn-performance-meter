@@ -1747,6 +1747,7 @@ function phaseShapeSum(samples, phase) {
  *
  * @param {{
  *   turn?: number|null,
+ *   sessionId?: string|null,
  *   turnStartMs?: number,
  *   turnEndMs?: number|null,
  *   firstTokenMs?: number|null,
@@ -1813,24 +1814,67 @@ function aggregateTurn(input = {}) {
   const reasoningMeasured = reasoningDurations.filter(ms => ms !== null && ms > 0).length
   const outputMeasured = outputDurations.filter(ms => ms !== null && ms > 0).length
 
-  // Per-attempt allocations summed across the turn. For an attempt with usage
-  // these are calibrated values anchored to the authoritative total; for an
-  // attempt without usage they are raw shape weights. Reported for diagnostics
-  // only — neither figure is a measured token count, so they never become a
-  // published TPS numerator.
-  const shapeTokens = reduced.reduce(
+  /**
+   * Per-attempt phase allocations summed across the turn. For an attempt with
+   * usage these are calibrated values anchored to the authoritative total, so
+   * their sum equals that total exactly; for an attempt without usage they are
+   * raw shape weights. They are the *only* per-phase token magnitudes this
+   * project has when the provider reports no `reasoningTokens`, and
+   * `calibrateAttemptSamples` already rescales them so each attempt's phases sum
+   * to that attempt's authoritative total — which is what makes an anchored
+   * division of a known total honest, and what makes the unanchored case read as
+   * `≈`. Rounding across many attempts can leave the sum a fraction off the
+   * total, so the output phase absorbs the residual; the reported pair therefore
+   * always adds up to the reported total.
+   */
+  const allocatedTokens = reduced.reduce(
     (sum, a) => ({
       reasoning: sum.reasoning + (a.reasoningTokens ?? a.shapeReasoning),
       output: sum.output + (a.outputTokens ?? a.shapeOutput),
     }),
     { reasoning: 0, output: 0 },
   )
+  const allocatedTotal = allocatedTokens.reasoning + allocatedTokens.output
+  /**
+   * The residual correction is applied **only** when an authoritative total
+   * exists to correct toward. Without one there is nothing to reconcile, and
+   * subtracting the allocation from a zero observed sum would manufacture a
+   * negative phase magnitude. Attempts that reported no usage contribute their
+   * raw shape weight instead, which is why the resulting phase pair is then a
+   * shape estimate rather than an anchored division.
+   */
+  const anchored = observedGeneratedTokens > 0
+  const shapeTokens = anchored ? {
+    reasoning: allocatedTokens.reasoning,
+    output: allocatedTokens.output + (observedGeneratedTokens - allocatedTotal),
+  } : allocatedTokens
 
-  const reasoningTps = observedReasoningTokens !== null && observedReasoningTokens > 0 && reasoningMs > 0
-    ? observedReasoningTokens * 1000 / reasoningMs
+  /**
+   * The per-phase totals the card publishes: the provider counters when the
+   * provider reported them, the anchored allocation otherwise. A phase with no
+   * evidence at all stays `null` and renders `—`; it is never shown as `0`.
+   */
+  const phaseTokens = splitComplete
+    ? { reasoning: observedReasoningTokens, output: observedNonReasoningTokens }
+    : {
+      reasoning: shapeTokens.reasoning > 0 ? shapeTokens.reasoning : null,
+      output: shapeTokens.output > 0 ? shapeTokens.output : null,
+    }
+  /** Whether those per-phase counters are measured, anchored, or absent. */
+  const phaseTokensQuality = splitComplete
+    ? MetricQuality.EXACT
+    : (usageComplete ? MetricQuality.ESTIMATED
+      : (withUsage.length > 0 ? MetricQuality.PARTIAL : MetricQuality.UNAVAILABLE))
+
+  // Phase rates divide whatever per-phase magnitude is published by the measured
+  // generation time of that phase. A rate whose numerator is not measured is
+  // reported at the quality of that numerator, so `≈` follows the number rather
+  // than the field name.
+  const reasoningTps = phaseTokens.reasoning !== null && phaseTokens.reasoning > 0 && reasoningMs > 0
+    ? phaseTokens.reasoning * 1000 / reasoningMs
     : null
-  const outputTps = observedNonReasoningTokens !== null && observedNonReasoningTokens > 0 && outputMs > 0
-    ? observedNonReasoningTokens * 1000 / outputMs
+  const outputTps = phaseTokens.output !== null && phaseTokens.output > 0 && outputMs > 0
+    ? phaseTokens.output * 1000 / outputMs
     : null
 
   const reasoningTokensReported = reduced.some(a => a.usage !== null && a.usage.reasoningTokens !== null)
@@ -1881,6 +1925,12 @@ function aggregateTurn(input = {}) {
 
   return {
     turn: input.turn ?? null,
+    /**
+     * Carried through rather than re-derived: the card states which session's turn
+     * it describes, and the aggregation layer is the last place that knows it
+     * before the view model is built.
+     */
+    sessionId: input.sessionId ?? null,
     status,
     turnStartMs: Number.isFinite(input.turnStartMs) ? input.turnStartMs : null,
     turnEndMs: Number.isFinite(input.turnEndMs) ? input.turnEndMs : null,
@@ -1901,6 +1951,13 @@ function aggregateTurn(input = {}) {
       : (withUsage.length > 0 ? MetricQuality.ESTIMATED : MetricQuality.UNAVAILABLE),
     reasoningTokens: observedReasoningTokens,
     nonReasoningTokens: observedNonReasoningTokens,
+    /**
+     * Per-phase token magnitudes actually fit to publish: the provider counters
+     * when it reported them, otherwise the anchored phase allocation of the
+     * authoritative total. `null` means "no evidence for this phase", never `0`.
+     */
+    phaseTokens,
+    phaseTokensQuality,
     splitQuality: splitConflict
       ? MetricQuality.ESTIMATED
       : (splitComplete
@@ -1925,7 +1982,7 @@ function aggregateTurn(input = {}) {
     reasoningMeasuredAttempts: reasoningMeasured,
     outputMs,
     outputMeasuredAttempts: outputMeasured,
-    /** Shape-weighted token sums; diagnostics only, never a published rate numerator. */
+    /** Shape-weighted token sums; their phase pair sums to the observed total. */
     shapeTokens,
 
     // Coverage / diagnostics.
@@ -2277,6 +2334,7 @@ class TurnTelemetryStore {
 
     const aggregate = aggregateTurn({
       turn: record.turn,
+      sessionId: record.sessionId,
       turnStartMs: record.startMs,
       turnEndMs: record.endMs,
       firstTokenMs: record.firstTokenMs,
@@ -4032,6 +4090,354 @@ class SessionEventFeed {
 
 ;Object.assign(__exports, { FEED_ISSUE, SessionEventFeed })
 			},
+			"src/client/format.js": function (__exports) {
+/**
+ * Display formatting.
+ *
+ * Two rules govern everything here:
+ *
+ *   1. Absent evidence renders as an em dash. A missing measurement must never
+ *      be shown as `0`, because that would claim a measured zero.
+ *   2. Quality is *not* baked into the string. Whether a value deserves a `≈`
+ *      prefix or a quality indicator is decided by the renderer from the
+ *      metric's declared quality, so the exactness claim has exactly one home.
+ */
+
+const DASH = '—'
+
+function formatSeconds(ms, digits = 1) {
+  if (!Number.isFinite(ms)) return DASH
+  return `${(ms / 1000).toFixed(digits)}s`
+}
+
+/** Running TTFT counter form: `2.80 s`. */
+function formatCountdown(ms, digits = 2) {
+  if (!Number.isFinite(ms)) return DASH
+  return `${(ms / 1000).toFixed(digits)} s`
+}
+
+/**
+ * Rate and magnitude display. Three-significant-figure behaviour without
+ * exponent notation at the low end, where token rates are most often read.
+ *
+ * The same function formats the card's TPS values and its token magnitudes,
+ * because both are "a number with a unit" and the specification freezes one
+ * formatter for the card rather than one per column. Counts of a thousand or more
+ * therefore keep locale grouping: `54,770` is the reference's number, and
+ * compacting it to `54770` would be a formatting accident rather than a layout
+ * decision. `formatTokens` remains the explicit integer formatter for secondary
+ * lines.
+ */
+function formatTps(value) {
+  if (!Number.isFinite(value)) return DASH
+  /**
+   * Round **before** choosing the precision band. `9.999` must read `10.0`, not
+   * `10.00`: picking the band from the unrounded value would print a
+   * two-decimal number for a value already past ten.
+   */
+  const rounded = Math.round(value * 100) / 100
+  if (rounded >= 1000) return formatTokens(rounded)
+  if (rounded >= 100) return Math.round(rounded).toString()
+  if (rounded >= 10) return rounded.toFixed(1)
+  return rounded.toFixed(2)
+}
+
+function formatTokens(value) {
+  if (!Number.isFinite(value)) return DASH
+  const rounded = Math.round(value)
+  // `-0` is a display artefact of rounding, not a magnitude: it must not reach
+  // the DOM as `-0`.
+  return (rounded === 0 ? 0 : rounded).toLocaleString('en-US')
+}
+
+/** Compact elapsed form used on secondary lines: `133.6s`, `2m42s`. */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return DASH
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const totalSeconds = Math.round(ms / 1000)
+  return `${Math.floor(totalSeconds / 60)}m${String(totalSeconds % 60).padStart(2, '0')}s`
+}
+
+
+
+;Object.assign(__exports, { DASH, formatSeconds, formatCountdown, formatTps, formatTokens, formatDuration })
+			},
+			"src/client/ui-model.js": function (__exports) {
+/**
+ * Pure view-model shaping.
+ *
+ * Keeping this layer pure means the component tree contains no statistics and no
+ * transport knowledge, so screenshots and component tests are independent of
+ * DSH. The inputs are the snapshots produced by `src/core/live-metrics.js` and
+ * the settled turn record from `src/host/telemetry-design.js`.
+ *
+ * The completed half of this module is the **only** seam between the settled
+ * snapshot and the completed card: quality, approximate markers, em-dash
+ * fallbacks and every displayed string are decided here, so the React component
+ * renders fields instead of interpreting statistics.
+ */
+
+const { MetricQuality, weakestQuality } = __req("src/core/metric-quality.js")
+const { QualityLevel, requiresApproximateMarker } = __req("src/core/quality-model.js")
+const { formatSeconds, formatTps, formatTokens, DASH } = __req("src/client/format.js")
+
+/** Shared shape for a value that may legitimately be absent. */
+function value(value, quality) {
+  return { value: value ?? null, quality: quality ?? MetricQuality.UNAVAILABLE, available: value !== null && value !== undefined }
+}
+
+/**
+ * Live branch selection. `idle` and `settled` both render nothing here: an idle
+ * meter has no turn, and a settled turn belongs to the completed card.
+ */
+function liveViewModel(snapshot) {
+  if (!snapshot || snapshot.phase === 'idle' || snapshot.phase === 'settled') return { kind: 'hidden' }
+
+  if (snapshot.phase === 'tool') {
+    return {
+      kind: 'tool',
+      turn: snapshot.turn,
+      runningToolCount: snapshot.runningToolCount ?? 0,
+      runningToolNames: snapshot.runningToolNames ?? [],
+      /** The compact label prefers a single tool name and falls back to a count. */
+      label: (snapshot.runningToolCount ?? 0) === 1
+        ? (snapshot.runningToolNames?.[0] ?? 'tool')
+        : `Tools ${snapshot.runningToolCount ?? 0}`,
+      toolElapsed: value(snapshot.toolElapsedMs ?? null, MetricQuality.EXACT),
+      turnElapsed: value(snapshot.turnElapsedMs ?? null, MetricQuality.EXACT),
+    }
+  }
+
+  if (snapshot.phase === 'streaming') {
+    return {
+      kind: 'streaming',
+      turn: snapshot.turn,
+      activePhase: snapshot.activePhase ?? null,
+      /**
+       * Live TPS is a shape estimate until provider usage arrives after
+       * settlement, so it is never presented as exact.
+       */
+      tps: value(snapshot.tps ?? null, snapshot.tpsQuality ?? MetricQuality.ESTIMATED),
+      turnElapsed: value(snapshot.turnElapsedMs ?? null, MetricQuality.EXACT),
+    }
+  }
+
+  // Pending: turn open, no generated delta yet. The UI shows the TTFT counter.
+  return {
+    kind: 'ttft',
+    turn: snapshot.turn,
+    /** Running counter: the final TTFT is not known until the first delta lands. */
+    ttft: value(snapshot.ttftMs ?? null, snapshot.ttftMs === null ? MetricQuality.ESTIMATED : MetricQuality.EXACT),
+    turnElapsed: value(snapshot.turnElapsedMs ?? null, MetricQuality.EXACT),
+  }
+}
+
+/**
+ * Turn status as the card must present it.
+ *
+ * `status` is the settlement outcome derived from `turn/end`; `statusNote`
+ * carries the finer fact (why it was aborted, which ceiling truncated it). The
+ * truncated case is its own presentation kind because "completed" alone would
+ * hide that the model stopped at a token ceiling.
+ */
+function completedStatusOf(status, statusNote) {
+  if (status === 'interrupted') return { kind: 'interrupted', detail: statusNote ?? null, tone: 'warn' }
+  if (status === 'errored') return { kind: 'errored', detail: statusNote ?? null, tone: 'error' }
+  if (statusNote === 'max-tokens') return { kind: 'max-tokens', detail: null, tone: 'warn' }
+  return { kind: 'completed', detail: statusNote ?? null, tone: 'neutral' }
+}
+
+/**
+ * Duration on a secondary line.
+ *
+ * The completed card uses the reference's one-decimal **second** scale at every
+ * magnitude (`108.2s`, `133.6s`), because these lines are read against the
+ * reference layout and against each other; the shared `formatDuration` helper's
+ * minute form stays the live pill's format, where a running turn can be read for
+ * hours and compactness matters more than comparison.
+ */
+function durationText(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return DASH
+  return formatSeconds(ms, 1)
+}
+
+/**
+ * A duration paired with a token count on one secondary line.
+ *
+ * The two halves are one derivation chain, so they share one approximate
+ * decision: a token count that is not measured may never be printed bare next to
+ * a rate that carries `≈`. A phase with no tokens and no duration is omitted
+ * rather than printed as a zero.
+ */
+function phaseSecondary(durationMs, tokens, approximateTokens) {
+  const parts = []
+  const hasDuration = Number.isFinite(durationMs) && durationMs > 0
+  const hasTokens = tokens !== null && tokens !== undefined
+  if (hasDuration) parts.push(durationText(durationMs))
+  if (hasTokens) parts.push(`${approximateTokens ? '≈' : ''}${formatTokens(tokens)}`)
+  else if (hasDuration) parts.push(DASH)
+  return parts.length === 0 ? null : { kind: 'phase', text: parts.join(' · '), approximate: approximateTokens === true }
+}
+
+/**
+ * One of the four principal columns.
+ *
+ * `display` is resolved here rather than in the component, and `format` lets a
+ * column state its own unit convention: token magnitudes read through
+ * three-significant-figure formatting (`345`, `54,770`), while a duration in
+ * seconds is always two decimals (`1.44`), so a 1440 ms TTFT can never be
+ * printed as the token-like `1,440`.
+ */
+function metricCell({ key, labelKey, value: metricValue, unit = null, secondary = null, approximate = false, format = formatTps }) {
+  const available = metricValue.value !== null && metricValue.value !== undefined
+  return {
+    key,
+    labelKey,
+    value: metricValue.value,
+    display: available ? (approximate ? `≈${format(metricValue.value)}` : format(metricValue.value)) : DASH,
+    unit: available ? unit : null,
+    quality: metricValue.quality,
+    approximate: approximate && available,
+    available,
+    secondary,
+  }
+}
+
+/**
+ * Completed card view model.
+ *
+ * Four principal columns are fixed by the UI specification and always present in
+ * the same order; tool statistics stay on the footer line and never become a
+ * fifth column. Display quality follows the settled snapshot's three-axis model:
+ *
+ *   - `tokenTotalQuality === exact`  -> a bare generated-token total;
+ *   - anything weaker                -> `≈` on the number it qualifies;
+ *   - `phaseSplitQuality === exact`   -> bare reasoning/output rates and counts;
+ *   - `unavailable`                  -> `—`, never `0`.
+ */
+function completedViewModel(settled) {
+  if (!settled || !['completed', 'interrupted', 'errored'].includes(settled.status)) return null
+
+  const quality = settled.quality ?? {}
+  const tokenTotalExact = quality.tokenTotalQuality === QualityLevel.EXACT
+  const phaseSplitExact = quality.phaseSplitQuality === QualityLevel.EXACT
+
+  /**
+   * A partial total has a real observed sum but no complete evidence: publishing
+   * the exact figure would claim coverage the turn does not have, so the partial
+   * sum is shown with `≈` and the field is explicitly marked partial.
+   */
+  /**
+   * A partial or recovered total has a real sum but no complete evidence:
+   * publishing it bare would claim coverage the turn does not have, and `0` is
+   * never a substitute for "not measured", so only a genuine observed sum is
+   * published and it is always marked approximate.
+   */
+  const observed = Number.isFinite(settled.observedGeneratedTokens) ? settled.observedGeneratedTokens : 0
+  const generatedValue = Number.isFinite(settled.generatedTokens)
+    ? settled.generatedTokens
+    : (observed > 0 ? observed : null)
+  /** Only a fully authoritative total may be printed without `≈`. */
+  const generatedApproximate = !tokenTotalExact
+
+  const tools = settled.tools ?? {}
+  const status = completedStatusOf(settled.status, settled.statusNote)
+  const phaseTokens = settled.phaseTokens ?? { reasoning: null, output: null }
+  /** Counters derived from the provider split are exact; everything else is not. */
+  const phaseCountsApproximate = !phaseSplitExact
+
+  const columns = [
+    metricCell({
+      key: 'reasoningTps',
+      labelKey: 'colReasoningTps',
+      unit: 'tokens/s',
+      value: value(settled.reasoningTps ?? null, settled.reasoningTpsQuality),
+      approximate: requiresApproximateMarker(settled.reasoningTpsQuality),
+      secondary: phaseSecondary(settled.reasoningMs, phaseTokens.reasoning, phaseCountsApproximate),
+    }),
+    metricCell({
+      key: 'outputTps',
+      labelKey: 'colOutputTps',
+      unit: 'tokens/s',
+      value: value(settled.outputTps ?? null, settled.outputTpsQuality),
+      approximate: requiresApproximateMarker(settled.outputTpsQuality),
+      secondary: phaseSecondary(settled.outputMs, phaseTokens.output, phaseCountsApproximate),
+    }),
+    metricCell({
+      key: 'generatedTokens',
+      labelKey: 'colGeneratedTokens',
+      unit: 'tokens',
+      value: value(generatedValue, quality.tokenTotalQuality ?? MetricQuality.UNAVAILABLE),
+      approximate: generatedApproximate,
+      secondary: Number.isFinite(settled.turnElapsedMs)
+        ? { kind: 'elapsed', labelKey: 'elapsed', ms: settled.turnElapsedMs, display: durationText(settled.turnElapsedMs) }
+        : null,
+    }),
+    metricCell({
+      key: 'ttft',
+      labelKey: 'colTtft',
+      unit: 's',
+      value: value(settled.ttftMs ?? null, MetricQuality.EXACT),
+      /** Bare two-decimal seconds; the `s` unit is rendered by the column. */
+      format: milliseconds => Number.isFinite(milliseconds) ? (milliseconds / 1000).toFixed(2) : DASH,
+      secondary: { kind: 'status', statusKey: `status.${status.kind}`, detail: status.detail, tone: status.tone },
+    }),
+  ]
+
+  return {
+    kind: 'completed',
+    /**
+     * The live state machine's terminal state. Both views expose `state` so the
+     * projection identity used by the controller's cache is uniform across them.
+     */
+    state: 'settled',
+    sessionId: settled.sessionId ?? null,
+    turn: settled.turn,
+    /** Turn identity for the projection cache: one string per settled view. */
+    projectionKey: `completed:${settled.sessionId ?? ''}:${settled.turn ?? ''}`,
+    status: status.kind,
+    statusDetail: settled.statusNote ?? null,
+    columns,
+    elapsedMs: Number.isFinite(settled.turnElapsedMs) ? settled.turnElapsedMs : null,
+    elapsedDisplay: durationText(settled.turnElapsedMs),
+    tools: {
+      count: tools.count ?? 0,
+      completedCount: tools.completedCount ?? 0,
+      wallMs: tools.wallMs ?? 0,
+      wallDisplay: durationText(tools.wallMs ?? 0),
+      workMs: tools.workMs ?? 0,
+      workDisplay: durationText(tools.workMs ?? 0),
+      failedCount: tools.failedCount ?? 0,
+      names: tools.names ?? [],
+    },
+    attemptCount: settled.attemptCount ?? 0,
+    quality: {
+      tokenTotalQuality: quality.tokenTotalQuality ?? QualityLevel.UNAVAILABLE,
+      phaseSplitQuality: quality.phaseSplitQuality ?? QualityLevel.UNAVAILABLE,
+      displayTokenTotal: quality.displayTokenTotal ?? 'unavailable',
+      displayPhaseSplit: quality.displayPhaseSplit ?? 'unavailable',
+      /** Weakest axis: what a single `data-quality` attribute may say. */
+      overall: weakestQuality(
+        quality.tokenTotalQuality === QualityLevel.EXACT ? MetricQuality.EXACT : MetricQuality.ESTIMATED,
+        quality.phaseSplitQuality === QualityLevel.EXACT ? MetricQuality.EXACT : MetricQuality.ESTIMATED,
+      ),
+    },
+    /**
+     * Provider/stream contradictions observed while aggregating. Never printed in
+     * the production card (the quality downgrade already reaches the numbers); it
+     * travels for diagnostics and for Phase 8's settings surface.
+     */
+    consistencyIssues: Array.isArray(settled.consistencyIssues) ? settled.consistencyIssues : [],
+    /**
+     * Retained for Phase 5's hover/focus curve view. Phase 4 renders no chart and
+     * the component must not read this field.
+     */
+    curve: settled.curve ?? null,
+  }
+}
+
+;Object.assign(__exports, { liveViewModel, completedStatusOf, completedViewModel })
+			},
 			"src/client/live/live-state.js": function (__exports) {
 /**
  * The explicit live-UI state machine.
@@ -4238,6 +4644,7 @@ function reduceLiveUi(machine, event) {
  */
 
 const { MetricQuality, requiresApproximateMarker } = __req("src/core/quality-model.js")
+const { completedViewModel } = __req("src/client/ui-model.js")
 const { LiveUiState, initialLiveUi, reduceLiveUi } = __req("src/client/live/live-state.js")
 
 const HIDDEN_STATES = new Set([LiveUiState.INACTIVE, LiveUiState.SETTLED])
@@ -4257,12 +4664,28 @@ class LivePresenter {
   /**
    * Project the current presentation model.
    *
-   * @param {{sessionId?: string}} unused reserved for future per-session keys
+   * Precedence is frozen: an open turn always wins over a settled one, so a new
+   * `turn/start` removes the previous card in the same state advance that opens
+   * the new turn.
+   *
    * @param {object|null} snapshot `LiveMeter.snapshot(nowMs)` output
    * @param {number} nowMs presentation instant (wall clock)
+   * @param {object|null} [settled] this session's latest settled snapshot
    */
-  project(snapshot, nowMs) {
+  project(snapshot, nowMs, settled = null) {
     const machine = this.machine
+
+    /**
+     * Completed branch. It is reached from `settled`, never from the meter: the
+     * card is a static projection of the settled turn record, and the settled
+     * *machine* (not merely a settled meter) is what proves the turn this session
+     * most recently observed has ended. A session whose machine is still
+     * `inactive` has no card to show.
+     */
+    if (machine.state === LiveUiState.SETTLED) {
+      return completedViewModel(settled) ?? hidden(machine)
+    }
+
     if (HIDDEN_STATES.has(machine.state)) return hidden(machine)
     if (!snapshot || snapshot.phase === 'idle' || snapshot.phase === 'settled') return hidden(machine)
 
@@ -4370,12 +4793,46 @@ function stageWait(machine, nowMs) {
 
 const { TurnTelemetryStore } = __req("src/host/telemetry-design.js")
 const { turnKey } = __req("src/core/types.js")
-const { NORMALIZED_KIND, applyRetryOutcomes } = __req("src/dsh/index.js")
+const { NORMALIZED_KIND, applyRetryOutcomes, attemptFromDecoded } = __req("src/dsh/index.js")
 const { SessionEventFeed } = __req("src/dsh/client-feed.js")
 const { LivePresenter } = __req("src/client/live/live-presenter.js")
 
 /** Presentation refresh cadence: 200 ms == at most ~5 rendered updates/s. */
 const DEFAULT_REFRESH_MS = 200
+
+/**
+ * Identity of a projected view: equal keys mean the picture is unchanged.
+ *
+ * The point of the key is the completed card. A settled turn's projection depends
+ * on nothing that ticks, so its key is constant and the card is built exactly once
+ * per settled turn even though events keep arriving. Every live field that can
+ * change the rendering is enumerated, and anything not enumerated (per-delta
+ * counters, sample arrays) deliberately cannot change a live value on its own —
+ * the live view is a one-second window plus a wall clock, both of which are in
+ * the key.
+ */
+function projectionKey(state, snapshot, atMs) {
+  const machine = state.presenter.machine
+  const phase = snapshot?.phase ?? 'none'
+  if (machine.state === 'settled') return `settled:${machine.turn ?? ''}`
+  const clock = Number.isFinite(atMs) ? atMs : 0
+  /**
+   * `turnElapsedMs` is in the key because every live view prints a running
+   * elapsed value; a settled view prints none, which is why its key omits the
+   * clock entirely and stays stable while deltas keep arriving.
+   */
+  return [
+    machine.state,
+    machine.turn ?? '',
+    phase,
+    Number.isFinite(snapshot?.turnElapsedMs) ? snapshot.turnElapsedMs : '',
+    phase === 'streaming' ? Math.round(snapshot.tps ?? 0) : '',
+    phase === 'tool' ? snapshot.runningToolCount ?? 0 : '',
+    phase === 'tool' ? Math.round(snapshot.toolElapsedMs ?? 0) : '',
+    machine.sinceMs ?? '',
+    clock,
+  ].join('|')
+}
 
 /**
  * @param {{
@@ -4414,6 +4871,12 @@ function createController({
     return state.currentRecord
   }
 
+  /** Drop whatever the last projection cached, including its settled-turn read. */
+  function invalidate(state) {
+    state.viewCache = undefined
+    state.settledRead = undefined
+  }
+
   function applyEvent(state, event) {
     const sessionId = state.sessionId
     switch (event.kind) {
@@ -4425,12 +4888,15 @@ function createController({
         state.presenter.apply({ type: 'reset' })
         state.currentRecord = null
         state.openAttemptId = null
+        invalidate(state)
         return
       }
 
       case NORMALIZED_KIND.TURN_START: {
         state.currentRecord = store.beginTurn({ sessionId, turn: event.turn, timeMs: event.timeMs })
         state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs })
+        /** A new turn supersedes the previous card in this same advance. */
+        state.settledRead = undefined
         log('turn open', sessionId, event.turn)
         return
       }
@@ -4494,7 +4960,21 @@ function createController({
 
       case NORMALIZED_KIND.ATTEMPT_SETTLE: {
         const record = lookupRecord(state, event.turn)
-        const attemptId = event.attemptId ?? state.openAttemptId
+        let attemptId = event.attemptId ?? state.openAttemptId
+        /**
+         * A durable settlement arriving as a plain event carries no `attemptId`,
+         * so it is correlated to the one attempt of its `(turn, step)` that has
+         * not settled yet. The correlation demands a *unique* candidate: if two
+         * unsettled attempts share the step, the settlement belongs to neither
+         * provably, and the durable record is restored as its own attempt instead
+         * of being attached to a guess.
+         */
+        if ((attemptId === null || attemptId === undefined) && record !== null && Number.isFinite(event.step)) {
+          const open = record.attempts.filter(candidate => (
+            candidate.settlementKind === 'none' && candidate.step === event.step
+          ))
+          if (open.length === 1) attemptId = open[0].attemptId
+        }
         if (record !== null && attemptId !== null && attemptId !== undefined) {
           const attempt = record.attemptIndex.get(attemptId)
           if (attempt !== undefined) {
@@ -4508,6 +4988,48 @@ function createController({
               settlementSeq: event.seq,
             })
           }
+        } else if (record !== null && event.decoded !== undefined) {
+          /**
+           * Durable-only settlement: the window carries the settlement (and its
+           * embedded compact stream), but the attempt's transient rows are gone —
+           * the reload case. The durable record is the complete evidence for that
+           * attempt, so it is restored from the decode rather than dropped: a
+           * refresh must be able to show the last completed turn without ever
+           * having observed it live. Nothing is invented here — the attempt's
+           * samples, usage and settlement metadata all come from the durable row.
+           */
+          const restored = attemptFromDecoded({
+            attemptId: `durable:${event.seq ?? record.attempts.length}`,
+            turn: record.turn,
+            step: event.step ?? null,
+            decoded: event.decoded,
+            usage: event.usage ?? null,
+            usageSource: event.usageSource ?? null,
+            settlementKind: event.settlementKind,
+            surfaceCommitted: event.surfaceCommitted,
+            attemptOutcome: event.attemptOutcome,
+            settledAtMs: event.timeMs,
+            settlementSeq: event.seq,
+            settlementEventType: event.eventType ?? null,
+            interrupted: event.interrupted === true,
+            issues: event.issues ?? [],
+          })
+          record.attempts.push(restored)
+          record.attemptIndex.set(restored.attemptId, restored)
+          /**
+           * The turn TTFT is `turn/start -> first non-empty model-producing
+           * delta`, and a restored attempt brings that delta with it. Taking the
+           * earliest sample timestamp here is what lets a card rebuilt after a
+           * reload report the same TTFT the live session froze, instead of `—`.
+           */
+          for (const sample of restored.samples) {
+            if (!Number.isFinite(sample.timeMs)) continue
+            record.firstTokenMs = record.firstTokenMs === null
+              ? sample.timeMs
+              : Math.min(record.firstTokenMs, sample.timeMs)
+          }
+          state.durableAttempts = (state.durableAttempts ?? 0) + 1
+          log('durable attempt restored', sessionId, restored.attemptId, restored.samples.length)
         }
         if (state.openAttemptId === attemptId) state.openAttemptId = null
         state.presenter.apply({
@@ -4590,6 +5112,13 @@ function createController({
         state.currentRecord = null
         state.openAttemptId = null
         state.presenter.apply({ type: 'turn-end', turn: event.turn, timeMs: event.timeMs, status: event.status })
+        /**
+         * The settled turn is now readable. Both the settled snapshot and the
+         * settled machine are in place before the projection is invalidated, so
+         * the very next `project()` returns the completed card — never `null`
+         * followed by a card one tick later.
+         */
+        invalidate(state)
         log('turn close', sessionId, event.turn, event.status)
         if (Array.isArray(settled?.consistencyIssues) && settled.consistencyIssues.length > 0) {
           log('quality downgrade', ...settled.consistencyIssues)
@@ -4679,13 +5208,44 @@ function createController({
       return () => listeners.delete(listener)
     },
 
-    /** The current presentation model for one session (hidden when unknown). */
+    /**
+     * The current presentation model for one session.
+     *
+     * Precedence, frozen in Phase 4: an open turn wins over a settled one. The
+     * completed card and the live meter are never both available, so the switch
+     * is a single state advance:
+     *
+     *   - a settled machine projects the latest settled turn (the card);
+     *   - a `turn/end` therefore replaces the pill with the card in the same
+     *     publish — there is no intermediate "nothing" frame;
+     *   - a following `turn/start` replaces the card with the pill in the same
+     *     publish — the old card never lingers beside a new turn.
+     *
+     * The result is memoized per `(session, projection identity)`: while nothing
+     * that can change the picture has changed, the same object is returned, so a
+     * static card cannot be rebuilt once per ingested delta. The identity of a
+     * completed card is its turn, which is exactly the rule "one card per settled
+     * turn".
+     */
     project(sessionId, atMs = nowMs()) {
-      if (disposed || typeof sessionId !== 'string' || !sessionsMap.has(sessionId)) {
+      const state = sessionsMap.get(sessionId)
+      if (disposed || typeof sessionId !== 'string' || state === undefined) {
         return { kind: 'hidden', state: 'inactive', turn: null }
       }
+      /**
+       * The settled turn is read as evidence, once per session state object, in
+       * the same synchronous step that reads the meter — which is what makes the
+       * live/completed handover atomic rather than a two-tick sequence.
+       */
+      if (state.settledRead === undefined) state.settledRead = store.latestSettled(sessionId)
       const snapshot = store.liveSnapshot(sessionId, atMs)
-      return sessionsMap.get(sessionId).presenter.project(snapshot, atMs)
+      const key = projectionKey(state, snapshot, atMs)
+      const cached = state.viewCache
+      if (cached !== undefined && cached.key === key && cached.sessionId === sessionId) return cached.view
+
+      const view = state.presenter.project(snapshot, atMs, state.settledRead)
+      state.viewCache = { key, sessionId, view }
+      return view
     },
 
     /** Diagnostics for tests and debug tooling. */
@@ -4831,60 +5391,6 @@ function createPresentationScheduler({
 
 ;Object.assign(__exports, { createPresentationScheduler })
 			},
-			"src/client/format.js": function (__exports) {
-/**
- * Display formatting.
- *
- * Two rules govern everything here:
- *
- *   1. Absent evidence renders as an em dash. A missing measurement must never
- *      be shown as `0`, because that would claim a measured zero.
- *   2. Quality is *not* baked into the string. Whether a value deserves a `≈`
- *      prefix or a quality indicator is decided by the renderer from the
- *      metric's declared quality, so the exactness claim has exactly one home.
- */
-
-const DASH = '—'
-
-function formatSeconds(ms, digits = 1) {
-  if (!Number.isFinite(ms)) return DASH
-  return `${(ms / 1000).toFixed(digits)}s`
-}
-
-/** Running TTFT counter form: `2.80 s`. */
-function formatCountdown(ms, digits = 2) {
-  if (!Number.isFinite(ms)) return DASH
-  return `${(ms / 1000).toFixed(digits)} s`
-}
-
-/**
- * TPS display. Three-significant-figure behaviour without exponent notation at
- * the low end, where token rates are most often read.
- */
-function formatTps(value) {
-  if (!Number.isFinite(value)) return DASH
-  if (value >= 100) return Math.round(value).toString()
-  if (value >= 10) return value.toFixed(1)
-  return value.toFixed(2)
-}
-
-function formatTokens(value) {
-  if (!Number.isFinite(value)) return DASH
-  return Math.round(value).toLocaleString('en-US')
-}
-
-/** Compact elapsed form used on secondary lines: `133.6s`, `2m42s`. */
-function formatDuration(ms) {
-  if (!Number.isFinite(ms) || ms < 0) return DASH
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  const totalSeconds = Math.round(ms / 1000)
-  return `${Math.floor(totalSeconds / 60)}m${String(totalSeconds % 60).padStart(2, '0')}s`
-}
-
-
-
-;Object.assign(__exports, { DASH, formatSeconds, formatCountdown, formatTps, formatTokens, formatDuration })
-			},
 			"src/client/live/live-format.js": function (__exports) {
 /**
  * Live-view formatting.
@@ -4939,7 +5445,9 @@ function truncateToolName(name, max = 20) {
  */
 function formatToolLabel(names, count) {
   const list = Array.isArray(names) ? names.filter(name => typeof name === 'string' && name.length > 0) : []
-  const total = Number.isFinite(count) && count > 0 ? count : list.length
+  // A count is a number of calls: it is rounded before use so a fractional input
+  // can never render as `+1.7000000000000002`.
+  const total = Number.isFinite(count) && count > 0 ? Math.round(count) : list.length
   if (total <= 0) return DASH
   if (total === 1) return truncateToolName(list[0] ?? DASH)
   const first = list.length > 0 ? `${truncateToolName(list[0])} ` : ''
@@ -4949,6 +5457,269 @@ function formatToolLabel(names, count) {
 
 
 ;Object.assign(__exports, { DASH, formatTps, formatApproxTps, formatElapsed, formatStopwatch, truncateToolName, formatToolLabel })
+			},
+			"src/client/live/LiveMeter.js": function (__exports) {
+/**
+ * Live meter pill (browser only — this module imports `react`, so Node tests must
+ * not import it directly; `test/client-bundle.test.js` loads it through the built
+ * bundle with a stubbed module table).
+ *
+ * Rendering contract:
+ *
+ *   - the component receives a finished view model from `LivePresenter` and
+ *     formats strings; it never parses events, never computes TPS/TTFT/tool
+ *     time, and never touches raw `SessionEvent` shapes;
+ *   - presentation lifecycle — the single 200 ms ticker, the session
+ *     subscription and the reference-counted style tag — belongs to
+ *     `MeterRoot.js`, which chooses between this pill and the completed card;
+ *   - high-frequency numbers are plain text: NO `aria-live` region, so a screen
+ *     reader is never read a new TPS five times a second. The root carries a
+ *     per-state `aria-label` and `data-state` instead.
+ */
+
+const { createElement: h } = __ext("react")
+const { formatApproxTps, formatElapsed, formatStopwatch, formatToolLabel } = __req("src/client/live/live-format.js")
+
+/**
+ * Debug counters (always cheap increments; read only via the debug handle).
+ * They exist because the browser is the only place where the full chain
+ * controller-notify -> scheduler -> setView -> DOM can be observed together.
+ */
+const diagnostics = {
+  schedulerCreated: 0,
+  notifyCalls: 0,
+  renderCalls: 0,
+  refreshCalls: 0,
+  currentScheduler: null,
+}
+
+function meterDiagnostics() {
+  return diagnostics
+}
+
+/** Accessibility name per presentation state — transitions, not digits. */
+function stateLabelKey(view) {
+  switch (view.kind) {
+    case 'ttft': return 'ttft'
+    case 'streaming': return view.phase === 'reasoning' ? 'thinking' : 'output'
+    case 'tool': return 'tool'
+    case 'waiting': return 'waiting'
+    case 'transition': return 'transition'
+    default: return 'meterLabel'
+  }
+}
+
+function pillContent(view, label) {
+  switch (view.kind) {
+    case 'ttft':
+      return [
+        h('span', { key: 'c', className: 'dsh-tpm-lead' }, formatStopwatch(view.counterMs ?? 0)),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
+      ]
+
+    case 'streaming':
+      return [
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
+        h('span', { key: 't', className: 'dsh-tpm-tps' }, formatApproxTps(view.tps, view.approximate)),
+        h('span', { key: 'u', className: 'dsh-tpm-unit' }, 'tokens/s'),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    case 'tool':
+      return [
+        h('span', { key: 'n', className: 'dsh-tpm-tool' }, formatToolLabel(view.names, view.count)),
+        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatElapsed(view.toolElapsedMs ?? 0)}`),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    case 'waiting':
+      return [
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
+        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatStopwatch(view.waitMs ?? 0)}`),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    case 'transition':
+      return [
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, `${label}…`),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    default:
+      return null
+  }
+}
+
+/**
+ * The live pill for one projected view.
+ *
+ * @param {{view: object, translate: (key: string) => string}} props
+ */
+function LivePill({ view, translate }) {
+  const t = typeof translate === 'function' ? translate : (key => key)
+  const label = t(stateLabelKey(view))
+  const ariaLabel = `${label} · ${formatElapsed(view.elapsedMs ?? 0)}`
+  return h('div', {
+    className: 'dsh-tpm-root',
+    'data-state': view.state,
+    'data-turn': view.turn ?? '',
+    'aria-label': ariaLabel,
+  }, h('div', { className: 'dsh-tpm-pill' }, pillContent(view, label)))
+}
+
+;Object.assign(__exports, { meterDiagnostics, LivePill })
+			},
+			"src/client/completed/completed-tree.js": function (__exports) {
+/**
+ * Completed-card element tree — pure, React-free.
+ *
+ * The card's structure, its visible strings, its accessible names and the
+ * decision to hide an item (a turn with no tool call, a phase with no secondary
+ * line) are all decided here. `CompletedMeter.js` is the two-line React binding
+ * over this module, which keeps the render layer thin and lets the tree be tested
+ * in Node with a recording `createElement` rather than a DOM.
+ *
+ * The tree never consults `view.curve`: Phase 5 owns the chart view, and Phase 4
+ * must not be able to draw one by accident.
+ */
+
+/** Visible secondary text for one column, resolved from locale keys. */
+function secondaryText(secondary, translate) {
+  if (secondary === null || secondary === undefined) return null
+  if (secondary.kind === 'phase') return secondary.text
+  if (secondary.kind === 'elapsed') return `${translate(secondary.labelKey)} ${secondary.display}`
+  if (secondary.kind === 'status') {
+    /** `statusKey` already names the locale key (`status.completed`). */
+    const status = translate(secondary.statusKey)
+    return secondary.detail === null || secondary.detail === undefined ? status : `${status} · ${secondary.detail}`
+  }
+  return null
+}
+
+/**
+ * One principal column.
+ *
+ * The accessible name is built from the visible label, value and secondary line,
+ * so the four numbers are never announced as four unlabelled figures. The visible
+ * text stays exactly the design; the fuller phrase lives in the accessible name,
+ * which is also why the card needs no `title` attribute or tooltip.
+ */
+function metricCellTree(createElement, { cell, translate }) {
+  const label = translate(cell.labelKey)
+  const unit = cell.unit
+  const secondary = secondaryText(cell.secondary, translate)
+  const ariaLabel = [
+    label,
+    cell.available ? `${cell.display}${unit === null ? '' : ` ${unit}`}` : translate('unavailable'),
+    secondary,
+  ].filter(part => part !== null && part !== undefined && part !== '').join(', ')
+
+  return createElement('div', {
+    className: 'dsh-tpm-cell',
+    'data-metric': cell.key,
+    'data-quality': cell.quality,
+    'data-approximate': cell.approximate ? 'true' : 'false',
+    role: 'group',
+    'aria-label': ariaLabel,
+  }, [
+    createElement('div', { key: 'label', className: 'dsh-tpm-cell-label' }, label),
+    createElement('div', { key: 'value', className: 'dsh-tpm-cell-value' }, [
+      createElement('span', { key: 'number', className: 'dsh-tpm-cell-number' }, cell.display),
+      unit === null ? null : createElement('span', { key: 'unit', className: 'dsh-tpm-cell-unit' }, unit),
+    ]),
+    secondary === null
+      ? null
+      : createElement('div', {
+        key: 'sub',
+        className: 'dsh-tpm-cell-sub',
+        'data-tone': cell.secondary.tone ?? 'neutral',
+      }, secondary),
+  ])
+}
+
+/**
+ * The whole card.
+ *
+ * @param {(tag: string, props: object, children?: unknown) => object} createElement
+ * @param {object} view `completedViewModel` output
+ * @param {(key: string) => string} translate
+ */
+function completedTree(createElement, view, translate) {
+  const t = typeof translate === 'function' ? translate : (key => key)
+  const tools = view.tools ?? { count: 0, wallDisplay: '' }
+  const statusText = t(`status.${view.status}`)
+
+  /**
+   * Footer items. Tools lead because they are the only footer fact that can be
+   * absent: a turn with no tool call hides the tool item entirely rather than
+   * printing "0 tools", and the separator is a CSS pseudo-element so the line
+   * never starts or ends with a bullet.
+   */
+  const footer = []
+  if (tools.count > 0) footer.push(`${t('tools')} ${tools.count} · ${tools.wallDisplay}`)
+  if (view.attemptCount > 0) footer.push(`${t('attempts')} ${view.attemptCount}`)
+  footer.push(statusText)
+
+  return createElement('div', {
+    className: 'dsh-tpm-root',
+    'data-kind': 'completed',
+    'data-status': view.status,
+    'data-quality': view.quality?.overall ?? 'unavailable',
+    role: 'group',
+    'aria-label': `${t('completedLabel')} · ${t('turnLabel')} ${view.turn ?? ''} · ${statusText}`,
+    'data-turn': view.turn ?? '',
+    ...(view.sessionId === null || view.sessionId === undefined ? {} : { 'data-session': view.sessionId }),
+  }, [
+    createElement('div', { key: 'card', className: 'dsh-tpm-card' }, [
+      createElement('div', { key: 'cells', className: 'dsh-tpm-cells' },
+        view.columns.map(cell => metricCellTree(createElement, { cell, translate: t }))),
+      createElement('div', { key: 'foot', className: 'dsh-tpm-foot' },
+        footer.map((text, index) => createElement('span', { key: `${index}`, className: 'dsh-tpm-foot-item' }, text))),
+    ]),
+  ])
+}
+
+;Object.assign(__exports, { secondaryText, metricCellTree, completedTree })
+			},
+			"src/client/completed/CompletedMeter.js": function (__exports) {
+/**
+ * Completed turn card (browser only — this module imports `react`, so Node tests
+ * must not import it directly; the structural assertions live in
+ * `test/completed-tree.test.js`, which exercises `completed-tree.js` with a
+ * recording `createElement`).
+ *
+ * Rendering contract:
+ *
+ *   - the component receives a finished `completedViewModel` and renders fields.
+ *     It never reads a `SessionEvent`, never sees a settled snapshot, never
+ *     computes a rate, a token count, a duration or a quality marker, and never
+ *     decides whether `≈` applies — `src/client/ui-model.js` already decided;
+ *   - it owns **no timer**: a completed turn is static, so there is no ticker
+ *     here, no elapsed refresh and no rolling value. The card changes only when a
+ *     new view model arrives (session switch, next turn's end, rebaseline);
+ *   - `role="group"` with a per-turn accessible name, because this is static
+ *     content that must not be announced as a live region;
+ *   - Phase 4 renders **no chart**. Hover and focus change nothing here.
+ */
+
+const { createElement: h } = __ext("react")
+const { completedTree } = __req("src/client/completed/completed-tree.js")
+
+/**
+ * The card.
+ *
+ * @param {{view: object, translate: (key: string) => string}} props
+ */
+function CompletedMeter({ view, translate }) {
+  return completedTree(h, view, translate)
+}
+
+;Object.assign(__exports, { CompletedMeter })
 			},
 			"src/client/live/live-css.js": function (__exports) {
 /**
@@ -5063,50 +5834,185 @@ body[data-ds-dark-theme] .dsh-tpm-root {
 
 ;Object.assign(__exports, { LIVE_STYLE_ID, LIVE_CSS })
 			},
-			"src/client/live/LiveMeter.js": function (__exports) {
+			"src/client/completed/completed-css.js": function (__exports) {
 /**
- * Live meter React component (browser only — this module imports `react`, so
- * Node tests must not import it directly; `test/client-bundle.test.js` loads
- * it through the built bundle with a stubbed module table).
+ * Scoped stylesheet for the completed turn card.
  *
- * Rendering contract:
+ * Same delivery rule as the live pill: a module string rendered into one
+ * reference-counted `<style data-plugin>` tag, because a DSH factory bundle has
+ * no CSS import mechanism and the module system claims `style[data-plugin]` tags
+ * for HMR bookkeeping.
  *
- *   - the component receives a finished view model from `LivePresenter` and
- *     formats strings; it never parses events, never computes TPS/TTFT/tool
- *     time, and never touches raw `SessionEvent` shapes;
- *   - exactly one presentation ticker per mounted meter (200 ms default),
- *     started while visible and cleared whenever it is not — unmount, HMR
- *     remount and session switches all destroy it;
- *   - high-frequency numbers are plain text: NO `aria-live` region, so a
- *     screen reader is never read a new TPS five times a second. The root
- *     carries a per-state `aria-label` and `data-state` instead;
- *   - the style tag is reference-counted: at most one `#dsh-tpm-live-style`
- *     exists at any time, and the last unmount removes it (HMR-clean).
+ * Rules:
+ *   - every selector is scoped under `.dsh-tpm-root`; no element/global
+ *     selectors, no body/typography pollution;
+ *   - colours resolve through host `--dsw-*` alias tokens, so light and dark come
+ *     from the active DSH theme rather than from a second theme system; the
+ *     fallbacks exist only so a missing token degrades to a readable value;
+ *   - the grid is `repeat(4, minmax(0, 1fr))` and collapses to `repeat(2, 1fr)`,
+ *     never to a fixed rem width and never to horizontal overflow;
+ *   - separators are logical-property borders, so they survive the two-column
+ *     wrap without leaving a stray edge on the first cell of row two;
+ *   - tabular digits everywhere; nothing here animates (the card is static).
+ */
+
+const COMPLETED_STYLE_ID = 'dsh-tpm-completed-style'
+
+const COMPLETED_CSS = `
+.dsh-tpm-root {
+  --dsh-tpm-accent: #d9480f;
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+body[data-ds-dark-theme] .dsh-tpm-root {
+  --dsh-tpm-accent: #ff922b;
+}
+.dsh-tpm-card {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  padding: 10px 16px 8px;
+  border-radius: 12px;
+  border: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
+  background: var(--dsw-specific-tip, rgba(127, 130, 135, .10));
+  color: var(--dsw-alias-label-primary, #3c3c3d);
+  font-size: 13px;
+  line-height: 18px;
+}
+.dsh-tpm-cells {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: start;
+}
+.dsh-tpm-cell {
+  min-width: 0;
+  padding: 2px 14px;
+  border-inline-start: .5px solid transparent;
+}
+.dsh-tpm-cell + .dsh-tpm-cell {
+  border-inline-start-color: var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
+}
+.dsh-tpm-cell:first-child { padding-inline-start: 0; }
+.dsh-tpm-cell:last-child { padding-inline-end: 0; }
+.dsh-tpm-cell-label {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dsh-tpm-cell-value {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  margin: 3px 0 2px;
+}
+.dsh-tpm-cell-number {
+  font-size: 19px;
+  line-height: 24px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #3c3c3d);
+  white-space: nowrap;
+}
+.dsh-tpm-cell-unit {
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+  white-space: nowrap;
+}
+.dsh-tpm-cell-sub {
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--dsw-alias-label-secondary, #7f8287);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dsh-tpm-cell-sub[data-tone="warn"] { color: var(--dsw-alias-state-warn-label, #b26a00); }
+.dsh-tpm-cell-sub[data-tone="error"] { color: var(--dsw-alias-state-error-primary, #d03050); }
+.dsh-tpm-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+.dsh-tpm-foot-item {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dsh-tpm-foot-item + .dsh-tpm-foot-item::before {
+  content: '·';
+  margin-inline-end: 10px;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+@media (max-width: 34rem) {
+  .dsh-tpm-cells { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 10px; }
+  .dsh-tpm-cell:nth-child(odd) {
+    border-inline-start-color: transparent;
+    padding-inline-start: 0;
+  }
+  .dsh-tpm-cell:nth-child(even) { padding-inline-end: 0; }
+  .dsh-tpm-cell:nth-child(n + 3) {
+    border-block-start: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
+    padding-block-start: 8px;
+  }
+}
+`
+
+;Object.assign(__exports, { COMPLETED_STYLE_ID, COMPLETED_CSS })
+			},
+			"src/client/live/MeterRoot.js": function (__exports) {
+/**
+ * Meter root: the one slot component for this plugin.
+ *
+ * It owns the presentation lifecycle that both views share, and nothing else:
+ *
+ *   - `inactive`/no session, and only then, renders nothing;
+ *   - the live pill while a turn is open;
+ *   - the completed card once the session's turn has settled;
+ *   - exactly one subscription per attached session (attach is idempotent);
+ *   - exactly one ~200 ms presentation ticker while a **live** view is on screen,
+ *     and **no timer at all** while the completed card is on screen. A settled
+ *     turn is static, so the card is written once and never re-rendered by a
+ *     clock; the scheduler stops on the same state advance that reveals it;
+ *   - one reference-counted style tag for the whole plugin (live pill CSS and
+ *     completed card CSS together), removed with the last unmount so HMR cannot
+ *     accumulate `style` elements.
+ *
+ * Live and completed are mutually exclusive by construction: the projection comes
+ * from a single state advance in the controller (see `controller.js` `project`),
+ * so a `turn/end` publish yields the card immediately and a following
+ * `turn/start` yields the pill immediately.
  */
 
 const { createElement: h, useEffect, useReducer, useRef, useState } = __ext("react")
 const { createPresentationScheduler } = __req("src/client/live/refresh.js")
-const { formatApproxTps, formatElapsed, formatStopwatch, formatToolLabel } = __req("src/client/live/live-format.js")
+const { LivePill, meterDiagnostics } = __req("src/client/live/LiveMeter.js")
+const { CompletedMeter } = __req("src/client/completed/CompletedMeter.js")
 const { LIVE_CSS, LIVE_STYLE_ID } = __req("src/client/live/live-css.js")
+const { COMPLETED_CSS } = __req("src/client/completed/completed-css.js")
 
-/** Reference count for the shared style tag. */
+/** Reference count for the plugin's single style tag. */
 let styleUsers = 0
 
-/**
- * Debug counters (always cheap increments; read only via the debug handle).
- * They exist because the browser is the only place where the full chain
- * controller-notify -> scheduler -> setView -> DOM can be observed together.
- */
-const diagnostics = {
-  schedulerCreated: 0,
-  notifyCalls: 0,
-  renderCalls: 0,
-  refreshCalls: 0,
-  currentScheduler: null,
-}
+/** Live pill CSS first, card CSS second; both are scoped under `.dsh-tpm-root`. */
+const PLUGIN_CSS = `${LIVE_CSS}\n${COMPLETED_CSS}`
 
-function meterDiagnostics() {
-  return diagnostics
+/** A projection that cannot change until an event arrives. */
+function isStatic(view) {
+  return view.kind === 'completed'
 }
 
 function acquireStyle() {
@@ -5115,7 +6021,7 @@ function acquireStyle() {
     element = document.createElement('style')
     element.id = LIVE_STYLE_ID
     element.setAttribute('data-plugin', 'dsh-turn-performance-meter')
-    element.textContent = LIVE_CSS
+    element.textContent = PLUGIN_CSS
     document.head.appendChild(element)
   }
   styleUsers += 1
@@ -5128,87 +6034,23 @@ function acquireStyle() {
   }
 }
 
-/** Accessibility name per presentation state — transitions, not digits. */
-function stateLabelKey(view) {
-  switch (view.kind) {
-    case 'ttft': return 'ttft'
-    case 'streaming': return view.phase === 'reasoning' ? 'thinking' : 'output'
-    case 'tool': return 'tool'
-    case 'waiting': return 'waiting'
-    case 'transition': return 'transition'
-    default: return 'meterLabel'
-  }
-}
-
-function pill(view, label) {
-  const ariaLabel = `${label} · ${formatElapsed(view.elapsedMs ?? 0)}`
-  return h('div', { className: 'dsh-tpm-root', 'data-state': view.state, 'data-turn': view.turn ?? '', 'aria-label': ariaLabel },
-    h('div', { className: 'dsh-tpm-pill' }, pillContent(view, label)))
-}
-
-function pillContent(view, label) {
-  switch (view.kind) {
-    case 'ttft':
-      return [
-        h('span', { key: 'c', className: 'dsh-tpm-lead' }, formatStopwatch(view.counterMs ?? 0)),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
-      ]
-
-    case 'streaming':
-      return [
-        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
-        h('span', { key: 't', className: 'dsh-tpm-tps' }, formatApproxTps(view.tps, view.approximate)),
-        h('span', { key: 'u', className: 'dsh-tpm-unit' }, 'tokens/s'),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
-      ]
-
-    case 'tool':
-      return [
-        h('span', { key: 'n', className: 'dsh-tpm-tool' }, formatToolLabel(view.names, view.count)),
-        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatElapsed(view.toolElapsedMs ?? 0)}`),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
-      ]
-
-    case 'waiting':
-      return [
-        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
-        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatStopwatch(view.waitMs ?? 0)}`),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
-      ]
-
-    case 'transition':
-      return [
-        h('span', { key: 'l', className: 'dsh-tpm-label' }, `${label}…`),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
-      ]
-
-    default:
-      return null
-  }
-}
-
 /**
- * Build the slot component. The controller and translate function close over
- * the registration site (`src/client/main.js`), so the component itself stays
- * a pure function of `(props, controller state)`.
+ * Build the slot component. The controller and translate function close over the
+ * registration site (`src/client/main.js`), so the component itself stays a pure
+ * function of `(props, controller state)`.
  *
  * @param {{controller: object, t: (key: string) => string, debug?: boolean}} options
  */
 function makeMeterSlot({ controller, t, debug = false }) {
-  const label = typeof t === 'function' ? t : (key => key)
+  const translate = typeof t === 'function' ? t : (key => key)
 
   return function TurnPerformanceMeter(props) {
     const sessionId = typeof props?.sessionId === 'string' && props.sessionId !== '' ? props.sessionId : null
     const [, bump] = useReducer(count => count + 1, 0)
 
-    // Debug-only: report the seat's actual prop shape once per session value,
-    // so a missing `sessionId` standard prop shows up as itself rather than as
-    // a silently hidden meter. No per-delta logging exists anywhere.
+    // Debug-only: report the seat's actual prop shape once per session value, so
+    // a missing `sessionId` standard prop shows up as itself rather than as a
+    // silently hidden meter. No per-delta logging exists anywhere.
     const seenSession = useRef(null)
     if (debug && seenSession.current !== sessionId) {
       seenSession.current = sessionId
@@ -5219,13 +6061,10 @@ function makeMeterSlot({ controller, t, debug = false }) {
 
     /**
      * The projected view is *state*, refreshed only by the presentation
-     * scheduler (and once per mount/session change) — never during render.
-     * The conversation dock re-renders its occupants on every chat update
-     * (streaming chunks arrive far faster than the refresh interval); if each
-     * of those renders re-projected `Date.now()`, the DOM would update at the
-     * chat's cadence and bypass the 100–250 ms presentation throttle. Keeping
-     * the last projected view in state means parent re-renders reuse identical
-     * values, and the ticker remains the only writer of visible numbers.
+     * scheduler (once per mount/session change, and while live on each tick) —
+     * never during render. The conversation dock re-renders its occupants on
+     * every chat update; if each of those renders re-projected `Date.now()`, the
+     * DOM would update at the chat's cadence and bypass the throttle.
      */
     const [view, setView] = useState(() => (
       sessionId === null
@@ -5235,18 +6074,21 @@ function makeMeterSlot({ controller, t, debug = false }) {
 
     const sessionIdRef = useRef(sessionId)
     sessionIdRef.current = sessionId
+    const viewRef = useRef(view)
+    viewRef.current = view
     const refreshView = () => {
-      diagnostics.refreshCalls += 1
+      meterDiagnostics().refreshCalls += 1
       const id = sessionIdRef.current
       setView(id === null
         ? { kind: 'hidden', state: 'inactive', turn: null }
         : controller.project(id, Date.now()))
     }
 
-    const schedulerRef = useRef(null)
-    if (schedulerRef.current === null) {
+    /** Created once per mounted meter; disposed implicitly by the effect below. */
+    const [scheduler] = useState(() => {
+      const diagnostics = meterDiagnostics()
       diagnostics.schedulerCreated += 1
-      schedulerRef.current = createPresentationScheduler({
+      const created = createPresentationScheduler({
         intervalMs: controller.refreshMs,
         onRender: () => {
           diagnostics.renderCalls += 1
@@ -5254,16 +6096,12 @@ function makeMeterSlot({ controller, t, debug = false }) {
           bump()
         },
       })
-      diagnostics.currentScheduler = schedulerRef.current
-    }
-    const scheduler = schedulerRef.current
+      diagnostics.currentScheduler = created
+      return created
+    })
 
     useEffect(() => acquireStyle(), [])
 
-    // One eventSource subscription per session (attach is idempotent); the
-    // unsubscribe runs on session switch and on unmount/HMR. The view is
-    // re-projected here so a session switch never shows the old session's
-    // numbers while waiting for the next ticker tick.
     useEffect(() => {
       if (sessionId === null) {
         refreshView()
@@ -5275,30 +6113,39 @@ function makeMeterSlot({ controller, t, debug = false }) {
       }
       refreshView()
       return controller.subscribe(() => {
-        diagnostics.notifyCalls += 1
-        scheduler.notify()
+        meterDiagnostics().notifyCalls += 1
+        /**
+         * A static projection can only change on a new event, so it is rebuilt
+         * once per event and never re-rendered by a timer. `refreshView` runs
+         * directly instead of through the scheduler, which is what leaves **no
+         * timer** for a completed card: the scheduler is never even notified.
+         */
+        if (isStatic(viewRef.current)) refreshView()
+        else scheduler.notify()
       })
     }, [sessionId, controller, scheduler, debug])
 
-    // The single presentation ticker: on only while visible, destroyed on
-    // hide and on unmount. Data-side ingestion is never throttled.
+    // The single presentation ticker: on only while a live view is visible,
+    // stopped on hide, on completion and on unmount. Ingestion is never
+    // throttled.
     const visible = view.kind !== 'hidden'
-    diagnostics.renderCalls += 0 // render itself is counted separately from ticker renders
+    const live = visible && !isStatic(view)
     useEffect(() => {
-      if (!visible) {
+      if (!live) {
         scheduler.stop()
         return undefined
       }
       scheduler.start()
       return () => scheduler.stop()
-    }, [visible, scheduler])
+    }, [live, scheduler])
 
     if (!visible) return null
-    return pill(view, label(stateLabelKey(view)))
+    if (view.kind === 'completed') return h(CompletedMeter, { view, translate })
+    return h(LivePill, { view, translate })
   }
 }
 
-;Object.assign(__exports, { meterDiagnostics, makeMeterSlot })
+;Object.assign(__exports, { makeMeterSlot })
 			},
 			"src/client/live/locale.js": function (__exports) {
 /**
@@ -5327,6 +6174,23 @@ const LOCALE_DICTS = Object.freeze({
     transition: 'processing',
     tool: 'tool',
     tpsUnit: 'tokens/s',
+    // Completed card: four principal column labels, then the footer/status copy.
+    completedLabel: 'Turn performance summary',
+    colReasoningTps: 'Reasoning TPS',
+    colOutputTps: 'Output TPS',
+    colGeneratedTokens: 'Generated Tokens',
+    colTtft: 'TTFT',
+    elapsed: 'elapsed',
+    tools: 'tools',
+    attempts: 'attempts',
+    'status.completed': 'completed',
+    'status.interrupted': 'interrupted',
+    'status.errored': 'errored',
+    'status.max-tokens': 'token limit reached',
+    turnLabel: 'turn',
+    unavailable: 'unavailable',
+    'quality.exact': 'exact',
+    'quality.approximate': 'approximate',
   }),
   zh: Object.freeze({
     meterLabel: '实时性能',
@@ -5337,6 +6201,22 @@ const LOCALE_DICTS = Object.freeze({
     transition: '处理中',
     tool: '工具',
     tpsUnit: 'tokens/s',
+    completedLabel: '本轮性能统计',
+    colReasoningTps: '思考 TPS',
+    colOutputTps: '输出 TPS',
+    colGeneratedTokens: '生成 Tokens',
+    colTtft: '首响应',
+    elapsed: '总用时',
+    tools: '工具',
+    attempts: '模型调用',
+    'status.completed': '已完成',
+    'status.interrupted': '已中断',
+    'status.errored': '出错',
+    'status.max-tokens': '达到 Token 上限',
+    turnLabel: '第',
+    unavailable: '不可用',
+    'quality.exact': '精确',
+    'quality.approximate': '近似',
   }),
 })
 
@@ -5385,7 +6265,8 @@ function wrapTranslate(rawT) {
  */
 
 const { createController } = __req("src/client/live/controller.js")
-const { makeMeterSlot, meterDiagnostics } = __req("src/client/live/LiveMeter.js")
+const { makeMeterSlot } = __req("src/client/live/MeterRoot.js")
+const { meterDiagnostics } = __req("src/client/live/LiveMeter.js")
 const { LOCALE_DICTS, LOCALE_NS, wrapTranslate } = __req("src/client/live/locale.js")
 
 const inject = ['slots', 'sessions', 'locale']

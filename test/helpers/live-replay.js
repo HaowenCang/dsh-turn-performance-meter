@@ -170,9 +170,15 @@ export function replayFixture(fixture, { withScheduler = false } = {}) {
     const view = controller.project(fixture.sessionId, nowMs)
     captures.push(view)
     if (scheduler !== null) {
-      // The component's visibility effect, structurally: ticker runs only
-      // while something is on screen.
-      if (view.kind === 'hidden') scheduler.stop()
+      /**
+       * The component's ticker lifecycle, structurally: the ticker runs for any
+       * visible view except the static completed card, and is stopped for a
+       * hidden view and for the card. A settled turn is static — it is rebuilt on
+       * the next event and never re-rendered by a clock — so a completed card
+       * leaves **zero** timers behind, exactly as a hidden view does.
+       */
+      const staticView = view.kind === 'hidden' || view.kind === 'completed'
+      if (staticView) scheduler.stop()
       else if (!scheduler.ticking) scheduler.start()
       maxTimers = Math.max(maxTimers, scheduler.timerCount)
     }

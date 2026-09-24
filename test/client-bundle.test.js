@@ -46,6 +46,7 @@ const reactStub = {
   useEffect: () => {},
   useReducer: () => [0, () => {}],
   useRef: () => ({ current: null }),
+  useState: value => [typeof value === 'function' ? value() : value, () => {}],
 }
 
 test('the bundle is deterministic and matches the committed client.js', async () => {
@@ -152,4 +153,32 @@ test('a second apply/teardown cycle leaves no cross-generation state (HMR remoun
   assert.equal(first.state.injects, 1, 'the previous generation registered nothing extra')
   const secondDispose = second.state.effects[0]()
   assert.doesNotThrow(() => secondDispose())
+})
+
+test('the bundle carries both view stylesheets and exactly one style tag id', async () => {
+  /**
+   * HMR discipline: one `#dsh-tpm-live-style` element holds the pill CSS *and* the
+   * card CSS, so a remount cannot accumulate `style` elements and the two views
+   * can never disagree about the theme tokens they read.
+   */
+  const { LIVE_CSS, LIVE_STYLE_ID } = await import('../src/client/live/live-css.js')
+  const { COMPLETED_CSS, COMPLETED_STYLE_ID } = await import('../src/client/completed/completed-css.js')
+  const root = await readFile(new URL('../src/client/live/MeterRoot.js', import.meta.url), 'utf8')
+  assert.equal(text.includes(LIVE_STYLE_ID), true)
+  assert.equal(root.includes('COMPLETED_STYLE_ID'), false, 'the card CSS declares no tag of its own')
+  assert.equal(COMPLETED_STYLE_ID === LIVE_STYLE_ID, false, 'the two stylesheets have distinct ids')
+  assert.equal((text.match(/document\.createElement\('style'\)/g) ?? []).length, 1,
+    'exactly one style tag is ever created')
+  for (const selector of ['.dsh-tpm-root', '.dsh-tpm-pill']) {
+    assert.equal(LIVE_CSS.includes(selector), true, `the pill CSS is bundled (${selector})`)
+  }
+  for (const selector of ['.dsh-tpm-card', '.dsh-tpm-cells', '.dsh-tpm-cell', '.dsh-tpm-foot']) {
+    assert.equal(COMPLETED_CSS.includes(selector), true, `the card CSS is bundled (${selector})`)
+  }
+  assert.equal(text.includes('src/client/completed/CompletedMeter.js'), true, 'the card component is in the graph')
+  assert.equal(text.includes('src/client/completed/completed-tree.js'), true, 'the card tree is in the graph')
+  assert.equal(text.includes('src/client/live/MeterRoot.js'), true, 'the meter root owns the shared lifecycle')
+  for (const forbidden of ["'svg'", "'canvas'", "'polyline'", "'path'", 'createElementNS']) {
+    assert.equal(text.includes(forbidden), false, `Phase 4 ships no chart markup (${forbidden})`)
+  }
 })

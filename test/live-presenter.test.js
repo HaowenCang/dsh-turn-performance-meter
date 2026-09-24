@@ -42,9 +42,59 @@ test('an inactive or settled machine projects hidden, whatever the snapshot says
     { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'output', timeMs: 100 },
     { type: LIVE_UI_EVENT.TURN_END, turn: 4, timeMs: 500, status: 'interrupted' },
   ])
-  const view = presenter.project(streamingSnapshot(), 600)
-  assert.equal(view.kind, 'hidden', 'turn/end exits live mode immediately (Phase 4 owns the completed card)')
-  assert.equal(view.state, LiveUiState.SETTLED)
+  /**
+   * A settled machine is no longer hidden: it projects the completed card when
+   * one is available. With no settled snapshot to read — the case here — it still
+   * shows nothing rather than a guess.
+   */
+  const withoutSettled = presenter.project(streamingSnapshot(), 600)
+  assert.equal(withoutSettled.kind, 'hidden', 'no settled snapshot, no card')
+  assert.equal(withoutSettled.state, LiveUiState.SETTLED)
+
+  const withSettled = presenter.project(streamingSnapshot(), 600, {
+    sessionId: 's',
+    turn: 4,
+    status: 'interrupted',
+    statusNote: 'aborted:user',
+    tools: { count: 0 },
+    columns: undefined,
+  })
+  assert.equal(withSettled.kind, 'completed')
+  assert.equal(withSettled.state, LiveUiState.SETTLED)
+  assert.equal(withSettled.status, 'interrupted')
+  assert.equal(withSettled.columns.length, 4)
+})
+
+test('the settled branch takes precedence over any meter evidence', () => {
+  const presenter = startedPresenter([
+    { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'reasoning', timeMs: 100 },
+    { type: LIVE_UI_EVENT.TURN_END, turn: 4, timeMs: 500, status: 'completed' },
+  ])
+  // Even a streaming snapshot cannot revive the pill: the card wins outright.
+  const view = presenter.project(streamingSnapshot(), 600, { turn: 4, status: 'completed', tools: {} })
+  assert.equal(view.kind, 'completed')
+  assert.equal('tps' in view, false)
+  assert.equal('elapsedMs' in view, true)
+})
+
+test('a settled machine with a junk settled payload shows nothing rather than a broken card', () => {
+  const presenter = startedPresenter([{ type: LIVE_UI_EVENT.TURN_END, turn: 4, timeMs: 500, status: 'completed' }])
+  for (const junk of [null, undefined, {}, { status: 'running' }, 'nope', 7]) {
+    assert.equal(presenter.project(streamingSnapshot(), 600, junk).kind, 'hidden', `junk settled ${JSON.stringify(junk)}`)
+  }
+})
+
+test('an open turn always outranks a completed card', () => {
+  const presenter = startedPresenter([
+    { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'output', timeMs: 100 },
+    { type: LIVE_UI_EVENT.TURN_END, turn: 4, timeMs: 500, status: 'completed' },
+    { type: LIVE_UI_EVENT.TURN_START, turn: 5, timeMs: 600 },
+  ])
+  const settled = { turn: 4, status: 'completed', tools: {} }
+  const view = presenter.project({ turn: 5, phase: 'pending', ttftMs: null, turnElapsedMs: 100 }, 700, settled)
+  assert.equal(view.kind, 'ttft', 'the new turn owns the slot; the previous card is gone')
+  assert.equal(view.turn, 5)
+  assert.equal(view.kind === 'completed', false)
 })
 
 test('pending-first-token projects the running TTFT stopwatch, never a rate', () => {
