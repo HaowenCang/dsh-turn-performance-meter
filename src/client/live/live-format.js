@@ -11,7 +11,7 @@
  *   - a multi-tool label always distinguishes itself from a single tool.
  */
 
-import { formatCountdown, formatDuration, formatSeconds, formatTps, DASH } from '../format.js'
+import { countdownParts, formatCountdown, formatDuration, formatSeconds, formatTps, DASH } from '../format.js'
 
 /**
  * Approximate TPS rendering: `≈338`, `≈38.4`, `—` for absent evidence.
@@ -30,6 +30,16 @@ export function formatElapsed(ms) {
 /** TTFT stopwatch and waiting stopwatch: `2.80 s`. */
 export function formatStopwatch(ms, digits = 2) {
   return formatCountdown(ms, digits)
+}
+
+/**
+ * The same stopwatch as separately styleable parts: `2.80` + `s`.
+ *
+ * The live pill renders the number at the top of its type scale and the unit two
+ * steps below it, which is only possible if the two are separate runs.
+ */
+export function stopwatchParts(ms, digits = 2) {
+  return countdownParts(ms, digits)
 }
 
 /** Long tool names are truncated so the pill never overflows. */

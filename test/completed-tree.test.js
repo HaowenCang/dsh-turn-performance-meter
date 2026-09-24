@@ -13,6 +13,8 @@ import assert from 'node:assert/strict'
 import { completedTree } from '../src/client/completed/completed-tree.js'
 import { completedViewModel } from '../src/client/ui-model.js'
 import { COMPLETED_CSS, COMPLETED_STYLE_ID } from '../src/client/completed/completed-css.js'
+import { LIVE_CSS } from '../src/client/live/live-css.js'
+import { BASE_CSS } from '../src/client/base-css.js'
 import { LOCALE_DICTS } from '../src/client/live/locale.js'
 import { MetricQuality } from '../src/core/metric-quality.js'
 import { QualityLevel } from '../src/core/quality-model.js'
@@ -95,14 +97,21 @@ const cardOfView = (view, translate = en) => completedTree(rec, view, translate)
 test('the card is one group with a turn-scoped accessible name and no live region', () => {
   const tree = cardOf(settled())
   assert.equal(tree.tag, 'div')
-  assert.equal(tree.props.role, 'group')
   assert.equal(tree.props['data-kind'], 'completed')
   assert.equal(tree.props['data-status'], 'completed')
   assert.equal(tree.props['data-turn'], 12)
   assert.equal(tree.props['data-session'], 'session-1')
-  assert.equal(tree.props['aria-label'], 'Turn performance summary · turn 12 · completed')
+  /**
+   * Phase 5 moved `role` and the accessible name onto the card itself, because
+   * the card is the interactive surface (it carries `tabindex`) while the root
+   * is only a full-width flex seat.
+   */
+  const card = byClass(tree, 'dsh-tpm-card')[0]
+  assert.equal(card.props.role, 'group')
+  assert.equal(card.props['aria-label'], 'Turn performance summary · turn 12 · completed')
   assert.equal('aria-live' in tree.props, false, 'a static card must not be a live region')
   assert.equal('aria-atomic' in tree.props, false)
+  assert.equal('aria-live' in card.props, false)
 })
 
 test('the card has exactly one cells container holding four labelled cells in order', () => {
@@ -192,36 +201,69 @@ test('the footer never prints the tool work sum where the wall union belongs', (
   assert.equal(texts(foot)[0].includes('4.2s'), false, 'the summed work must not leak into the compact line')
 })
 
-test('the card renders no chart of any kind', () => {
-  const withCurve = cardOf(settled({
-    curve: { durationMs: 5000, segments: [{ attemptId: 'a' }], reasoning: [{ x: 0, y: 1 }], output: [{ x: 1, y: 2 }], peakTps: 900 },
-  }))
+/** A settled curve with two drawable series, as `telemetry-design.js` shapes one. */
+function settledCurve(overrides = {}) {
+  return {
+    durationMs: 20_000,
+    segments: [{ attemptId: 'a', startMs: 0, endMs: 20_000 }],
+    reasoning: [
+      { timeMs: 0, tps: 0 },
+      { timeMs: 5000, tps: 300 },
+      { timeMs: 10_000, tps: 320 },
+    ],
+    output: [
+      { timeMs: 10_000, tps: 0 },
+      { timeMs: 14_000, tps: 600 },
+      { timeMs: 20_000, tps: 900 },
+    ],
+    peakTps: 900,
+    phaseSpans: { reasoning: { startMs: 0, endMs: 10_000 }, output: { startMs: 10_000, endMs: 20_000 } },
+    quality: 'estimated',
+    sampleEveryMs: 250,
+    windowMs: 1000,
+    ...overrides,
+  }
+}
+
+/** Every element tag present anywhere in a tree. */
+function tagsOf(tree) {
   const tags = new Set()
   const walk = node => {
     if (node === null || node === undefined || typeof node === 'string') return
     tags.add(node.tag)
     for (const child of node.children) walk(child)
   }
-  walk(withCurve)
+  walk(tree)
+  return tags
+}
+
+test('the summary layer renders no chart, even when the turn carries curve data', () => {
+  /**
+   * Phase 4's invariant is preserved *per layer*: the summary is the default
+   * view and never contains a chart. The curve is a separate layer that only the
+   * interaction can reveal.
+   */
+  const tree = cardOf(settled({ curve: settledCurve() }))
+  const summary = byClass(tree, 'dsh-tpm-view').find(layer => layer.props['data-view'] === 'summary')
+  assert.equal(summary.props['data-visible'], 'true')
+  const summaryTags = tagsOf(summary)
   for (const forbidden of ['svg', 'canvas', 'polyline', 'path', 'circle']) {
-    assert.equal(tags.has(forbidden), false, `Phase 4 must not render a ${forbidden} element`)
+    assert.equal(summaryTags.has(forbidden), false, `the summary must not render a ${forbidden} element`)
   }
-  assert.equal(JSON.stringify(withCurve).includes('900'), false, 'the peak value is not rendered')
-  assert.equal(JSON.stringify(withCurve).includes('5,000'), false)
+  assert.equal(JSON.stringify(summary).includes('900'), false, 'the peak value is not in the summary')
 })
 
-test('hover and focus expose nothing extra: the tree has no interactive element', () => {
+test('with no curve the card is inert: no chart, no focus stop, no handler', () => {
   const tree = cardOf(settled())
-  const interactive = new Set(['button', 'a', 'input', 'select', 'textarea', 'details', 'summary'])
-  const walk = node => {
-    if (node === null || node === undefined || typeof node === 'string') return
-    assert.equal(interactive.has(node.tag), false, `${node.tag} would make the card interactive`)
-    assert.equal('tabIndex' in node.props, false)
-    assert.equal('onMouseEnter' in node.props, false)
-    assert.equal('onFocus' in node.props, false)
-    for (const child of node.children) walk(child)
+  assert.equal(byClass(tree, 'dsh-tpm-view').length, 1, 'only the summary layer exists')
+  const card = byClass(tree, 'dsh-tpm-card')[0]
+  assert.equal('tabIndex' in card.props, false, 'a card with nothing behind hover is not a focus stop')
+  assert.equal('onMouseEnter' in card.props, false)
+  assert.equal('onFocus' in card.props, false)
+  const summaryTags = tagsOf(tree)
+  for (const forbidden of ['svg', 'path', 'canvas']) {
+    assert.equal(summaryTags.has(forbidden), false)
   }
-  walk(tree)
 })
 
 test('every visible string comes from the locale namespace in both languages', () => {
@@ -249,20 +291,37 @@ test('every visible string comes from the locale namespace in both languages', (
 })
 
 test('the card stylesheet is scoped, responsive and theme-token driven', () => {
-  assert.ok(COMPLETED_CSS.includes('.dsh-tpm-root'), 'the card is scoped under the plugin root class')
-  assert.equal(/(^|\n)\s*(body|html|div|\*)\s*\{/.test(COMPLETED_CSS), false, 'no global or element selector')
+  /**
+   * Phase 5 split the single stylesheet into a shared token block plus one sheet
+   * per view. The scoping and theme obligations therefore have to be checked
+   * across all three, not against the card sheet alone.
+   */
+  const sheets = `${BASE_CSS}\n${LIVE_CSS}\n${COMPLETED_CSS}`
+  assert.ok(BASE_CSS.includes('.dsh-tpm-root'), 'the plugin is scoped under its own root class')
+  assert.equal(/(^|\n)\s*(body|html|div|span|svg|\*)\s*[,{]/.test(sheets), false,
+    'no global or element selector anywhere in the plugin CSS')
+  assert.equal(/(^|\n)body\[data-ds-dark-theme\]\s+\.dsh-tpm-root\s*\{/.test(sheets), true,
+    'the only bare-body selector is the documented dark-theme override')
   assert.ok(COMPLETED_CSS.includes('grid-template-columns: repeat(4, minmax(0, 1fr))'), 'four fluid columns, no fixed width')
   assert.ok(COMPLETED_CSS.includes('repeat(2, minmax(0, 1fr))'), 'a two-column wrap exists for narrow widths')
   assert.equal(/\d+\.?\d*rem(?!;)/.test(COMPLETED_CSS.replace(/max-width: 34rem/, '')), false,
     'no hard-coded component width beyond the single breakpoint')
   assert.equal(COMPLETED_CSS.includes('44.25rem'), false)
   for (const token of ['--dsw-alias-label-primary', '--dsw-alias-label-secondary', '--dsw-alias-label-tertiary',
-    '--dsw-alias-border-l1', '--dsw-specific-tip']) {
-    assert.ok(COMPLETED_CSS.includes(token), `the card resolves ${token} from the host theme`)
+    '--dsw-alias-border-l1', '--dsw-alias-bg-module-platform']) {
+    assert.ok(sheets.includes(token), `the plugin resolves ${token} from the host theme`)
   }
-  assert.ok(COMPLETED_CSS.includes('body[data-ds-dark-theme]'), 'the accent has a dark override')
-  assert.equal(COMPLETED_CSS.includes('transition'), false, 'a static card animates nothing')
-  assert.equal(COMPLETED_CSS.includes('animation'), false)
+  assert.ok(BASE_CSS.includes('body[data-ds-dark-theme]'), 'the accent has a dark override')
+  /**
+   * `prefers-reduced-motion` legitimately resets both properties, so the
+   * "nothing animates" obligation is checked after removing that block.
+   */
+  const withoutReducedMotion = sheets.replace(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n\}/, '')
+  assert.equal(/animation:/.test(withoutReducedMotion), false, 'nothing in the plugin animates')
+  assert.equal(/transition:(?!\s*opacity)/.test(withoutReducedMotion), false,
+    'the only transition is the opacity cross-fade')
+  assert.ok(COMPLETED_CSS.includes('transition: opacity 220ms ease'), 'the cross-fade is 220 ms')
+  assert.ok(BASE_CSS.includes('prefers-reduced-motion'), 'reduced motion is honoured')
   assert.equal(COMPLETED_STYLE_ID, 'dsh-tpm-completed-style')
 })
 

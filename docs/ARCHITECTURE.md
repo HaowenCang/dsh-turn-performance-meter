@@ -52,7 +52,7 @@ DSH Host/runtime
                  ▼
         client projection/resource
                  ▼
-      conversation.composer.dock
+      conversation.input.dock
         ├─ live compact pill
         └─ completed card
              └─ hover curve view
@@ -226,8 +226,12 @@ DSH durable/live evidence
   -> TurnTelemetryStore                       per-(sessionId, turn) records
   -> aggregateTurn + compressAttempts         settled snapshot (cached at turn/end)
   -> completedViewModel                       the ONLY completed UI seam: values, `≈`, `—`, strings
-  -> completed-tree + CompletedMeter          render only
+  -> curveViewModel(settled)                  the ONLY curve seam: evidence spans, axis, path data
+  -> completed-tree + curve-tree + CompletedMeter   render only
 ```
+
+The card's render layer therefore performs no arithmetic at all: `completedViewModel` decides every visible string,
+`curveViewModel` decides every coordinate, and the React components turn finished values into elements.
 
 Precedence is one rule in one place (`controller.project`): **an open turn wins over a settled one**. A settled
 *state machine* is what unlocks the card, not merely a settled meter, and the settled snapshot is read in the same
@@ -237,8 +241,11 @@ so an unchanged settled turn returns the same object and a static card is never 
 
 ## 10. Client/UI architecture
 
-Mount in `conversation.composer.dock` as an independent entry `turn-performance-meter` (`order: -10`, additive;
-the native `stats` occupant at order `0` is untouched).
+Mount in `conversation.input.dock` — DSH's list seat above the composer card — as an independent entry
+`turn-performance-meter` (`order: 30`, additive; the native `stats` occupant keeps its own seat in
+`conversation.composer.dock` and is untouched). Phase 3 mounted in the composer dock, which is *below* the
+composer; Phase 5B moved it. The order is derived from that seat's shipped occupants (`todo` 0, `goal` 10,
+`queue` 20), so the meter renders last — immediately above the composer card.
 
 One root component projects an explicit state machine onto one view:
 
@@ -260,23 +267,33 @@ MeterRoot (slot component) — owns subscription, ticker and the single style ta
    └─ footer                       `工具 4 · 12.8s · 模型调用 4 · 已完成`
 ```
 
-The projected view is stored state: only the 200 ms ticker (and mount/session changes) writes it, so the conversation
-dock's high-frequency re-renders cannot bypass the presentation throttle. The ticker exists for **live** views only;
-once the card is on screen the scheduler is stopped and the card is refreshed by events, not by a clock. Hover must
-not create a detached tooltip (completed view); keyboard focus provides equivalent access when the curve view arrives
-in Phase 5 — Phase 4's card has no interactive or hover behaviour at all.
+The projected view is stored state: only the presentation ticker — one cadence constant,
+`DEFAULT_PRESENTATION_REFRESH_MS` = 50 ms in `src/client/live/cadence.js` (Phase 5A measured 200 / 50 / 10 ms in the
+browser and selected 50 ms) — and mount/session changes write it, so the slot owner's high-frequency re-renders cannot
+bypass the presentation throttle. Each tick produces exactly one state update: the projection key includes the
+presentation instant, so the tick's view is always a new object and the `useReducer` "force render" that used to
+accompany it was pure duplication and was removed. The ticker exists for **live** views only; once the card is on
+screen the scheduler is stopped and the card is refreshed by events, not by a clock. Hover must not create a detached
+tooltip: Phase 5F switches two layers inside the same card, and keyboard focus (`tabindex="0"` plus a `:focus-visible`
+ring) provides equivalent access, which also covers touch because a tap focuses. The state machine is
+`src/client/completed/view-mode.js`; the layers are stacked in one grid cell so the card height is the taller of the
+two at every width. A turn with no curve produces an inert, unfocusable card.
 
 ## 11. Resource ownership
 
 All timers, listeners, subscriptions, styles, and observers must be effect-scoped and disposed when the plugin/client contribution unmounts. Avoid singleton browser intervals. Avoid duplicate React. Prefer CSS variables/inherited host theme values; only the output accent color should be plugin-defined if no suitable host token exists.
 
-Implemented ownership (Phase 3, extended in Phase 4): the slot component (`MeterRoot`) owns exactly one presentation
-scheduler (cleared on hide, on the completed card and on unmount), one eventSource subscription per attached session
-inside the controller (unsubscribed on controller dispose), and a reference-counted style tag (single
-`#dsh-tpm-live-style`, holding both the pill and card CSS, removed with the last unmount). The controller disposes
-every subscription, machine and store entry on fiber teardown (`ctx.effect` returns-disposer form — the callback runs
-as setup, its return value at teardown) and exposes `project`, `diagnostics`, `attachedSessions`. React comes from the
-browser module table seed; `window.React` stays undefined and no duplicate-instance error appears in the console.
+Implemented ownership (Phase 3, extended in Phase 4 and Phase 5): the slot component (`MeterRoot`) owns exactly one
+presentation scheduler (cleared on hide, on the completed card and on unmount), one eventSource subscription per
+attached session inside the controller (unsubscribed on controller dispose), and a reference-counted style tag (single
+`#dsh-tpm-live-style`, holding the shared token block plus the pill and card CSS, removed with the last unmount). The
+controller disposes every subscription, machine and store entry on fiber teardown (`ctx.effect` returns-disposer form —
+the callback runs as setup, its return value at teardown) and exposes `project`, `diagnostics`, `attachedSessions`.
+Phase 5A moved the whole debug handle — including its `meter()` accessor — **inside** that setup callback, because an
+accessor attached after `ctx.effect(...)` returned was silently lost: the setup had not run yet and the assignment threw
+into its own guard. React comes from the browser module table seed; `window.React` stays undefined and no
+duplicate-instance error appears in the console. The completed card owns no timer at all, which the browser run
+confirms (`scheduler.ticking === false`, `timerCount === 0` with a settled card on screen).
 
 ## 12. Non-goals
 

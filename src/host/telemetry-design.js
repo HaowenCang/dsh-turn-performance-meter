@@ -18,7 +18,7 @@
 import { LiveMeter, LivePhase } from '../core/live-metrics.js'
 import { sampleFromChunk, heuristicTokenWeight } from '../core/token-allocation.js'
 import { compressAttempts } from '../core/time-axis.js'
-import { rollingTpsSeries, peakTps, downsampleSeries } from '../core/curve.js'
+import { rollingTpsSeries, peakTps, downsampleSeries, phaseSpans } from '../core/curve.js'
 import { aggregateTurn } from '../core/aggregate-turn.js'
 import { turnKey } from '../core/types.js'
 
@@ -256,6 +256,27 @@ export class TurnTelemetryStore {
       durationMs: compressed.durationMs,
     })
 
+    /**
+     * `peakTps` is measured on the **full** series, before downsampling. The
+     * order of the two expressions below is the specification, not an accident:
+     * the rendered point count is a drawing budget, and a drawing budget must
+     * never move a reported statistic. `downsampleSeries` independently
+     * guarantees that the point bearing this maximum survives into the rendered
+     * series, so the drawn curve and the printed peak agree.
+     *
+     * `sampleEveryMs`/`windowMs` are recorded so the curve's own grid and
+     * measurement window travel with the data. They are unrelated to the live
+     * presentation cadence (`src/client/live/cadence.js`).
+     *
+     * `phaseSpans` records, per phase, the interval over which that phase has
+     * actual evidence: from its first token-producing sample to its last one
+     * plus the rolling window (the window is how long those tokens keep
+     * contributing to the rate). Outside that interval the series reads zero
+     * because the phase **is not producing**, not because its throughput
+     * collapsed, and a renderer must not draw the two the same way. The values
+     * themselves are untouched — this is availability metadata, not a different
+     * series.
+     */
     return {
       ...aggregate,
       statusNote: record.statusNote,
@@ -265,6 +286,7 @@ export class TurnTelemetryStore {
         reasoning: downsampleSeries(reasoningSeries),
         output: downsampleSeries(outputSeries),
         peakTps: peakTps(reasoningSeries, outputSeries),
+        phaseSpans: phaseSpans(compressed.samples, compressed.durationMs, 1000),
         /** Curve points are shape estimates; their phase integrals are anchored to usage. */
         quality: aggregate.usageComplete ? 'calibrated' : 'estimated',
         sampleEveryMs: 250,

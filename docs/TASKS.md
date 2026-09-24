@@ -116,19 +116,27 @@ through the real controller in `test/completed-lifecycle.test.js`.
 
 ## Phase 5 — Mandatory completed TPS curve
 
-- [ ] Build compressed active model-generation x-axis. (`TurnTelemetryStore.settle` already emits `curve` with
-      `durationMs`, segments, downsampled series and `peakTps`; the card carries it unused — reachable from
-      `src/client/` only as the settled snapshot's data, never recomputed)
-- [ ] Prove a long tool delay does not add chart width.
-- [ ] Preserve stalls within one model stream.
-- [ ] Generate reasoning/output rolling 1s series at bounded render cadence.
-- [ ] Calibrate curve phase integrals to exact final usage where possible.
-- [ ] Show peak of rendered/calibrated series.
-- [ ] SVG point count is bounded for long turns (downsample if necessary without altering extrema materially).
-- [ ] Default completed card is summary; hover/focus cross-fades to curve view; mouseout/blur restores summary.
-- [ ] Respect reduced-motion preference.
+All items landed. `docs/IMPLEMENTATION_LOG.md` §Phase 5 carries the measurements; `dev/screenshots/phase5/`
+holds the browser evidence.
 
-Acceptance gate: a fixture containing a 60 s tool call produces virtually the same horizontal curve proportions as the same model samples with a 1 s tool call.
+- [x] Build compressed active model-generation x-axis. (`TurnTelemetryStore.settle` emits `curve` with
+      `durationMs`, segments, downsampled series, `peakTps` and `phaseSpans`; `src/client/` never recomputes it)
+- [x] Prove a long tool delay does not add chart width. (`test/curve.test.js`, 1 s vs 60 s identical geometry)
+- [x] Preserve stalls within one model stream.
+- [x] Generate reasoning/output rolling 1 s series at bounded render cadence. (250 ms grid, unchanged by the
+      Phase 5A presentation cadence)
+- [x] Calibrate curve phase integrals to exact final usage where possible. (`curve.quality`)
+- [x] Show peak of the full pre-downsample, calibrated series — with `≈`, because a curve sample is not a
+      provider-certified maximum.
+- [x] SVG point count is bounded for long turns, and the budget can no longer cost the global extreme.
+- [x] Default completed card is summary; hover/focus cross-fades to curve view; mouseout/blur restores summary.
+- [x] Respect reduced-motion preference.
+
+Phase 5 also closed four items that were not in the Phase 5 list but were real: the 200 ms presentation default
+(now 50 ms, measured), the wrong dock seat (now `conversation.input.dock`), the under-styled live/card surfaces,
+and the redundant second state update per tick.
+
+Acceptance gate: a fixture containing a 60 s tool call produces virtually the same horizontal curve proportions as the same model samples with a 1 s tool call — met, and asserted rather than observed.
 
 ## Phase 6 — Robustness
 

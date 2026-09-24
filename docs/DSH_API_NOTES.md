@@ -48,9 +48,23 @@ packages/client/ui-chat/src/client/apply.ts
 packages/client/ui-chat/src/client/chat/StatsPills.tsx
 ```
 
-`conversation.composer.dock` is a session-scoped list slot. Native chat statistics currently register there as id `stats`, order `0`. This makes it the correct allocated layout region for this plugin.
+Two session-scoped list seats exist and they are not interchangeable:
 
-Do not assume that taking the native `stats` id is safe. Register independently first and inspect the local slot catalog/occupants.
+| seat | DSH wording | occupants |
+|---|---|---|
+| `conversation.input.dock` | "Full-width entries above the composer card" — `kind: 'list'`, `scope: 'session'`, owner `InputZone` (`ownerProps: { session, input }`) | `todo` (order 0), `goal` (10), `queue` (20) |
+| `conversation.composer.dock` | "Ambient entries below the composer card" | `client-ui-chat` `StatsPills`, id `stats` |
+
+The input seat's standard props include `sessionId: SessionId`, so a session-scoped occupant reads the session from
+its props and must never scrape it from the DOM. The owner renders the seat as
+`renderSlot("conversation.input.dock", zone)` immediately **before** `inputBar`, which is what makes it "above the
+composer card". Sole occupant listing source: the generated contract table in
+`dsh-cordis-client-runner/lib/client.js`, key `conversation.input.dock`
+(`packages/client/ui-conversation/src/client/contract/slots.ts:166`).
+
+Do not assume that taking the native `stats` id is safe. Register independently first and inspect the local slot
+catalog/occupants. Phase 3 registered in the composer dock and Phase 5B moved the plugin to the input dock, because
+the composer dock is *below* the composer and already holds the statistics the meter was competing with.
 
 ## 4. Durable vs transient evidence
 

@@ -125,8 +125,10 @@ TPS_{live}(t)=\frac{N(t-1000\,ms,t]}{1\,s}
 
 Implementation requirements:
 
-- window length: 1000 ms;
-- UI refresh target: 100–250 ms, independent from chunk frequency;
+- window length: 1000 ms (unchanged; the window is a *definition*, not a refresh rate);
+- UI refresh target: **50 ms** (20 presentation updates/s). Phase 5A measured 200 / 50 / 10 ms in a real browser;
+  50 ms was selected because 10 ms produced 3.4x the React renders for identical frame timing. The cadence has one
+  home, `DEFAULT_PRESENTATION_REFRESH_MS` in `src/client/live/cadence.js`, and it never changes the window above;
 - reset at every new model attempt;
 - while no model attempt is streaming (tool running or waiting for next model), do not keep displaying a stale TPS as if current;
 - live TPS is normally `estimated` unless an exact streaming tokenizer/count is available.

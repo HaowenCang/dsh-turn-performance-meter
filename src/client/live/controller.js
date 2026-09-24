@@ -27,9 +27,7 @@ import { turnKey } from '../../core/types.js'
 import { NORMALIZED_KIND, applyRetryOutcomes, attemptFromDecoded } from '../../dsh/index.js'
 import { SessionEventFeed } from '../../dsh/client-feed.js'
 import { LivePresenter } from './live-presenter.js'
-
-/** Presentation refresh cadence: 200 ms == at most ~5 rendered updates/s. */
-export const DEFAULT_REFRESH_MS = 200
+import { DEFAULT_PRESENTATION_REFRESH_MS } from './cadence.js'
 
 /**
  * Identity of a projected view: equal keys mean the picture is unchanged.
@@ -75,7 +73,7 @@ function projectionKey(state, snapshot, atMs) {
  */
 export function createController({
   sessions,
-  refreshMs = DEFAULT_REFRESH_MS,
+  refreshMs = DEFAULT_PRESENTATION_REFRESH_MS,
   debug = false,
   nowMs = () => Date.now(),
 } = {}) {

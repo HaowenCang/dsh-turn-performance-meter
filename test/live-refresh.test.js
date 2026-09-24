@@ -1,15 +1,23 @@
 /**
- * Presentation scheduler: structural performance contract (Phase 3 §24).
+ * Presentation scheduler: structural performance contract (Phase 3 §24, Phase 5A).
  *
  * The properties under test are structural, not wall-clock benchmarks:
  * ingestion may be high-frequency, but at most two timers ever exist, renders
  * happen only on the bounded ticker while visible, one coalesced render covers
  * the hidden state, and stop/dispose leave zero timers behind.
+ *
+ * The cadence is now covered at every value the browser A/B measured instead of
+ * at one hard-coded 200 ms: a scheduler whose behaviour depended on the interval
+ * would be a scheduler that only worked at the value it was written against.
  */
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createPresentationScheduler } from '../src/client/live/refresh.js'
+import {
+  DEFAULT_PRESENTATION_REFRESH_MS,
+  PRESENTATION_REFRESH_CANDIDATES_MS,
+} from '../src/client/live/cadence.js'
 
 function fakeTimers() {
   let nextId = 1
@@ -33,9 +41,9 @@ function fakeTimers() {
   }
 }
 
-function makeScheduler(onRender, timers) {
+function makeScheduler(onRender, timers, intervalMs = DEFAULT_PRESENTATION_REFRESH_MS) {
   return createPresentationScheduler({
-    intervalMs: 200,
+    intervalMs,
     onRender,
     setTimeoutImpl: timers.setTimeoutImpl,
     clearTimeoutImpl: timers.clearTimeoutImpl,
@@ -43,6 +51,44 @@ function makeScheduler(onRender, timers) {
     clearIntervalImpl: timers.clearIntervalImpl,
   })
 }
+
+test('the scheduler defaults to the selected production cadence, not to a local copy', () => {
+  const scheduler = createPresentationScheduler({ onRender() {} })
+  assert.equal(scheduler.intervalMs, DEFAULT_PRESENTATION_REFRESH_MS)
+  assert.equal(scheduler.intervalMs, 50)
+  scheduler.dispose()
+})
+
+test('the ticker is bounded and behaves identically at 200, 50 and 10 ms', () => {
+  for (const cadence of PRESENTATION_REFRESH_CANDIDATES_MS) {
+    const timers = fakeTimers()
+    let renders = 0
+    const scheduler = makeScheduler(() => { renders += 1 }, timers, cadence)
+    assert.equal(scheduler.intervalMs, cadence)
+    scheduler.start()
+    assert.equal(scheduler.timerCount, 1, `${cadence} ms: exactly one interval while visible`)
+    for (let index = 0; index < 1000; index += 1) scheduler.notify()
+    assert.equal(scheduler.timerCount, 1, `${cadence} ms: the data burst adds no timer`)
+    assert.equal(renders, 0, `${cadence} ms: the burst renders nothing on its own`)
+    timers.fireIntervals(7)
+    assert.equal(renders, 7, `${cadence} ms: one render per tick, and no more`)
+    scheduler.dispose()
+    assert.equal(scheduler.timerCount, 0, `${cadence} ms: dispose clears the interval`)
+  }
+})
+
+test('the hidden-state coalescing render is cadence-independent', () => {
+  for (const cadence of PRESENTATION_REFRESH_CANDIDATES_MS) {
+    const timers = fakeTimers()
+    let renders = 0
+    const scheduler = makeScheduler(() => { renders += 1 }, timers, cadence)
+    for (let index = 0; index < 50; index += 1) scheduler.notify()
+    assert.equal(timers.timeoutCount(), 1, `${cadence} ms: 50 notifications, one leading timer`)
+    timers.fireTimeouts()
+    assert.equal(renders, 1, `${cadence} ms: one coalesced render`)
+    scheduler.dispose()
+  }
+})
 
 test('100 notifications while hidden coalesce into exactly one leading render', () => {
   const timers = fakeTimers()

@@ -41,6 +41,12 @@ export const LOCALE_DICTS = Object.freeze({
     unavailable: 'unavailable',
     'quality.exact': 'exact',
     'quality.approximate': 'approximate',
+    // Curve view: the legend reuses `thinking`/`output`, so only the panel's own
+    // copy and the peak readout need entries here.
+    curveLabel: 'Throughput curve',
+    curveHint: 'Hover or focus for the throughput curve',
+    curveUnavailable: 'no throughput samples',
+    peak: 'peak',
   }),
   zh: Object.freeze({
     meterLabel: '实时性能',
@@ -67,6 +73,10 @@ export const LOCALE_DICTS = Object.freeze({
     unavailable: '不可用',
     'quality.exact': '精确',
     'quality.approximate': '近似',
+    curveLabel: '吞吐曲线',
+    curveHint: '悬停或聚焦查看吞吐曲线',
+    curveUnavailable: '无吞吐采样',
+    peak: '峰值',
   }),
 })
 

@@ -35,7 +35,8 @@ Phase 3 additions (all in `npm run verify`):
   windows never crash;
 - `test/client-bundle.test.js` — deterministic bundle, committed `client.js` freshness, module-table contract
   (React the only external, no `@deepseek-ai/*`), slot registration (`id: turn-performance-meter`,
-  `conversation.composer.dock`, order −10), `ctx.effect` setup/disposer semantics, remount shape;
+  `conversation.input.dock`, order 30), the absence of the superseded composer-dock literal, `ctx.effect`
+  setup/disposer semantics, remount shape, and the no-charting-dependency assertion;
 - audit tests inside existing files — settlement concepts (`assistant/attempt` ≠ `abandoned`), `llm/retry` →
   `retried`, `reasoningTokens=0` + reasoning stream consistency conflict (unit, aggregate, and fixture-patched), the
   frozen window warm-up contract, the tool-episode live timer.
@@ -46,12 +47,12 @@ Phase 4 additions (all in `npm run verify`):
   rendering per field, the `≈` consistency rule between a rate and the token count on its own derivation chain,
   secondary-line text, status kinds including `max-tokens`, footer tool figures, TTFT/elapsed, curve retention, the
   purity of the projection, and a well-formedness sweep over every recorded fixture;
-- `test/completed-tree.test.js` — the rendered element tree: `role="group"` root with a per-turn accessible name and
+- `test/completed-tree.test.js` — the rendered element tree: `role="group"` card with a per-turn accessible name and
   **no** live region, four labelled cells with per-cell accessible names, visible `≈` as text plus its `data-*`
   mirror, status as real text with a tone attribute, the footer hiding the tool item when there are no tools and never
-  printing the summed work where the wall union belongs, **no chart element of any kind**, no interactive element (so
-  hover/focus expose nothing), both locales, and the card CSS contract (scoped selectors, `repeat(4, minmax(0, 1fr))`
-  grid with a two-column wrap, host theme tokens, no animation, one style-tag id);
+  printing the summed work where the wall union belongs, **no chart in the summary layer**, an inert card when the
+  turn carries no curve, both locales, and the card CSS contract (scoped selectors, `repeat(4, minmax(0, 1fr))` grid
+  with a two-column wrap, host theme tokens, opacity-only transition, one style-tag id);
 - `test/completed-lifecycle.test.js` — the controller's precedence rule: an open turn beats a settled one; live →
   completed is one advance with no blank frame; completed → a new `turn/start` returns the pill in one advance; a
   second settled turn replaces the first card; session A/B isolation; the **durable-only window** (no transient row at
@@ -63,7 +64,32 @@ Phase 4 additions (all in `npm run verify`):
 - `test/completed-format.test.js` — formatter edge cases: no `NaN`/`Infinity`/`undefined`/`null`/negative zero ever
   reaches a display string, the em dash for absent evidence, the three-significant-digit TPS bands including the
   `9.999 → 10.0` rounding boundary, locale grouping for token magnitudes, `≈` as a prefix (never `~`), the card's
-  one-decimal second scale, and integer-only tool labels;
+  one-decimal second scale, and integer-only tool labels.
+
+Phase 5 additions (all in `npm run verify`; the browser A/B and the screenshot set are separate evidence):
+
+- `test/cadence.test.js` — one cadence constant and no second default in `refresh.js`, `controller.js` or `main.js`;
+  200 / 50 / 10 ms all constructible; an override resolves to a usable interval or falls back, never to a broken
+  timer; the override is reachable only while the diagnostic switch is on; 1 315 notifications under each cadence
+  produce one timer and one render per tick, and `dispose` leaves none;
+- `test/live-refresh.test.js` — the scheduler's structural contract at **every measured cadence**, not at one
+  hard-coded 200 ms;
+- `test/completed-lifecycle.test.js` (added case) — every live presentation instant is a distinct view object, which
+  is what makes a single `setView` per tick sufficient and the removed `useReducer` bump provably redundant;
+- `test/curve.test.js` (added cases) — the stride counterexample that defeats the previous downsample, anchors at
+  every budget, no invented peak, earliest-index tie-breaking and determinism, non-decreasing x for an unordered
+  input, refusal of an unsatisfiable budget, `phaseSpans` boundaries (including "absent phase, absent span"), and a
+  bounded render for a ten-minute turn;
+- `test/curve-view-model.test.js` — the settled curve → geometry seam: `null` when there is no curve, a round axis
+  ceiling derived from the full-series peak, per-phase evidence clipping with no invented zero line, an absent phase
+  kept in the legend but not drawn, an approximate peak placed on the leading series, finite and ordered coordinates,
+  a zero-length turn, purity, and the point bound;
+- `test/completed-interaction.test.js` — the whole hover/focus machine (`enter`/`focus` → curve, `leave`/`blur`/
+  `reset` → summary, focus-inside stays open, un-interactive card is summary by invariant), the two stacked layers,
+  `aria-hidden` on exactly the hidden one, the two kept columns at their original grid tracks, the SVG hidden from
+  assistive technology with one textual description, the peak marker in percentages, focusability tied to the presence
+  of a curve, the `:focus-visible` ring replacing rather than removing the outline, reduced motion, no timer in the
+  card at any mode, and both locales.
 
 ## 2. Required metric fixtures
 
@@ -137,7 +163,8 @@ Phase 3 (live rows) executed against the real running DSH web client with Chrome
 `IMPLEMENTATION_LOG.md` §3.9 and `dev/screenshots/phase3/`:
 
 - hidden with no open turn — verified (post-settle, idle, and mid-turn-attach cases);
-- pending TTFT pill — screenshots (`turnb-pending-first-token.png`, `turnc-*.jpg`, …) plus 200 ms-cadence DOM trace;
+- pending TTFT pill — screenshots (`turnb-pending-first-token.png`, `turnc-*.jpg`, …, and Phase 5's
+  `01-live-ttft.png`) plus a cadence-bounded DOM trace;
 - streaming TPS pill — screenshot (`turng-streaming-output.jpg`, `≈` marker visible) plus DOM trace with per-tick
   `思考/输出 ≈N tokens/s` values;
 - tool timer pill — timestamped DOM trace (`pwsh · 0.3 s | 3.6 s`, episode restarts across sequential calls); a

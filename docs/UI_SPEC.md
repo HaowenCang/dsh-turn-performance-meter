@@ -13,11 +13,23 @@ The target is stylistic equivalence, not pixel copying of another site's proprie
 
 ## 2. Placement
 
-Target slot: `conversation.composer.dock`.
+Target slot: `conversation.input.dock` — DSH's `kind: 'list'`, `scope: 'session'` seat documented as
+"Full-width entries above the composer card" (owner `InputZone`, owner props `{ session, input }`, standard props
+including `sessionId`).
 
-The component must share the composer width constraint and should not use a floating overlay. It must not inspect another plugin's DOM to determine position.
+Phase 3 used `conversation.composer.dock` ("Ambient entries below the composer card"), which put the meter
+between the composer and the native statistics it competed with. Phase 5B moved it; the composer dock is no
+longer registered at all.
 
-During development, keep a distinct slot id `turn-performance-meter`. Do not overwrite the native `stats` entry until local runtime inspection establishes an explicit, stable reason to do so. If both native and custom statistics are visually redundant, prefer an opt-in configuration or documented replacement strategy rather than brittle DOM hiding.
+`order: 30` is derived from the seat's shipped occupants — `todo` 0, `goal` 10, `queue` 20 — so the meter lands
+last, immediately above the composer card, rather than above the native state panels.
+
+The component must share the composer card's width constraint
+(`max-width: var(--dsh-composer-card-max-width)`) and must not use a floating overlay. It must not inspect
+another plugin's DOM to determine position.
+
+Keep a distinct slot id `turn-performance-meter`. Do not overwrite the native `stats` entry: it stays in
+`conversation.composer.dock`, at its own id, untouched.
 
 ## 3. Live mode — no curve
 
@@ -27,7 +39,8 @@ The live component is driven by an explicit eight-state UI machine
 `transition` · `settled`. Every rendering decision comes from that machine plus
 the `LiveMeter` snapshot; the component never infers state from missing fields.
 Verified live in the running DSH client (Phase 3), with the presentation
-throttled to a single 200 ms ticker.
+throttled to a single 50 ms ticker (Phase 5A; the constant lives in
+`src/client/live/cadence.js`).
 
 ### 3.1 Pending / TTFT
 
@@ -97,9 +110,12 @@ neither.
 
 ## 3A. Presentation throttling
 
-Event ingestion is per-delta; rendering is a single ~200 ms presentation ticker per mounted meter (100–250 ms
-acceptable). The projected view is *state*: parent re-renders reuse the stored view, so the ticker — not the chat's
-update cadence — is the only writer of visible numbers. Ticks are destroyed on hide, unmount and HMR; a hidden meter
+Event ingestion is per-delta; rendering is a single presentation ticker per mounted meter at
+`DEFAULT_PRESENTATION_REFRESH_MS` = 50 ms (Phase 5A; 200 / 50 / 10 ms were measured in a browser and 50 ms was
+selected — see `IMPLEMENTATION_LOG.md`). The projected view is *state*: parent re-renders reuse the stored view, so
+the ticker — not the chat's update cadence — is the only writer of visible numbers. Each tick produces **exactly one**
+state update: the projection key includes the presentation instant, so the tick's view is always a new object and a
+second "force render" dispatch would be pure duplication. Ticks are destroyed on hide, unmount and HMR; a hidden meter
 uses one coalesced zero-delay render per event burst. Deltas are never dropped to save renders.
 
 The ticker is a **live-view** resource. A completed card is static, so the ticker is stopped the moment the card
@@ -142,8 +158,11 @@ Implemented in Phase 4 and frozen here:
   recolour the metrics, because the card reports throughput, not an error;
 - the card is `role="group"` with a per-turn accessible name and per-cell accessible names built from label, value,
   unit and secondary line. It has **no `aria-live` region**: a settled turn is not an announcement;
-- no chart, no hover behaviour, no `tabindex`, no interactive element. `view.curve` is carried for Phase 5 and is not
-  read by the Phase 4 render path.
+- no chart in the summary layer, and no interactive element *in that layer*. `view.curve` is read by
+  `curve-view-model.js`, never by the summary render path;
+- Phase 5F made the **card** interactive: when the turn carries a curve the card is `tabindex="0"`, opens the curve on
+  hover or focus, and closes it on leave, blur or turn change. A turn with no curve yields an inert, unfocusable card,
+  because a focus stop that reveals nothing is worse than none. All of that is `src/client/completed/view-mode.js`.
 
 The card is a static projection of the settled record. It is never recomputed from raw events, and it does not rebuild
 itself on a timer.
@@ -163,9 +182,25 @@ Recommended composition follows the reference:
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-The chart occupies roughly 50–60% of width; Generated Tokens and TTFT remain visible on the right. Use SVG `polyline`/`path` with bounded point count. Do not use canvas unless measurements prove SVG inadequate.
+The chart occupies the card's **left half** — the curve panel spans the first two of the four grid tracks, so
+Generated Tokens and TTFT keep their exact positions, labels, values and dividers across the switch. The plot is a
+hand-built SVG `path` per series in a fixed `0 0 100 48` viewBox with `preserveAspectRatio="none"` and a
+non-scaling stroke; the point count is bounded by `DEFAULT_MAX_POINTS`. No charting dependency and no canvas.
 
-The transition may use ~200–300 ms opacity/crossfade. Respect `prefers-reduced-motion` and disable/reduce non-essential animation.
+Implemented in Phase 5:
+
+- the legend lists both phases in a fixed order with a text label *and* a swatch, so colour is never the only channel;
+  a phase with no drawable evidence keeps its legend entry and is marked `data-absent`;
+- the peak readout sits at the top right of the panel and always carries `≈`;
+- the axis ceiling is a 1/2/2.5/5 x 10^k round-up of the **full-series** peak, labelled at the plot's right edge;
+- each series is drawn only over its own evidence span, so a finished phase is not drawn as a flat zero line;
+- the peak marker is an HTML element positioned in percentages, not an SVG `circle`, because a circle inside a
+  non-uniformly stretched viewBox would render as an ellipse.
+
+The transition is a 220 ms opacity crossfade on two stacked grid layers. `prefers-reduced-motion` removes the fade
+without removing the switch. Because the layers are stacked in one grid cell, the card's height is the taller of the
+two views at every width and host font size — measured identical in both views at 1440 px (149 px) and at 520 px
+(240 px).
 
 ## 6. Curve behavior
 
@@ -176,8 +211,11 @@ The transition may use ~200–300 ms opacity/crossfade. Respect `prefers-reduced
 - next model invocation starts immediately where previous attempt's chart segment ends;
 - optional attempt/tool boundary markers are disabled by default;
 - one horizontal guide/scale label is sufficient; avoid a dense chart grid;
-- peak label is computed from rendered rolling-window series;
-- preserve intra-model stream stalls because those are relevant to throughput stability.
+- peak label is computed from the **full** rolling-window series, before downsampling, and is rendered with `≈`;
+- preserve intra-model stream stalls because those are relevant to throughput stability;
+- a phase is drawn only over the interval where it has evidence (`curve.phaseSpans`); outside that interval the
+  series reads zero because the phase is absent, not because its throughput collapsed, so no zero plateau is drawn
+  and the legend marks the series absent instead.
 
 ## 7. Responsive behavior
 
@@ -189,7 +227,8 @@ The completed card is a CSS grid: `repeat(4, minmax(0, 1fr))` at normal composer
 second row and the outer padding is trimmed. `minmax(0, 1fr)` is what lets a cell shrink below its content width
 instead of forcing the row wider, so the card cannot overflow horizontally at any width and no column is ever crushed
 to unreadable. The breakpoint is expressed against the card's own container width, not against a browser width, and no
-fixed pixel width exists anywhere in the card. At narrow composer widths:
+fixed pixel width exists anywhere in the card. The curve panel spans two tracks at every width, so it goes full width
+when the grid collapses. At narrow composer widths:
 
 - preserve readable primary values before secondary text;
 - allow secondary lines to truncate with an accessible description if necessary (they already carry the full text in
@@ -201,14 +240,16 @@ fixed pixel width exists anywhere in the card. At narrow composer widths:
 ## 8. Accessibility
 
 - completed card must expose curve view on keyboard focus, not hover only;
-- numbers and labels require sufficient contrast in both host themes;
+- numbers and labels require sufficient contrast in both host themes. The output accent is the plugin's one
+  self-defined colour: the reference's `#fb8147` scores 2.31:1 on the reference card surface, so the shipped value
+  keeps its hue and darkens to `#d9600f` light / `#ff9a5c` dark;
 - color is not the sole distinction between reasoning/output: legend text remains present;
 - card status should be available to assistive technology;
-- rapid live numerical updates should not be an aggressive `aria-live` stream; announce state transitions rather than every 100–250 ms tick.
+- rapid live numerical updates should not be an aggressive `aria-live` stream; announce state transitions rather than every 50 ms tick.
   The implemented live meter ships **no live region at all**: the root carries a per-state `aria-label`
   (`<state label> · <elapsed>`), the state's text label (思考/输出/pwsh/等待模型/处理中…) is real DOM text, and the
-  high-frequency digits are ordinary text — so a screen reader is never read a new TPS five times a second;
-- `prefers-reduced-motion` disables the pill's only transition (verified in CSS).
+  high-frequency digits are ordinary text — so a screen reader is never read a new TPS twenty times a second;
+- `prefers-reduced-motion` cancels every transition and animation inside the plugin root (verified in CSS).
 
 Phase 4 fixed the completed card's accessibility contract:
 
@@ -221,9 +262,14 @@ Phase 4 fixed the completed card's accessibility contract:
   `title` tooltip;
 - the turn status is real text in both the status cell and the footer, so it does not depend on colour. Colour carries
   a tone hint only (`data-tone="warn"` / `"error"` on the secondary line), and never repaints the card;
-- the card contains no interactive element and no `tabindex`, so there is nothing to focus in Phase 4; the Phase 5
-  curve must add a focus path of its own rather than relying on hover;
-- nothing in the card animates, so `prefers-reduced-motion` has nothing to disable here.
+- the card contains no interactive element and no `tabindex` **in its summary layer**; Phase 5F added the focus path
+  as a `tabindex="0"` card with a `:focus-visible` ring, present only when the turn carries a curve;
+- the only animation in the card is the 220 ms opacity cross-fade between the two stacked views, which
+  `prefers-reduced-motion` cancels;
+- the hidden view stays in the DOM for a stable height but is `aria-hidden="true"` with `pointer-events: none`, so
+  assistive technology is never handed two copies of the turn's numbers;
+- the SVG plot is `aria-hidden` and the curve panel carries one textual description
+  (`Throughput curve · peak ≈543 tokens/s`), because a polyline is not a readable description.
 
 ## 9. Localization
 
@@ -246,6 +292,14 @@ Phase 4 extended the namespace with the card's strings; the frozen Chinese wordi
 | `status.errored` | errored | 出错 |
 | `status.max-tokens` | token limit reached | 达到 Token 上限 |
 | `unavailable` | unavailable | 不可用 |
+| `curveLabel` | Throughput curve | 吞吐曲线 |
+| `curveHint` | Hover or focus for the throughput curve | 悬停或聚焦查看吞吐曲线 |
+| `curveUnavailable` | no throughput samples | 无吞吐采样 |
+| `peak` | peak | 峰值 |
+
+Phase 5's curve panel adds four keys and reuses two existing ones: the legend labels are the live state labels
+`thinking` / `output` (思考 / 输出), which is exactly what the reference legend shows, and the axis ceiling and the
+peak magnitude are formatted numbers rather than translated strings.
 
 `≈` and `—` are locale-independent glyphs and are not translated; the status detail that follows a status word (for
 example `aborted:user`) is diagnostic metadata and stays in its recorded form. A missing key degrades to the key

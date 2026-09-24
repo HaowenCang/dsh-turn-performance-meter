@@ -6,7 +6,8 @@
  * React must render at a bounded cadence. The contract:
  *
  *   - while the meter is visible, exactly ONE interval renders, at
- *     `intervalMs` (default 200 ms -> at most ~5 FPS of number updates);
+ *     `intervalMs` (default `DEFAULT_PRESENTATION_REFRESH_MS` from
+ *     `./cadence.js` — the single source for the selected cadence);
  *   - while the meter is hidden, an event schedules at most one coalesced
  *     zero-delay render, so a turn start becomes visible immediately without
  *     per-event rendering;
@@ -20,6 +21,10 @@
  * assert the structural properties without wall-clock benchmarks.
  */
 
+import { DEFAULT_PRESENTATION_REFRESH_MS } from './cadence.js'
+
+export { DEFAULT_PRESENTATION_REFRESH_MS }
+
 /**
  * @param {{
  *   intervalMs?: number,
@@ -31,7 +36,7 @@
  * }} options
  */
 export function createPresentationScheduler({
-  intervalMs = 200,
+  intervalMs = DEFAULT_PRESENTATION_REFRESH_MS,
   onRender,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,

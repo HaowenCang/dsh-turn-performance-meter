@@ -72,21 +72,26 @@ dsh-turn-performance-meter/
 │   └── client/
 │       ├── ui-model.js               Pure UI view-model shaping (live + completed seams)
 │       ├── format.js                 Number/time formatting with `—` for absent evidence
-│       ├── styles.js                 Early scaffold style constants (superseded by live-css.js)
+│       ├── base-css.js               Shared scoped tokens and the plugin type scale
 │       ├── main.js                   Browser entry: locale + controller + slot registration
 │       ├── live/                     Live meter + shared presentation lifecycle
 │       │   ├── MeterRoot.js          Slot component: routing, subscription, ticker, style tag
+│       │   ├── cadence.js            The one presentation-cadence constant (+ debug override)
 │       │   ├── live-state.js         Eight-state UI machine (explicit transitions)
 │       │   ├── live-presenter.js     machine + LiveMeter snapshot + settled -> view model
 │       │   ├── live-format.js        ≈ TPS / stopwatches / tool labels
-│       │   ├── refresh.js            single presentation ticker (200 ms, coalesced lead)
+│       │   ├── refresh.js            single presentation ticker, coalesced lead render
 │       │   ├── controller.js         eventSource attach -> store + presenter, per session
 │       │   ├── locale.js             turnPerformanceMeter en/zh dictionary + fallback
 │       │   ├── live-css.js           scoped pill stylesheet string (light/dark accent)
 │       │   └── LiveMeter.js          React pill (browser-only) + debug counters
-│       ├── completed/                Phase 4 completed card
-│       │   ├── completed-tree.js     React-free element tree: structure, text, aria, footer
-│       │   ├── CompletedMeter.js     React binding over the tree (browser-only)
+│       ├── completed/                Completed card + the Phase 5 curve view
+│       │   ├── completed-tree.js     React-free card shell: two stacked views, footer, aria
+│       │   ├── metric-cell.js        One metric column, shared by both views
+│       │   ├── curve-view-model.js   The ONLY curve seam: spans, axis, path data, peak marker
+│       │   ├── curve-tree.js         React-free SVG element tree for the curve panel
+│       │   ├── view-mode.js          Hover/focus interaction state machine (pure)
+│       │   ├── CompletedMeter.js     React binding over the card (browser-only)
 │       │   └── completed-css.js      scoped card stylesheet (4-column grid, 2-column wrap)
 │       └── README.md                 Client implementation constraints
 │
@@ -116,27 +121,29 @@ dsh-turn-performance-meter/
 │   ├── generation-tail.test.js        Frozen phase-duration evidence
 │   ├── client-bundle.test.js          Bundle determinism, module table, slot, CSS contract
 │   ├── live-controller.test.js        Fixture replay, session isolation, ticker bounds
+│   ├── live-refresh.test.js           Scheduler structure at every measured cadence
+│   ├── cadence.test.js                One cadence constant; override reachable only when debugging
 │   ├── ui-model.test.js               Live + completed view models
-│   ├── completed-tree.test.js         Card element tree, aria, footer, no-chart contract
+│   ├── completed-tree.test.js         Card element tree, aria, footer, per-layer no-chart contract
 │   ├── completed-lifecycle.test.js    Live/completed switching, durable reload, static card
+│   ├── completed-interaction.test.js  Hover/focus/blur machine, aria-hidden, focus ring, empty curve
+│   ├── curve-view-model.test.js       Evidence spans, axis ceiling, peak marker, bounded geometry
 │   └── completed-format.test.js       Formatter edge cases (no NaN/Infinity/-0 in UI)
 │
 └── scripts/
     └── verify-structure.mjs
     └── bundle-client.mjs / build-client.mjs
 
-dev/screenshots/                      git-ignored evidence captures (phase3/, phase4/)
+dev/screenshots/                      git-ignored evidence captures (phase3/, phase4/, phase5/)
 ```
 
 Expected evolution during implementation:
 
 ```text
-src/client/
-  completed/curve/                Phase 5: SVG curve view + hover/focus alternate layout
-
-test/
-  completed-curve.test.js         Phase 5: compressed axis, bounded points, hover/focus
-  browser/e2e tests (if local DSH harness supports them)
+src/client/    — landed in Phase 5 as src/client/completed/{curve-view-model,curve-tree,view-mode}.js
+test/          — landed in Phase 5 as curve-view-model.test.js and completed-interaction.test.js
+browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
+                 JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10)
 ```
 
 Do not create parallel copies of the same metric formula in host and client. Pure formulas remain in `src/core` and are reused wherever the final build pipeline permits. `scripts/verify-structure.mjs` fails when a `src/core` module has no matching test.

@@ -1182,16 +1182,27 @@ function compressAttempts(attempts) {
 			"src/core/curve.js": function (__exports) {
 /**
  * Completed-turn TPS curve: a trailing one-second rolling series sampled on the
- * compressed active clock, plus the peak of the rendered series.
+ * compressed active clock, plus the peak of the full series.
  *
  * The window and cadence are deliberately the same conceptual window the live
  * meter uses (docs/METRICS_SPEC.md §8.2), so a point read off the curve at time
  * `t` means the same thing as the live pill did at that instant.
  *
+ * Two different milliseconds live in this module and must not be conflated:
+ *
+ *   - `DEFAULT_WINDOW_MS` (1000 ms) is the interval a rate is *measured* over.
+ *     It is a definition, not a refresh rate;
+ *   - `DEFAULT_SAMPLE_EVERY_MS` (250 ms) is how often that measurement is
+ *     *recorded* for the completed chart. It is independent of the live
+ *     presentation cadence in `src/client/live/cadence.js`: streaming a screen
+ *     at 20 Hz does not make a one-second window any shorter, and a finer curve
+ *     grid is a separate, separately-argued decision.
+ *
  * Curve points are `estimated` before provider usage arrives and `calibrated`
- * afterwards; they are never `exact`. `peakTps` is the peak of the *rendered*
- * series and must be labelled as such, not as a provider-certified maximum
- * (docs/METRICS_SPEC.md §9).
+ * afterwards; they are never `exact`. `peakTps` is the peak of the **full**
+ * rolling series — computed before any downsampling — and it must still be
+ * labelled as an estimate, because a series sample is not a provider-certified
+ * maximum (docs/METRICS_SPEC.md §9).
  */
 
 const DEFAULT_WINDOW_MS = 1000
@@ -1199,6 +1210,13 @@ const DEFAULT_SAMPLE_EVERY_MS = 250
 
 /** Largest rendered series the SVG layer is allowed to receive. */
 const DEFAULT_MAX_POINTS = 512
+
+/**
+ * Smallest budget that can hold the guaranteed anchors: the first point, the
+ * last point and the global maximum are three distinct indices in the worst case.
+ * A smaller budget is unsatisfiable rather than merely tight.
+ */
+const MIN_MAX_POINTS = 3
 
 function assertPositive(value, label) {
   if (!(Number.isFinite(value) && value > 0)) throw new TypeError(`${label} must be a finite number > 0`)
@@ -1248,7 +1266,15 @@ function rollingTpsSeries(samples, options = {}) {
   return result
 }
 
-/** Peak of the rendered series across any number of series. */
+/**
+ * Peak across any number of **full** series.
+ *
+ * The name says `Tps` and not `RenderedTps` on purpose: this is a statistic over
+ * the rolling series as computed, and it must be evaluated before
+ * `downsampleSeries` runs. Taking the maximum of the *drawn* points instead
+ * would make a chart setting — how many points the SVG is allowed — silently
+ * change a number the card reports.
+ */
 function peakTps(...seriesList) {
   let peak = 0
   for (const series of seriesList) {
@@ -1262,47 +1288,176 @@ function peakTps(...seriesList) {
 }
 
 /**
- * Reduce a series to at most `maxPoints` while preserving every local extremum
- * and both endpoints.
+ * Evidence interval of each phase on the compressed clock.
  *
- * Rendering density must be independent of collection density so a long turn
- * cannot produce an unbounded SVG path. Extrema are kept because the curve's
- * purpose is diagnosing throughput stability: a naive stride that stepped over
- * the single spike or the single stall would destroy the signal.
+ * A rolling series is defined for every sampled instant, but a phase that has
+ * not started yet and a phase that has finished both read as zero. Those zeros
+ * are arithmetically correct and visually misleading: a renderer that draws the
+ * reasoning series across an output-only stretch is not showing "reasoning
+ * throughput collapsed", it is showing "reasoning is over" — two different
+ * facts, and only one of them is a throughput statement.
+ *
+ * The interval returned here is the region in which the series *means* something:
+ *
+ *   - it starts at the phase's first token-producing sample. Before that the
+ *     phase has produced nothing to measure;
+ *   - it ends one rolling window after the phase's last token-producing sample,
+ *     because those tokens keep contributing to the rate for exactly that long
+ *     and the decay is a real, readable part of the series.
+ *
+ * A phase with no samples has no span. Series values themselves are never
+ * altered; this is availability metadata.
+ *
+ * @param {readonly {activeTimeMs?:number, phase?:string|null}[]} samples
+ * @param {number} durationMs compressed duration the span is clamped to
+ * @param {number} [windowMs] rolling window the tail is extended by
+ * @returns {{reasoning: {startMs:number, endMs:number}|null, output: {startMs:number, endMs:number}|null}}
+ */
+function phaseSpans(samples, durationMs, windowMs = DEFAULT_WINDOW_MS) {
+  const horizon = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0
+  const tail = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0
+  const bounds = new Map()
+  for (const sample of Array.isArray(samples) ? samples : []) {
+    const phase = sample?.phase
+    const at = sample?.activeTimeMs
+    if (typeof phase !== 'string' || !Number.isFinite(at)) continue
+    const current = bounds.get(phase)
+    if (current === undefined) bounds.set(phase, { firstMs: at, lastMs: at })
+    else {
+      if (at < current.firstMs) current.firstMs = at
+      if (at > current.lastMs) current.lastMs = at
+    }
+  }
+
+  const spanFor = (phase) => {
+    const bound = bounds.get(phase)
+    if (bound === undefined) return null
+    return {
+      startMs: Math.max(0, Math.min(bound.firstMs, horizon)),
+      endMs: Math.max(0, Math.min(bound.lastMs + tail, horizon)),
+    }
+  }
+
+  return { reasoning: spanFor('reasoning'), output: spanFor('output') }
+}
+
+/** Index of the first finite global maximum (or minimum) of a series. */
+function extremeIndex(points, direction) {
+  let best = -1
+  let bestValue = 0
+  for (let i = 0; i < points.length; i += 1) {
+    const value = points[i]?.tps
+    if (!Number.isFinite(value)) continue
+    if (best === -1 || (direction > 0 ? value > bestValue : value < bestValue)) {
+      best = i
+      bestValue = value
+    }
+  }
+  return best
+}
+
+/**
+ * Reduce a series to at most `maxPoints` for rendering.
+ *
+ * Retention is a **priority list**, not one heuristic, because the budget can be
+ * smaller than the number of interesting points and something has to give. In
+ * order:
+ *
+ *   1. the two endpoints — the series must still start and end where it did;
+ *   2. the global maximum — this is the point the card's `peak` refers to, and a
+ *      rendering choice may never delete it;
+ *   3. the global minimum — the trough a stall produces;
+ *   4. the surviving local extrema, **ranked by prominence** when they do not
+ *      all fit;
+ *   5. uniform shape samples with whatever budget is left, so a long flat run
+ *      still has vertices to be drawn with.
+ *
+ * The previous revision kept every local extremum and then, on budget overflow,
+ * thinned that set by uniform stride — which is exactly the operation that can
+ * step over the single global spike the chart exists to show. Ranking extrema by
+ * prominence and reserving the anchors before anything else makes the peak and
+ * the trough unconditional; `test/curve.test.js` carries the counterexample that
+ * defeats the old stride.
+ *
+ * Determinism: ties in the global extreme resolve to the earliest index, and
+ * ties in prominence resolve to the earliest index, so two runs over equal input
+ * return equal output.
  *
  * @param {readonly {timeMs:number, tps:number}[]} series
- * @param {number} [maxPoints]
+ * @param {number} [maxPoints] budget; must be `>= MIN_MAX_POINTS`
+ * @returns {{timeMs:number, tps:number}[]} at most `maxPoints` points, in
+ *   non-decreasing `timeMs` order, drawn from the input objects themselves
  */
 function downsampleSeries(series, maxPoints = DEFAULT_MAX_POINTS) {
   const points = Array.isArray(series) ? series : []
-  if (!(Number.isFinite(maxPoints) && maxPoints >= 2) || points.length <= maxPoints) return points.slice()
+  if (!(Number.isFinite(maxPoints) && maxPoints >= MIN_MAX_POINTS)) {
+    /**
+     * Refusing is the only honest answer: first, last and the global maximum
+     * cannot all survive in fewer than three points, and silently breaking one
+     * of the three guarantees would be a worse failure than a loud one.
+     */
+    throw new TypeError(`maxPoints must be a finite number >= ${MIN_MAX_POINTS}`)
+  }
+  if (points.length <= maxPoints) return points.slice()
 
-  const keep = new Set([0, points.length - 1])
-  for (let i = 1; i < points.length - 1; i += 1) {
-    const prev = points[i - 1].tps
-    const next = points[i + 1].tps
-    const here = points[i].tps
-    if ((here > prev && here >= next) || (here < prev && here <= next)) keep.add(i)
+  const lastIndex = points.length - 1
+  /** 1-3. Mandatory anchors, in priority order; the Set de-duplicates them. */
+  const keep = new Set()
+  keep.add(0)
+  keep.add(lastIndex)
+  const peakIndex = extremeIndex(points, 1)
+  if (peakIndex >= 0) keep.add(peakIndex)
+  /**
+   * The trough is the *recommended* fourth anchor rather than a guaranteed one:
+   * a three-point budget must still be able to honour the three hard guarantees,
+   * so the trough yields when there is no room for it and never the other way
+   * round.
+   */
+  const troughIndex = extremeIndex(points, -1)
+  if (troughIndex >= 0 && keep.size < maxPoints) keep.add(troughIndex)
+
+  /** 4. Local extrema, each with the prominence that ranks it. */
+  const extrema = []
+  for (let i = 1; i < lastIndex; i += 1) {
+    const prev = points[i - 1]?.tps
+    const here = points[i]?.tps
+    const next = points[i + 1]?.tps
+    if (!Number.isFinite(prev) || !Number.isFinite(here) || !Number.isFinite(next)) continue
+    if (!((here > prev && here >= next) || (here < prev && here <= next))) continue
+    extrema.push({ index: i, prominence: Math.abs(here - (prev + next) / 2) })
+  }
+  extrema.sort((left, right) => (
+    right.prominence - left.prominence || left.index - right.index
+  ))
+  for (const extremum of extrema) {
+    if (keep.size >= maxPoints) break
+    keep.add(extremum.index)
   }
 
+  /** 5. Whatever budget remains goes to evenly spaced shape samples. */
   const remaining = maxPoints - keep.size
   if (remaining > 0) {
-    const stride = (points.length - 1) / (remaining + 1)
+    const stride = lastIndex / (remaining + 1)
     for (let k = 1; k <= remaining; k += 1) keep.add(Math.round(k * stride))
   }
 
-  const ordered = [...keep].filter(i => i >= 0 && i < points.length).sort((a, b) => a - b)
-  if (ordered.length <= maxPoints) return ordered.map(i => points[i])
-
-  // Extremum-preserving set already exceeds the budget: thin it uniformly,
-  // always keeping the first and last point.
-  const thinned = []
-  const stride = (ordered.length - 1) / (maxPoints - 1)
-  for (let k = 0; k < maxPoints; k += 1) thinned.push(points[ordered[Math.round(k * stride)]])
-  return thinned
+  /**
+   * Ascending index emission, then an explicit `timeMs` ordering: the drawn path
+   * requires non-decreasing x, and guaranteeing it here means a caller cannot
+   * produce a self-crossing polyline by handing in an out-of-order series. The
+   * index tie-break keeps the sort stable, so equal timestamps keep input order.
+   */
+  const ordered = [...keep]
+    .filter(index => index >= 0 && index < points.length)
+    .sort((a, b) => a - b)
+  const selected = ordered.map(index => points[index])
+  selected.sort((left, right) => (
+    (Number.isFinite(left?.timeMs) ? left.timeMs : 0) - (Number.isFinite(right?.timeMs) ? right.timeMs : 0)
+  ))
+  return selected
 }
 
-;Object.assign(__exports, { DEFAULT_WINDOW_MS, DEFAULT_SAMPLE_EVERY_MS, DEFAULT_MAX_POINTS, rollingTpsSeries, peakTps, downsampleSeries })
+;Object.assign(__exports, { DEFAULT_WINDOW_MS, DEFAULT_SAMPLE_EVERY_MS, DEFAULT_MAX_POINTS, MIN_MAX_POINTS, rollingTpsSeries, peakTps, phaseSpans, downsampleSeries })
 			},
 			"src/core/quality-model.js": function (__exports) {
 /**
@@ -2119,7 +2274,7 @@ function turnKey(sessionId, turn) {
 const { LiveMeter, LivePhase } = __req("src/core/live-metrics.js")
 const { sampleFromChunk, heuristicTokenWeight } = __req("src/core/token-allocation.js")
 const { compressAttempts } = __req("src/core/time-axis.js")
-const { rollingTpsSeries, peakTps, downsampleSeries } = __req("src/core/curve.js")
+const { rollingTpsSeries, peakTps, downsampleSeries, phaseSpans } = __req("src/core/curve.js")
 const { aggregateTurn } = __req("src/core/aggregate-turn.js")
 const { turnKey } = __req("src/core/types.js")
 
@@ -2357,6 +2512,27 @@ class TurnTelemetryStore {
       durationMs: compressed.durationMs,
     })
 
+    /**
+     * `peakTps` is measured on the **full** series, before downsampling. The
+     * order of the two expressions below is the specification, not an accident:
+     * the rendered point count is a drawing budget, and a drawing budget must
+     * never move a reported statistic. `downsampleSeries` independently
+     * guarantees that the point bearing this maximum survives into the rendered
+     * series, so the drawn curve and the printed peak agree.
+     *
+     * `sampleEveryMs`/`windowMs` are recorded so the curve's own grid and
+     * measurement window travel with the data. They are unrelated to the live
+     * presentation cadence (`src/client/live/cadence.js`).
+     *
+     * `phaseSpans` records, per phase, the interval over which that phase has
+     * actual evidence: from its first token-producing sample to its last one
+     * plus the rolling window (the window is how long those tokens keep
+     * contributing to the rate). Outside that interval the series reads zero
+     * because the phase **is not producing**, not because its throughput
+     * collapsed, and a renderer must not draw the two the same way. The values
+     * themselves are untouched — this is availability metadata, not a different
+     * series.
+     */
     return {
       ...aggregate,
       statusNote: record.statusNote,
@@ -2366,6 +2542,7 @@ class TurnTelemetryStore {
         reasoning: downsampleSeries(reasoningSeries),
         output: downsampleSeries(outputSeries),
         peakTps: peakTps(reasoningSeries, outputSeries),
+        phaseSpans: phaseSpans(compressed.samples, compressed.durationMs, 1000),
         /** Curve points are shape estimates; their phase integrals are anchored to usage. */
         quality: aggregate.usageComplete ? 'calibrated' : 'estimated',
         sampleEveryMs: 250,
@@ -4110,10 +4287,25 @@ function formatSeconds(ms, digits = 1) {
   return `${(ms / 1000).toFixed(digits)}s`
 }
 
+/**
+ * Running stopwatch split into its number and its unit.
+ *
+ * The reference renders the first-response counter as a large number followed by
+ * a visibly smaller unit, so the two parts must be separately styleable. Keeping
+ * the split here — next to the rules that decide the digits — means the visible
+ * pair and `formatCountdown`'s flat string can never disagree about precision.
+ *
+ * @returns {{value: string, unit: string|null}} `unit` is `null` for absent evidence
+ */
+function countdownParts(ms, digits = 2) {
+  if (!Number.isFinite(ms)) return { value: DASH, unit: null }
+  return { value: (ms / 1000).toFixed(digits), unit: 's' }
+}
+
 /** Running TTFT counter form: `2.80 s`. */
 function formatCountdown(ms, digits = 2) {
-  if (!Number.isFinite(ms)) return DASH
-  return `${(ms / 1000).toFixed(digits)} s`
+  const parts = countdownParts(ms, digits)
+  return parts.unit === null ? parts.value : `${parts.value} ${parts.unit}`
 }
 
 /**
@@ -4160,7 +4352,7 @@ function formatDuration(ms) {
 
 
 
-;Object.assign(__exports, { DASH, formatSeconds, formatCountdown, formatTps, formatTokens, formatDuration })
+;Object.assign(__exports, { DASH, formatSeconds, countdownParts, formatCountdown, formatTps, formatTokens, formatDuration })
 			},
 			"src/client/ui-model.js": function (__exports) {
 /**
@@ -4766,6 +4958,70 @@ function stageWait(machine, nowMs) {
 
 ;Object.assign(__exports, { LivePresenter })
 			},
+			"src/client/live/cadence.js": function (__exports) {
+/**
+ * The live presentation cadence — the single source of truth.
+ *
+ * Before this module the same conceptual number existed in three places: the
+ * controller's own default, the scheduler's own default and the value the meter
+ * root handed the scheduler. Three defaults for one contract drift apart, and a
+ * cadence that drifts is a cadence nobody measured. Everything that needs the
+ * number now imports it from here.
+ *
+ * What this number is **not**:
+ *
+ *   - it is not the data-ingestion rate. Every model delta enters the store;
+ *     the cadence bounds *presentation* only (`docs/METRICS_SPEC.md` §6);
+ *   - it is not the rolling TPS window. That is a one-second trailing window
+ *     (`src/core/sliding-window.js`) and it is deliberately independent: a
+ *     faster screen refresh must not shorten the interval a rate is measured
+ *     over;
+ *   - it is not the completed curve's sampling cadence. That is
+ *     `DEFAULT_SAMPLE_EVERY_MS` in `src/core/curve.js`, and the two are
+ *     different concepts that happen to be expressed in milliseconds.
+ *
+ * `PRESENTATION_REFRESH_CANDIDATES_MS` records the three cadences that were
+ * actually measured in a browser (Phase 5A A/B). The selection rationale is in
+ * `docs/IMPLEMENTATION_LOG.md`; the constant below is the winner.
+ */
+
+/**
+ * Selected production cadence: 50 ms (20 presentation updates per second).
+ *
+ * Chosen from measured evidence rather than from the assumption that a higher
+ * number is smoother — see the Phase 5A table in `docs/IMPLEMENTATION_LOG.md`.
+ * 200 ms (the previous default) is retained only as a reference point.
+ */
+const DEFAULT_PRESENTATION_REFRESH_MS = 50
+
+/** The cadences the Phase 5A browser A/B actually ran, slowest first. */
+const PRESENTATION_REFRESH_CANDIDATES_MS = Object.freeze([200, 50, 10])
+
+/**
+ * Debug-only override key. Read exclusively while the diagnostic switch is on,
+ * so the production cadence cannot be changed by anything a user can leave
+ * behind in local storage.
+ */
+const REFRESH_OVERRIDE_STORAGE_KEY = 'dsh-turn-performance-meter.refreshMs'
+
+/**
+ * Coerce a stored override into a usable cadence.
+ *
+ * Anything that is not a finite positive number — absent key, empty string,
+ * `NaN`, a negative interval — resolves to the selected production cadence
+ * rather than to a broken `setInterval`, because a scheduler constructed with
+ * `intervalMs <= 0` throws and would take the whole meter down with it.
+ *
+ * @param {unknown} candidate raw value (typically a local-storage string)
+ * @returns {number} a finite interval in milliseconds
+ */
+function resolvePresentationRefreshMs(candidate) {
+  const value = Number(candidate)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_PRESENTATION_REFRESH_MS
+}
+
+;Object.assign(__exports, { DEFAULT_PRESENTATION_REFRESH_MS, PRESENTATION_REFRESH_CANDIDATES_MS, REFRESH_OVERRIDE_STORAGE_KEY, resolvePresentationRefreshMs })
+			},
 			"src/client/live/controller.js": function (__exports) {
 /**
  * Client presentation controller: the runtime wire between the DSH event
@@ -4796,9 +5052,7 @@ const { turnKey } = __req("src/core/types.js")
 const { NORMALIZED_KIND, applyRetryOutcomes, attemptFromDecoded } = __req("src/dsh/index.js")
 const { SessionEventFeed } = __req("src/dsh/client-feed.js")
 const { LivePresenter } = __req("src/client/live/live-presenter.js")
-
-/** Presentation refresh cadence: 200 ms == at most ~5 rendered updates/s. */
-const DEFAULT_REFRESH_MS = 200
+const { DEFAULT_PRESENTATION_REFRESH_MS } = __req("src/client/live/cadence.js")
 
 /**
  * Identity of a projected view: equal keys mean the picture is unchanged.
@@ -4844,7 +5098,7 @@ function projectionKey(state, snapshot, atMs) {
  */
 function createController({
   sessions,
-  refreshMs = DEFAULT_REFRESH_MS,
+  refreshMs = DEFAULT_PRESENTATION_REFRESH_MS,
   debug = false,
   nowMs = () => Date.now(),
 } = {}) {
@@ -5281,7 +5535,7 @@ function createController({
   }
 }
 
-;Object.assign(__exports, { DEFAULT_REFRESH_MS, createController })
+;Object.assign(__exports, { createController })
 			},
 			"src/client/live/refresh.js": function (__exports) {
 /**
@@ -5292,7 +5546,8 @@ function createController({
  * React must render at a bounded cadence. The contract:
  *
  *   - while the meter is visible, exactly ONE interval renders, at
- *     `intervalMs` (default 200 ms -> at most ~5 FPS of number updates);
+ *     `intervalMs` (default `DEFAULT_PRESENTATION_REFRESH_MS` from
+ *     `./cadence.js` — the single source for the selected cadence);
  *   - while the meter is hidden, an event schedules at most one coalesced
  *     zero-delay render, so a turn start becomes visible immediately without
  *     per-event rendering;
@@ -5306,6 +5561,10 @@ function createController({
  * assert the structural properties without wall-clock benchmarks.
  */
 
+const { DEFAULT_PRESENTATION_REFRESH_MS } = __req("src/client/live/cadence.js")
+
+
+
 /**
  * @param {{
  *   intervalMs?: number,
@@ -5317,7 +5576,7 @@ function createController({
  * }} options
  */
 function createPresentationScheduler({
-  intervalMs = 200,
+  intervalMs = DEFAULT_PRESENTATION_REFRESH_MS,
   onRender,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
@@ -5389,7 +5648,7 @@ function createPresentationScheduler({
   }
 }
 
-;Object.assign(__exports, { createPresentationScheduler })
+;Object.assign(__exports, { DEFAULT_PRESENTATION_REFRESH_MS, createPresentationScheduler })
 			},
 			"src/client/live/live-format.js": function (__exports) {
 /**
@@ -5405,7 +5664,7 @@ function createPresentationScheduler({
  *   - a multi-tool label always distinguishes itself from a single tool.
  */
 
-const { formatCountdown, formatDuration, formatSeconds, formatTps, DASH } = __req("src/client/format.js")
+const { countdownParts, formatCountdown, formatDuration, formatSeconds, formatTps, DASH } = __req("src/client/format.js")
 
 /**
  * Approximate TPS rendering: `≈338`, `≈38.4`, `—` for absent evidence.
@@ -5424,6 +5683,16 @@ function formatElapsed(ms) {
 /** TTFT stopwatch and waiting stopwatch: `2.80 s`. */
 function formatStopwatch(ms, digits = 2) {
   return formatCountdown(ms, digits)
+}
+
+/**
+ * The same stopwatch as separately styleable parts: `2.80` + `s`.
+ *
+ * The live pill renders the number at the top of its type scale and the unit two
+ * steps below it, which is only possible if the two are separate runs.
+ */
+function stopwatchParts(ms, digits = 2) {
+  return countdownParts(ms, digits)
 }
 
 /** Long tool names are truncated so the pill never overflows. */
@@ -5456,7 +5725,7 @@ function formatToolLabel(names, count) {
 
 
 
-;Object.assign(__exports, { DASH, formatTps, formatApproxTps, formatElapsed, formatStopwatch, truncateToolName, formatToolLabel })
+;Object.assign(__exports, { DASH, formatTps, formatApproxTps, formatElapsed, formatStopwatch, stopwatchParts, truncateToolName, formatToolLabel })
 			},
 			"src/client/live/LiveMeter.js": function (__exports) {
 /**
@@ -5469,16 +5738,21 @@ function formatToolLabel(names, count) {
  *   - the component receives a finished view model from `LivePresenter` and
  *     formats strings; it never parses events, never computes TPS/TTFT/tool
  *     time, and never touches raw `SessionEvent` shapes;
- *   - presentation lifecycle — the single 200 ms ticker, the session
+ *   - presentation lifecycle — the single presentation ticker, the session
  *     subscription and the reference-counted style tag — belongs to
  *     `MeterRoot.js`, which chooses between this pill and the completed card;
+ *   - **one dominant number per state.** Every branch renders its own value
+ *     through `.dsh-tpm-number` (the `1.7 x` step of the plugin's type scale) and
+ *     keeps labels, units and elapsed readings strictly below it. Reference:
+ *     `docs/assets/reference-live-streaming.png`, where the rate is the focus and
+ *     the elapsed reading is visibly subordinate;
  *   - high-frequency numbers are plain text: NO `aria-live` region, so a screen
- *     reader is never read a new TPS five times a second. The root carries a
+ *     reader is never read a new TPS twenty times a second. The root carries a
  *     per-state `aria-label` and `data-state` instead.
  */
 
 const { createElement: h } = __ext("react")
-const { formatApproxTps, formatElapsed, formatStopwatch, formatToolLabel } = __req("src/client/live/live-format.js")
+const { formatApproxTps, formatElapsed, formatToolLabel, stopwatchParts } = __req("src/client/live/live-format.js")
 
 /**
  * Debug counters (always cheap increments; read only via the debug handle).
@@ -5509,20 +5783,33 @@ function stateLabelKey(view) {
   }
 }
 
+/** A value and its unit as one non-wrapping run: `2.80` `s`, `≈338` `tokens/s`. */
+function metric(value, unit, { tone = 'primary', className = 'dsh-tpm-number' } = {}) {
+  return h('span', { className: 'dsh-tpm-metric' }, [
+    h('span', { key: 'v', className, 'data-tone': tone }, value),
+    unit === null ? null : h('span', { key: 'u', className: 'dsh-tpm-unit' }, unit),
+  ])
+}
+
 function pillContent(view, label) {
   switch (view.kind) {
-    case 'ttft':
+    case 'ttft': {
+      /**
+       * The running first-response counter is the state's only number, so it is
+       * the state's focus: `2.80 S` beside the state label.
+       */
+      const parts = stopwatchParts(view.counterMs ?? 0)
       return [
-        h('span', { key: 'c', className: 'dsh-tpm-lead' }, formatStopwatch(view.counterMs ?? 0)),
+        metric(parts.value, parts.unit),
         h('span', { key: 's', className: 'dsh-tpm-sep' }),
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
       ]
+    }
 
     case 'streaming':
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
-        h('span', { key: 't', className: 'dsh-tpm-tps' }, formatApproxTps(view.tps, view.approximate)),
-        h('span', { key: 'u', className: 'dsh-tpm-unit' }, 'tokens/s'),
+        metric(formatApproxTps(view.tps, view.approximate), 'tokens/s', { tone: 'accent' }),
         h('span', { key: 's', className: 'dsh-tpm-sep' }),
         h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
       ]
@@ -5535,13 +5822,15 @@ function pillContent(view, label) {
         h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
       ]
 
-    case 'waiting':
+    case 'waiting': {
+      const parts = stopwatchParts(view.waitMs ?? 0)
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
-        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatStopwatch(view.waitMs ?? 0)}`),
+        metric(parts.value, parts.unit),
         h('span', { key: 's', className: 'dsh-tpm-sep' }),
         h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
       ]
+    }
 
     case 'transition':
       return [
@@ -5566,6 +5855,7 @@ function LivePill({ view, translate }) {
   const ariaLabel = `${label} · ${formatElapsed(view.elapsedMs ?? 0)}`
   return h('div', {
     className: 'dsh-tpm-root',
+    'data-kind': 'live',
     'data-state': view.state,
     'data-turn': view.turn ?? '',
     'aria-label': ariaLabel,
@@ -5574,18 +5864,14 @@ function LivePill({ view, translate }) {
 
 ;Object.assign(__exports, { meterDiagnostics, LivePill })
 			},
-			"src/client/completed/completed-tree.js": function (__exports) {
+			"src/client/completed/metric-cell.js": function (__exports) {
 /**
- * Completed-card element tree — pure, React-free.
+ * One principal metric column — pure, React-free, and shared.
  *
- * The card's structure, its visible strings, its accessible names and the
- * decision to hide an item (a turn with no tool call, a phase with no secondary
- * line) are all decided here. `CompletedMeter.js` is the two-line React binding
- * over this module, which keeps the render layer thin and lets the tree be tested
- * in Node with a recording `createElement` rather than a DOM.
- *
- * The tree never consults `view.curve`: Phase 5 owns the chart view, and Phase 4
- * must not be able to draw one by accident.
+ * Extracted from the card shell so the summary grid and the curve panel render
+ * columns through the **same** function. The curve view keeps two of the four
+ * columns, and "the same cell, built the same way" is what makes that statement
+ * literally true rather than visually similar.
  */
 
 /** Visible secondary text for one column, resolved from locale keys. */
@@ -5642,49 +5928,549 @@ function metricCellTree(createElement, { cell, translate }) {
   ])
 }
 
+;Object.assign(__exports, { secondaryText, metricCellTree })
+			},
+			"src/client/completed/curve-tree.js": function (__exports) {
+/**
+ * Curve-panel element tree — pure, React-free.
+ *
+ * The panel is the alternate view inside the completed card, not a tooltip: it
+ * replaces the two TPS columns in the *same* four-column grid, so the
+ * generated-token and TTFT columns keep their exact positions and dividers when
+ * the card switches. That is a structural choice, not a styling one — the
+ * reference puts the curve in the left half and the two surviving metrics on the
+ * right, and reusing the grid makes the two views differ by one element instead
+ * of by one layout.
+ *
+ * Geometry decisions (axis ceiling, evidence spans, peak placement) belong to
+ * `curve-view-model.js`; this module only turns them into elements. The SVG is
+ * `aria-hidden` and the panel carries one textual description instead, so a
+ * screen reader is never handed a polyline it cannot read while the accessible
+ * summary says the same thing twice.
+ */
+
+const { metricCellTree } = __req("src/client/completed/metric-cell.js")
+
+/** Legend order is fixed so the swatches never swap between turns. */
+const LEGEND_ORDER = Object.freeze(['reasoning', 'output'])
+
+/** Locale key for one series' legend label. */
+function legendKey(key) {
+  return key === 'reasoning' ? 'thinking' : 'output'
+}
+
+/**
+ * Legend row: `思考 [swatch] 输出 [swatch]` on the left, the peak on the right.
+ *
+ * The swatch follows its label, which is the reference's order, and the label is
+ * always present — colour is never the only channel that identifies a series.
+ * A phase with no drawable evidence keeps its legend entry and is marked
+ * `data-absent`, because removing the entry would silently answer a question the
+ * reader is still asking.
+ */
+function legendTree(createElement, curveView, translate) {
+  const items = LEGEND_ORDER.map(key => {
+    const series = curveView.series.find(candidate => candidate.key === key)
+    const present = series?.present === true
+    return createElement('span', {
+      key,
+      className: 'dsh-tpm-legend-item',
+      'data-series': key,
+      'data-absent': present ? 'false' : 'true',
+    }, [
+      createElement('span', { key: 'label', className: 'dsh-tpm-legend-label' }, translate(legendKey(key))),
+      createElement('span', { key: 'swatch', className: 'dsh-tpm-legend-swatch', 'aria-hidden': 'true' }),
+    ])
+  })
+
+  /**
+   * The peak is a point of an estimated series, so it carries `≈` even when the
+   * turn's token total is exact. The locale supplies the word; the widget never
+   * prints a bare number here.
+   */
+  const peak = createElement('span', {
+    className: 'dsh-tpm-peak',
+    'data-approximate': curveView.peak.approximate ? 'true' : 'false',
+  }, [
+    createElement('span', { key: 'label', className: 'dsh-tpm-peak-label' }, translate('peak')),
+    createElement('span', { key: 'value', className: 'dsh-tpm-peak-value' }, curveView.peak.display),
+    createElement('span', { key: 'unit', className: 'dsh-tpm-peak-unit' }, curveView.peak.unit),
+  ])
+
+  return createElement('div', { className: 'dsh-tpm-curve-head' }, [
+    createElement('div', { key: 'legend', className: 'dsh-tpm-legend' }, items),
+    createElement('div', { key: 'peak', className: 'dsh-tpm-peak-slot' }, peak),
+  ])
+}
+
+/**
+ * Plot area: one path per present series, the axis ceiling, and the peak marker.
+ *
+ * `viewBox="0 0 100 48"` with `preserveAspectRatio="none"` and a non-scaling
+ * stroke keeps the y scale at one unit per unit at any container width, which is
+ * also why the peak marker is an HTML element positioned in percentages rather
+ * than an SVG circle: a circle inside a non-uniformly stretched viewBox would
+ * render as an ellipse.
+ *
+ * The marker sits inside `.dsh-tpm-plot-area` and the axis ceiling outside it,
+ * because `left`/`top` percentages resolve against the containing block's
+ * padding box — sharing that box with the axis label would push every marker off
+ * its vertex.
+ */
+function plotTree(createElement, curveView, translate) {
+  const paths = []
+  for (const series of curveView.series) {
+    if (series.present !== true || typeof series.path !== 'string') continue
+    paths.push(createElement('path', {
+      key: series.key,
+      className: 'dsh-tpm-series',
+      'data-series': series.key,
+      d: series.path,
+      vectorEffect: 'non-scaling-stroke',
+    }))
+  }
+
+  const svg = createElement('svg', {
+    key: 'svg',
+    className: 'dsh-tpm-plot-svg',
+    viewBox: `0 0 ${curveView.width} ${curveView.height}`,
+    preserveAspectRatio: 'none',
+    focusable: 'false',
+    'aria-hidden': 'true',
+  }, paths)
+
+  const area = [svg]
+  if (curveView.peak.x !== null && curveView.peak.y !== null) {
+    area.push(createElement('span', {
+      key: 'dot',
+      className: 'dsh-tpm-peak-dot',
+      'data-leader': curveView.peak.leader,
+      'aria-hidden': 'true',
+      style: {
+        left: `${curveView.peak.x}%`,
+        top: `${(curveView.peak.y / curveView.height) * 100}%`,
+      },
+    }))
+  }
+  if (curveView.drawnPoints === 0) {
+    area.push(createElement('span', {
+      key: 'empty',
+      className: 'dsh-tpm-plot-empty',
+    }, translate('curveUnavailable')))
+  }
+
+  return createElement('div', { className: 'dsh-tpm-plot', 'data-points': curveView.drawnPoints }, [
+    createElement('div', { key: 'area', className: 'dsh-tpm-plot-area' }, area),
+    createElement('span', { key: 'axis', className: 'dsh-tpm-axis-max' }, curveView.axis.display),
+  ])
+}
+
+/**
+ * The panel: the legend/peak head, the plot, and the two metric columns the
+ * curve view keeps.
+ *
+ * @param {(tag: string, props: object, children?: unknown) => object} createElement
+ * @param {object} curveView `curveViewModel` output
+ * @param {readonly object[]} keptColumns the card's trailing metric columns
+ * @param {(key: string) => string} translate
+ */
+function curveTree(createElement, curveView, keptColumns, translate) {
+  const t = typeof translate === 'function' ? translate : (key => key)
+  return [
+    createElement('div', {
+      key: 'curve',
+      className: 'dsh-tpm-curve-panel',
+      role: 'group',
+      'aria-label': `${t('curveLabel')} · ${t('peak')} ${curveView.peak.display} ${curveView.peak.unit}`,
+    }, [
+      legendTree(createElement, curveView, t),
+      plotTree(createElement, curveView, t),
+    ]),
+    ...keptColumns.map(cell => metricCellTree(createElement, { cell, translate: t })),
+  ]
+}
+
+;Object.assign(__exports, { curveTree })
+			},
+			"src/client/completed/completed-tree.js": function (__exports) {
+/**
+ * Completed-card element tree — pure, React-free.
+ *
+ * The card's structure, its visible strings, its accessible names and the
+ * decision to hide an item (a turn with no tool call, a phase with no secondary
+ * line) are all decided here. `CompletedMeter.js` is the thin React binding over
+ * this module, which keeps the render layer thin and lets the tree be tested in
+ * Node with a recording `createElement` rather than a DOM.
+ *
+ * The card carries **two** views of the same settled turn and shows one at a
+ * time: the metric summary (default) and the throughput curve (while hovered or
+ * focused). They are stacked in one grid cell rather than swapped, so the card's
+ * height is the taller of the two and a switch cannot resize it. The hidden
+ * layer is `aria-hidden` and `pointer-events: none`, so assistive technology is
+ * never handed two copies of the turn's numbers at once.
+ *
+ * The tree never computes geometry: the curve panel arrives finished from
+ * `curve-view-model.js` and is assembled by `curve-tree.js`.
+ */
+
+const { metricCellTree, secondaryText } = __req("src/client/completed/metric-cell.js")
+const { curveTree } = __req("src/client/completed/curve-tree.js")
+
+
+
+/**
+ * Footer items. Tools lead because they are the only footer fact that can be
+ * absent: a turn with no tool call hides the tool item entirely rather than
+ * printing "0 tools", and the separator is a CSS pseudo-element so the line
+ * never starts or ends with a bullet.
+ */
+function footerTree(createElement, view, translate) {
+  const tools = view.tools ?? { count: 0, wallDisplay: '' }
+  const items = []
+  if (tools.count > 0) items.push(`${translate('tools')} ${tools.count} · ${tools.wallDisplay}`)
+  if (view.attemptCount > 0) items.push(`${translate('attempts')} ${view.attemptCount}`)
+  items.push(translate(`status.${view.status}`))
+  return createElement('div', { key: 'foot', className: 'dsh-tpm-foot' },
+    items.map((text, index) => createElement('span', { key: `${index}`, className: 'dsh-tpm-foot-item' }, text)))
+}
+
+/**
+ * One stacked layer.
+ *
+ * `data-visible` drives the cross-fade in CSS; `aria-hidden` is the
+ * accessibility half of the same decision and is a real attribute rather than a
+ * style, so it survives a stylesheet that fails to load.
+ */
+function viewLayer(createElement, key, visible, children) {
+  return createElement('div', {
+    key,
+    className: 'dsh-tpm-view',
+    'data-view': key,
+    'data-visible': visible ? 'true' : 'false',
+    'aria-hidden': visible ? 'false' : 'true',
+  }, createElement('div', { className: 'dsh-tpm-cells' }, children))
+}
+
 /**
  * The whole card.
  *
  * @param {(tag: string, props: object, children?: unknown) => object} createElement
  * @param {object} view `completedViewModel` output
  * @param {(key: string) => string} translate
+ * @param {{
+ *   mode?: 'summary'|'curve',
+ *   curveView?: object|null,
+ *   onEnter?: Function, onLeave?: Function, onFocus?: Function, onBlur?: Function,
+ * }} [interaction] presentation state and handlers owned by `CompletedMeter`
  */
-function completedTree(createElement, view, translate) {
+function completedTree(createElement, view, translate, interaction = {}) {
   const t = typeof translate === 'function' ? translate : (key => key)
-  const tools = view.tools ?? { count: 0, wallDisplay: '' }
+  const mode = interaction.mode === 'curve' ? 'curve' : 'summary'
+  const curveView = interaction.curveView ?? null
+  const interactive = curveView !== null
   const statusText = t(`status.${view.status}`)
 
-  /**
-   * Footer items. Tools lead because they are the only footer fact that can be
-   * absent: a turn with no tool call hides the tool item entirely rather than
-   * printing "0 tools", and the separator is a CSS pseudo-element so the line
-   * never starts or ends with a bullet.
-   */
-  const footer = []
-  if (tools.count > 0) footer.push(`${t('tools')} ${tools.count} · ${tools.wallDisplay}`)
-  if (view.attemptCount > 0) footer.push(`${t('attempts')} ${view.attemptCount}`)
-  footer.push(statusText)
+  const layers = [
+    viewLayer(createElement, 'summary', mode === 'summary', view.columns.map(cell => (
+      metricCellTree(createElement, { cell, translate: t })
+    ))),
+  ]
+  if (interactive) {
+    /**
+     * The curve view replaces the first two columns with one panel spanning the
+     * same two tracks; the trailing columns are the very same cells the summary
+     * renders, at the very same grid positions.
+     */
+    layers.push(viewLayer(createElement, 'curve', mode === 'curve',
+      curveTree(createElement, curveView, view.columns.slice(2), t)))
+  }
+
+  const cardProps = {
+    className: 'dsh-tpm-card',
+    role: 'group',
+    'aria-label': `${t('completedLabel')} · ${t('turnLabel')} ${view.turn ?? ''} · ${statusText}`,
+  }
+  if (interactive) {
+    /**
+     * Focusability is tied to the alternate view: a card with nothing behind
+     * hover must not sit in the tab order, because a focus stop that changes
+     * nothing is worse than no stop at all.
+     */
+    cardProps.tabIndex = 0
+    cardProps['aria-description'] = t('curveHint')
+    /** Only handlers that were actually supplied become props. */
+    for (const [prop, handler] of [
+      ['onMouseEnter', interaction.onEnter],
+      ['onMouseLeave', interaction.onLeave],
+      ['onFocus', interaction.onFocus],
+      ['onBlur', interaction.onBlur],
+    ]) {
+      if (typeof handler === 'function') cardProps[prop] = handler
+    }
+  }
 
   return createElement('div', {
     className: 'dsh-tpm-root',
     'data-kind': 'completed',
     'data-status': view.status,
     'data-quality': view.quality?.overall ?? 'unavailable',
-    role: 'group',
-    'aria-label': `${t('completedLabel')} · ${t('turnLabel')} ${view.turn ?? ''} · ${statusText}`,
+    'data-view': mode,
     'data-turn': view.turn ?? '',
     ...(view.sessionId === null || view.sessionId === undefined ? {} : { 'data-session': view.sessionId }),
   }, [
-    createElement('div', { key: 'card', className: 'dsh-tpm-card' }, [
-      createElement('div', { key: 'cells', className: 'dsh-tpm-cells' },
-        view.columns.map(cell => metricCellTree(createElement, { cell, translate: t }))),
-      createElement('div', { key: 'foot', className: 'dsh-tpm-foot' },
-        footer.map((text, index) => createElement('span', { key: `${index}`, className: 'dsh-tpm-foot-item' }, text))),
+    createElement('div', { key: 'card', ...cardProps }, [
+      createElement('div', { key: 'views', className: 'dsh-tpm-views' }, layers),
+      footerTree(createElement, view, t),
     ]),
   ])
 }
 
-;Object.assign(__exports, { secondaryText, metricCellTree, completedTree })
+;Object.assign(__exports, { metricCellTree, secondaryText, completedTree })
+			},
+			"src/client/completed/curve-view-model.js": function (__exports) {
+/**
+ * Curve view model — the single seam between the settled snapshot and the SVG.
+ *
+ * The data flow is fixed by the architecture, and this module is the only place
+ * it may bend:
+ *
+ *     settled snapshot (already decoded, aggregated, calibrated, compressed,
+ *                       windowed and downsampled)
+ *         -> curveViewModel(settled)          <- this module
+ *         -> SVG element tree                 (`curve-tree.js`)
+ *
+ * The React layer therefore never decodes an event, aggregates a turn, compresses
+ * an attempt axis, rolls a TPS window or downsamples a raw delta — it renders
+ * numbers and path strings that were decided here. That matters because those
+ * five operations are the statistics; a component that recomputed any of them
+ * would be a second, silently divergent definition of TPS.
+ *
+ * Geometry is expressed in a fixed logical viewBox (`0 0 100 48`) that the SVG
+ * stretches to its container with `preserveAspectRatio="none"` and
+ * `vector-effect="non-scaling-stroke"`. A chart whose y-scale depended on the
+ * container width would make the same turn look like a different turn at a
+ * different window size; a fixed viewBox does not.
+ */
+
+const { DASH, formatTps, formatTokens } = __req("src/client/format.js")
+
+/** Logical drawing box. Height is chosen so the curve panel matches the summary. */
+const CURVE_VIEW_WIDTH = 100
+const CURVE_PLOT_HEIGHT = 48
+
+/** Vertical inset reserved so a peak touching the axis maximum is not clipped. */
+const PLOT_INSET = 3
+
+/** Axis labels are read as magnitudes, so they never carry the `≈` of a rate. */
+function formatAxis(value) {
+  if (!Number.isFinite(value) || value <= 0) return DASH
+  return formatTokens(value)
+}
+
+/**
+ * Smallest member of the 1/2/2.5/5 x 10^k ladder that is `>= value`.
+ *
+ * A raw maximum as the axis ceiling (e.g. `673`) would place the peak exactly on
+ * the top gridline with no headroom and produce unreadable axis labels; a ladder
+ * ceiling keeps the peak visible and the label round. Deterministic by
+ * construction, which is what lets the geometry be snapshot-tested.
+ */
+function niceCeiling(value) {
+  if (!(Number.isFinite(value) && value > 0)) return 1
+  const exponent = Math.floor(Math.log10(value))
+  const base = 10 ** exponent
+  for (const step of [1, 2, 2.5, 5]) {
+    if (value <= step * base * (1 + 1e-9)) return step * base
+  }
+  return 10 * base
+}
+
+/** x coordinate of one compressed instant, or `null` when it is not drawable. */
+function xOf(timeMs, durationMs) {
+  if (!Number.isFinite(timeMs)) return null
+  if (!(durationMs > 0)) return 0
+  return Math.min(CURVE_VIEW_WIDTH, Math.max(0, (timeMs / durationMs) * CURVE_VIEW_WIDTH))
+}
+
+/** y coordinate of one rate against the axis ceiling. */
+function yOf(tps, axisMax) {
+  const usable = CURVE_PLOT_HEIGHT - PLOT_INSET * 2
+  const ratio = axisMax > 0 ? Math.min(1, Math.max(0, tps / axisMax)) : 0
+  return CURVE_PLOT_HEIGHT - PLOT_INSET - ratio * usable
+}
+
+/** Coordinates and a path string for one series' drawable stretch. */
+function buildSeries(points, span, durationMs, axisMax) {
+  /**
+   * Three states, and they mean different things:
+   *
+   *   - `undefined` — the snapshot carries no span metadata at all (an older
+   *     curve object). Nothing is filtered;
+   *   - `null` — the phase has no evidence in this turn. Nothing is drawn;
+   *   - an object — only that interval is drawn.
+   *
+   * Collapsing the first two would make a legacy snapshot lose both curves.
+   */
+  if (span === null) return { present: false, points: 0, path: null, coordinates: [], peak: null }
+
+  const drawn = []
+  for (const point of Array.isArray(points) ? points : []) {
+    if (!Number.isFinite(point?.timeMs) || !Number.isFinite(point?.tps)) continue
+    /**
+     * Only the stretch where this phase has evidence is drawn. Outside it the
+     * series reads zero because the phase is absent, and drawing that as a flat
+     * zero line would present "reasoning has ended" as "reasoning throughput
+     * collapsed" (see `phaseSpans` in `src/core/curve.js`).
+     */
+    if (span !== undefined && (point.timeMs < span.startMs || point.timeMs > span.endMs)) continue
+    const x = xOf(point.timeMs, durationMs)
+    if (x === null) continue
+    drawn.push({ x, y: yOf(point.tps, axisMax), tps: point.tps, timeMs: point.timeMs })
+  }
+
+  if (drawn.length < 2) {
+    return { present: false, points: drawn.length, path: null, coordinates: drawn, peak: null }
+  }
+
+  const path = drawn
+    .map((point, index) => `${index === 0 ? 'M' : 'L'}${round(point.x)} ${round(point.y)}`)
+    .join(' ')
+
+  let peak = drawn[0]
+  for (const point of drawn) if (point.tps > peak.tps) peak = point
+  return { present: true, points: drawn.length, path, coordinates: drawn, peak }
+}
+
+/** Two decimals is well below one device pixel in a `100`-wide stretched viewBox. */
+function round(value) {
+  return Math.round(value * 100) / 100
+}
+
+/**
+ * Build the curve panel's view model.
+ *
+ * @param {object|null|undefined} settled the settled turn snapshot
+ * @returns {object|null} `null` when the turn carries no curve at all, which is
+ *   what makes the completed card non-interactive for that turn
+ */
+function curveViewModel(settled) {
+  const curve = settled?.curve
+  if (!curve || typeof curve !== 'object') return null
+
+  const durationMs = Number.isFinite(curve.durationMs) ? Math.max(0, curve.durationMs) : 0
+  /**
+   * A snapshot that predates `phaseSpans` carries no availability metadata, so
+   * `undefined` means "draw what is there" rather than "this phase is absent".
+   */
+  const hasSpans = curve.phaseSpans !== null && typeof curve.phaseSpans === 'object'
+  const spanOf = phase => (hasSpans ? (curve.phaseSpans[phase] ?? null) : undefined)
+  /**
+   * The axis is scaled by the **full-series** peak, never by the drawn points:
+   * downsampling is a drawing budget and may not rescale the chart either.
+   * `downsampleSeries` guarantees the peak-bearing point survives, so the drawn
+   * curve reaches the top of the axis rather than falling short of it.
+   */
+  const peakValue = Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : 0
+  const axisMax = niceCeiling(peakValue)
+
+  const reasoning = buildSeries(curve.reasoning, spanOf('reasoning'), durationMs, axisMax)
+  const output = buildSeries(curve.output, spanOf('output'), durationMs, axisMax)
+
+  /** The series that actually holds the global peak, so the marker sits on it. */
+  const leader = (output.peak?.tps ?? -1) > (reasoning.peak?.tps ?? -1) ? 'output' : 'reasoning'
+  const leaderSeries = leader === 'output' ? output : reasoning
+
+  return {
+    kind: 'curve',
+    durationMs,
+    width: CURVE_VIEW_WIDTH,
+    height: CURVE_PLOT_HEIGHT,
+    axis: { max: axisMax, display: formatAxis(axisMax) },
+    /**
+     * Both series are always listed, in a fixed order, so the legend never
+     * changes shape between turns. `present: false` means the phase produced
+     * nothing to draw — an honest "no evidence", not a zero line.
+     */
+    series: [
+      { key: 'reasoning', tone: 'neutral', ...reasoning },
+      { key: 'output', tone: 'accent', ...output },
+    ],
+    /**
+     * The peak is a sample of a shape-estimated series, so it is `≈` even when
+     * the generated total is exact — a curve point is not a provider-certified
+     * maximum (`docs/METRICS_SPEC.md` §9). `x`/`y` place the marker on the
+     * leader series; they are `null` when nothing is drawable.
+     */
+    peak: {
+      value: peakValue,
+      display: peakValue > 0 ? `≈${formatTps(peakValue)}` : DASH,
+      unit: 'tokens/s',
+      approximate: true,
+      leader,
+      x: leaderSeries.peak === null ? null : round(leaderSeries.peak.x),
+      y: leaderSeries.peak === null ? null : round(leaderSeries.peak.y),
+    },
+    /** Drawn vertex count, so a test can assert the SVG input is bounded. */
+    drawnPoints: reasoning.points + output.points,
+  }
+}
+
+;Object.assign(__exports, { CURVE_VIEW_WIDTH, CURVE_PLOT_HEIGHT, niceCeiling, curveViewModel })
+			},
+			"src/client/completed/view-mode.js": function (__exports) {
+/**
+ * Completed-card presentation mode — the whole interaction state machine, pure.
+ *
+ * The card shows one of two views of the same settled turn: the metric summary
+ * by default, the throughput curve while the reader is pointing at or focused on
+ * it. That is the entire interaction, so it lives in one pure function that a
+ * Node test can drive through every transition without a DOM, and
+ * `CompletedMeter.js` is left with nothing but the wiring.
+ *
+ * Two decisions are worth stating because they are not obvious:
+ *
+ *   - **Focus is the touch path.** A tap focuses a `tabindex="0"` element in
+ *     every current mobile browser, so there is no separate touch handler and no
+ *     `:hover` emulation to keep in sync. Blurring returns to the summary.
+ *   - **A blur that stays inside the card does not close the curve.** `blur`
+ *     fires while focus moves between elements, so without the guard a future
+ *     focusable child would make the view flicker shut on the way to it.
+ *
+ * An un-interactive card (a turn with no curve data) can never leave the
+ * summary: there is nothing behind the hover, so nothing may appear to be.
+ */
+
+const COMPLETED_VIEW_SUMMARY = 'summary'
+const COMPLETED_VIEW_CURVE = 'curve'
+
+/**
+ * @param {'summary'|'curve'} mode current mode
+ * @param {{type: string, staysInside?: boolean}} event one interaction event
+ * @param {{interactive: boolean}} context whether an alternate view exists
+ * @returns {'summary'|'curve'} the next mode
+ */
+function nextViewMode(mode, event, { interactive }) {
+  /**
+   * An un-interactive card has no alternate view, so it is in the summary by
+   * invariant — not merely by the absence of an event that would open the curve.
+   */
+  if (!interactive) return COMPLETED_VIEW_SUMMARY
+
+  switch (event?.type) {
+    case 'enter':
+    case 'focus':
+      return COMPLETED_VIEW_CURVE
+    case 'leave':
+    case 'reset':
+      return COMPLETED_VIEW_SUMMARY
+    case 'blur':
+      return event.staysInside === true ? mode : COMPLETED_VIEW_SUMMARY
+    default:
+      return mode
+  }
+}
+
+;Object.assign(__exports, { COMPLETED_VIEW_SUMMARY, COMPLETED_VIEW_CURVE, nextViewMode })
 			},
 			"src/client/completed/CompletedMeter.js": function (__exports) {
 /**
@@ -5699,16 +6485,21 @@ function completedTree(createElement, view, translate) {
  *     It never reads a `SessionEvent`, never sees a settled snapshot, never
  *     computes a rate, a token count, a duration or a quality marker, and never
  *     decides whether `≈` applies — `src/client/ui-model.js` already decided;
- *   - it owns **no timer**: a completed turn is static, so there is no ticker
+ *   - geometry is not computed here either: `curveViewModel` runs once per
+ *     settled turn and the SVG receives finished path data;
+ *   - it owns **no timer**. A completed turn is static, so there is no ticker
  *     here, no elapsed refresh and no rolling value. The card changes only when a
- *     new view model arrives (session switch, next turn's end, rebaseline);
- *   - `role="group"` with a per-turn accessible name, because this is static
- *     content that must not be announced as a live region;
- *   - Phase 4 renders **no chart**. Hover and focus change nothing here.
+ *     new view model arrives (session switch, next turn's end, rebaseline), or
+ *     when the reader asks for the other view;
+ *   - the interaction is `nextViewMode` in `./view-mode.js`, which is where the
+ *     hover/focus/blur rules are stated and tested. This file only translates DOM
+ *     events into that function's vocabulary.
  */
 
-const { createElement: h } = __ext("react")
+const { createElement: h, useEffect, useRef, useState } = __ext("react")
 const { completedTree } = __req("src/client/completed/completed-tree.js")
+const { curveViewModel } = __req("src/client/completed/curve-view-model.js")
+const { COMPLETED_VIEW_SUMMARY, nextViewMode } = __req("src/client/completed/view-mode.js")
 
 /**
  * The card.
@@ -5716,7 +6507,39 @@ const { completedTree } = __req("src/client/completed/completed-tree.js")
  * @param {{view: object, translate: (key: string) => string}} props
  */
 function CompletedMeter({ view, translate }) {
-  return completedTree(h, view, translate)
+  /**
+   * Built once per settled turn. `view` is memoized by the controller per
+   * `(session, turn)`, so hovering does not rebuild the geometry while a new turn
+   * does. The effect below is the only other writer, and it runs exactly when the
+   * turn changes.
+   */
+  const [curveView, setCurveView] = useState(() => curveViewModel(view))
+  const [mode, setMode] = useState(COMPLETED_VIEW_SUMMARY)
+
+  const previousView = useRef(view)
+  useEffect(() => {
+    if (previousView.current === view) return
+    previousView.current = view
+    setCurveView(curveViewModel(view))
+    setMode(COMPLETED_VIEW_SUMMARY)
+  }, [view])
+
+  /** No curve means nothing is hidden behind hover, so the card stays inert. */
+  const interactive = curveView !== null
+  const dispatch = (event) => setMode(current => nextViewMode(current, event, { interactive }))
+
+  return completedTree(h, view, translate, {
+    mode,
+    curveView,
+    onEnter: () => dispatch({ type: 'enter' }),
+    onLeave: () => dispatch({ type: 'leave' }),
+    onFocus: () => dispatch({ type: 'focus' }),
+    onBlur: (event) => {
+      const next = event?.relatedTarget
+      const staysInside = next !== null && next !== undefined && event?.currentTarget?.contains?.(next) === true
+      dispatch({ type: 'blur', staysInside })
+    },
+  })
 }
 
 ;Object.assign(__exports, { CompletedMeter })
@@ -5725,110 +6548,93 @@ function CompletedMeter({ view, translate }) {
 /**
  * Scoped stylesheet for the live meter.
  *
- * Delivered as a module string rather than a `.css` file because the DSH
- * browser module table loads a single classic script: there is no CSS import
- * mechanism inside a factory bundle, and a runtime-injected `<style>` is the
- * shipped pattern (the module system claims `style[data-plugin]` tags for HMR
- * bookkeeping — `dsh-client-modules/lib/client.js` `claimStyles`).
+ * Reference: `docs/assets/reference-live-ttft.png` and
+ * `docs/assets/reference-live-streaming.png`. Measured from those captures,
+ * corrected to CSS pixels against the composer placeholder's ink height: a
+ * centred horizontal pill roughly 49 px tall, radius about 10 px, one filled
+ * surface, and a single dominant number per state.
  *
- * Rules:
- *   - every selector is scoped under `.dsh-tpm-root`; no element/global
- *     selectors, no body/typography pollution;
- *   - colours come from host `--dsw-*` alias tokens so both themes follow the
- *     active DSH theme; fallbacks cover token absence;
- *   - the output accent is the one plugin-defined value, scoped to the root
- *     with a light default and the dark override keyed on
- *     `body[data-ds-dark-theme]`, the same selector the shipped theme CSS uses;
- *   - tabular digits for every number; no fixed viewport width (no
- *     `44.25rem`-style hard widths), so narrow docks wrap instead of
- *     overflowing horizontally;
- *   - `prefers-reduced-motion` disables the only transition.
+ * What that measurement changed, relative to the functional skeleton:
+ *
+ *   - the reference's first visual focus is the *number*, not a text row. Each
+ *     state therefore renders its number through `.dsh-tpm-number` at
+ *     `1.7 x` the host content size, and everything else is `0.95 x`-`1.25 x`;
+ *   - the unit is a separate baseline-aligned run at `0.95 x` instead of being
+ *     glued to the digits at the same size;
+ *   - the pill keeps the reference's generous horizontal padding (about 1.55 em)
+ *     so the number is not crowded against the border;
+ *   - the separator is a hairline that stretches the content height, which is
+ *     what makes one pill read as two regions rather than one run-on sentence.
+ *
+ * Delivery and scoping rules are documented once in `../base-css.js`.
  */
 
 const LIVE_STYLE_ID = 'dsh-tpm-live-style'
 
 const LIVE_CSS = `
-.dsh-tpm-root {
-  --dsh-tpm-accent: #d9480f;
-  box-sizing: border-box;
-  width: 100%;
-  display: flex;
-  justify-content: center;
-  font-variant-numeric: tabular-nums;
-}
-body[data-ds-dark-theme] .dsh-tpm-root {
-  --dsh-tpm-accent: #ff922b;
-}
 .dsh-tpm-pill {
   box-sizing: border-box;
-  max-width: 100%;
+  max-width: min(100%, var(--dsh-composer-card-max-width, 100%));
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 5px 14px;
-  border-radius: 12px;
-  border: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
-  background: var(--dsw-specific-tip, rgba(127, 130, 135, .10));
+  gap: calc(var(--dsh-tpm-font) * .5);
+  padding: calc(var(--dsh-tpm-font) * .62) calc(var(--dsh-tpm-font) * 1.55);
+  border-radius: 10px;
+  border: .5px solid var(--dsh-tpm-hairline);
+  background: var(--dsh-tpm-surface);
   color: var(--dsw-alias-label-primary, #3c3c3d);
-  font-size: 13px;
-  line-height: 20px;
-  transition: opacity 160ms ease;
+  line-height: 1.25;
 }
-.dsh-tpm-lead {
-  font-size: 15px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.dsh-tpm-label {
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary, #7f8287);
-}
-.dsh-tpm-tps {
-  color: var(--dsh-tpm-accent);
-  font-size: 16px;
+.dsh-tpm-number {
+  font-size: calc(var(--dsh-tpm-font) * 1.7);
   font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: .01em;
+  line-height: 1.15;
+  letter-spacing: -.01em;
+  color: var(--dsw-alias-label-primary, #3c3c3d);
+}
+.dsh-tpm-number[data-tone="accent"] {
+  color: var(--dsh-tpm-accent);
 }
 .dsh-tpm-unit {
-  font-size: 11px;
+  font-size: calc(var(--dsh-tpm-font) * .95);
   font-weight: 400;
   color: var(--dsw-alias-label-secondary, #7f8287);
-  margin-left: -4px;
+}
+.dsh-tpm-label {
+  font-size: calc(var(--dsh-tpm-font) * .95);
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
 }
 .dsh-tpm-stage {
+  font-size: calc(var(--dsh-tpm-font) * 1.15);
   color: var(--dsw-alias-label-secondary, #7f8287);
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-}
-.dsh-tpm-sep {
-  width: .5px;
-  align-self: stretch;
-  min-height: 16px;
-  background: var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
-  opacity: .8;
 }
 .dsh-tpm-elapsed {
-  color: var(--dsw-alias-label-tertiary, #a2a4a6);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+  font-size: calc(var(--dsh-tpm-font) * 1.25);
+  color: var(--dsw-alias-label-secondary, #7f8287);
 }
 .dsh-tpm-tool {
+  font-size: calc(var(--dsh-tpm-font) * 1.25);
+  font-weight: 600;
   color: var(--dsw-alias-label-primary, #3c3c3d);
-  font-size: 13px;
-  font-weight: 550;
   max-width: 16em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dsh-tpm-muted {
-  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+.dsh-tpm-sep {
+  width: .5px;
+  align-self: stretch;
+  min-height: calc(var(--dsh-tpm-font) * 1.6);
+  background: var(--dsh-tpm-hairline);
 }
-@media (prefers-reduced-motion: reduce) {
-  .dsh-tpm-pill { transition: none; }
+/* A number and its unit are one visual token: keep them from wrapping apart. */
+.dsh-tpm-metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: calc(var(--dsh-tpm-font) * .25);
+  white-space: nowrap;
 }
 `
 
@@ -5838,49 +6644,59 @@ body[data-ds-dark-theme] .dsh-tpm-root {
 /**
  * Scoped stylesheet for the completed turn card.
  *
- * Same delivery rule as the live pill: a module string rendered into one
- * reference-counted `<style data-plugin>` tag, because a DSH factory bundle has
- * no CSS import mechanism and the module system claims `style[data-plugin]` tags
- * for HMR bookkeeping.
+ * References: `docs/assets/reference-completed-summary.png` (the metric grid)
+ * and `docs/assets/reference-hover-curve.png` (the alternate view). Both are
+ * measured in `docs/IMPLEMENTATION_LOG.md`; the numbers that shaped this file:
  *
- * Rules:
- *   - every selector is scoped under `.dsh-tpm-root`; no element/global
- *     selectors, no body/typography pollution;
- *   - colours resolve through host `--dsw-*` alias tokens, so light and dark come
- *     from the active DSH theme rather than from a second theme system; the
- *     fallbacks exist only so a missing token degrades to a readable value;
- *   - the grid is `repeat(4, minmax(0, 1fr))` and collapses to `repeat(2, 1fr)`,
- *     never to a fixed rem width and never to horizontal overflow;
- *   - separators are logical-property borders, so they survive the two-column
- *     wrap without leaving a stray edge on the first cell of row two;
- *   - tabular digits everywhere; nothing here animates (the card is static).
+ *   - card surface `#f8f7f5` and a roughly 10 px corner radius;
+ *   - **four equal columns** with a hairline between each and about 26 px of
+ *     inline padding inside every column, so the first label's ink lands about
+ *     26 px from the card edge;
+ *   - a three-row rhythm per column: 13 px label, 22 px value, 12 px secondary,
+ *     with 20 px of card padding above and below. That is about 113 px of card,
+ *     which is what the reference measures;
+ *   - the curve view replaces the **first two** columns with one panel spanning
+ *     the same two grid tracks, so the generated-token and TTFT columns keep
+ *     their exact positions and dividers across the switch.
+ *
+ * Both views are stacked in one grid cell (`.dsh-tpm-views`), which is what makes
+ * the card height stable: the container is as tall as the taller view and a
+ * switch cannot change it — at any width, at any host font size, and without
+ * measuring anything in JavaScript.
+ *
+ * Delivery and scoping rules are documented once in `../base-css.js`.
  */
 
 const COMPLETED_STYLE_ID = 'dsh-tpm-completed-style'
 
 const COMPLETED_CSS = `
-.dsh-tpm-root {
-  --dsh-tpm-accent: #d9480f;
-  box-sizing: border-box;
-  width: 100%;
-  display: flex;
-  justify-content: center;
-  font-variant-numeric: tabular-nums;
-}
-body[data-ds-dark-theme] .dsh-tpm-root {
-  --dsh-tpm-accent: #ff922b;
-}
 .dsh-tpm-card {
   box-sizing: border-box;
   width: 100%;
-  max-width: 100%;
-  padding: 10px 16px 8px;
-  border-radius: 12px;
-  border: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
-  background: var(--dsw-specific-tip, rgba(127, 130, 135, .10));
+  max-width: min(100%, var(--dsh-composer-card-max-width, 100%));
+  padding: calc(var(--dsh-tpm-font) * 1.55) 0;
+  border-radius: 10px;
+  border: .5px solid var(--dsh-tpm-hairline);
+  background: var(--dsh-tpm-surface);
   color: var(--dsw-alias-label-primary, #3c3c3d);
-  font-size: 13px;
-  line-height: 18px;
+  line-height: 1.4;
+}
+/* The card is focusable only when it has an alternate view to reveal, and the
+   ring is replaced rather than removed. */
+.dsh-tpm-card:focus-visible {
+  outline: 2px solid var(--dsh-tpm-accent);
+  outline-offset: 2px;
+}
+.dsh-tpm-views {
+  display: grid;
+}
+.dsh-tpm-view {
+  grid-area: 1 / 1;
+  transition: opacity 220ms ease;
+}
+.dsh-tpm-view[data-visible="false"] {
+  opacity: 0;
+  pointer-events: none;
 }
 .dsh-tpm-cells {
   display: grid;
@@ -5889,17 +6705,15 @@ body[data-ds-dark-theme] .dsh-tpm-root {
 }
 .dsh-tpm-cell {
   min-width: 0;
-  padding: 2px 14px;
-  border-inline-start: .5px solid transparent;
+  padding-inline: calc(var(--dsh-tpm-font) * 2);
 }
-.dsh-tpm-cell + .dsh-tpm-cell {
-  border-inline-start-color: var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
+.dsh-tpm-cell + .dsh-tpm-cell,
+.dsh-tpm-curve-panel + .dsh-tpm-cell {
+  border-inline-start: .5px solid var(--dsh-tpm-hairline);
 }
-.dsh-tpm-cell:first-child { padding-inline-start: 0; }
-.dsh-tpm-cell:last-child { padding-inline-end: 0; }
 .dsh-tpm-cell-label {
-  font-size: 12px;
-  line-height: 16px;
+  font-size: calc(var(--dsh-tpm-font) * .95);
+  line-height: 1.4;
   color: var(--dsw-alias-label-tertiary, #a2a4a6);
   white-space: nowrap;
   overflow: hidden;
@@ -5908,26 +6722,30 @@ body[data-ds-dark-theme] .dsh-tpm-root {
 .dsh-tpm-cell-value {
   display: flex;
   align-items: baseline;
-  gap: 4px;
+  gap: calc(var(--dsh-tpm-font) * .28);
   min-width: 0;
-  margin: 3px 0 2px;
+  margin: calc(var(--dsh-tpm-font) * .3) 0 calc(var(--dsh-tpm-font) * .45);
 }
 .dsh-tpm-cell-number {
-  font-size: 19px;
-  line-height: 24px;
+  font-size: calc(var(--dsh-tpm-font) * 1.7);
+  line-height: 1.28;
   font-weight: 600;
+  letter-spacing: -.01em;
   color: var(--dsw-alias-label-primary, #3c3c3d);
   white-space: nowrap;
 }
+.dsh-tpm-cell[data-metric="outputTps"] .dsh-tpm-cell-number {
+  color: var(--dsh-tpm-accent);
+}
 .dsh-tpm-cell-unit {
-  font-size: 11px;
-  line-height: 14px;
+  font-size: calc(var(--dsh-tpm-font) * .95);
+  line-height: 1.2;
   color: var(--dsw-alias-label-tertiary, #a2a4a6);
   white-space: nowrap;
 }
 .dsh-tpm-cell-sub {
-  font-size: 11px;
-  line-height: 15px;
+  font-size: calc(var(--dsh-tpm-font) * .92);
+  line-height: 1.35;
   color: var(--dsw-alias-label-secondary, #7f8287);
   white-space: nowrap;
   overflow: hidden;
@@ -5935,16 +6753,122 @@ body[data-ds-dark-theme] .dsh-tpm-root {
 }
 .dsh-tpm-cell-sub[data-tone="warn"] { color: var(--dsw-alias-state-warn-label, #b26a00); }
 .dsh-tpm-cell-sub[data-tone="error"] { color: var(--dsw-alias-state-error-primary, #d03050); }
+.dsh-tpm-curve-panel {
+  grid-column: span 2;
+  min-width: 0;
+  padding-inline: calc(var(--dsh-tpm-font) * 2);
+  display: flex;
+  flex-direction: column;
+}
+.dsh-tpm-curve-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(var(--dsh-tpm-font) * .75);
+  min-width: 0;
+  font-size: calc(var(--dsh-tpm-font) * .95);
+  line-height: 1.45;
+}
+.dsh-tpm-legend {
+  display: inline-flex;
+  align-items: baseline;
+  gap: calc(var(--dsh-tpm-font) * .85);
+  min-width: 0;
+  overflow: hidden;
+}
+.dsh-tpm-legend-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: calc(var(--dsh-tpm-font) * .38);
+  color: var(--dsw-alias-label-secondary, #7f8287);
+  white-space: nowrap;
+}
+.dsh-tpm-legend-item[data-absent="true"] { opacity: .45; }
+.dsh-tpm-legend-swatch {
+  width: calc(var(--dsh-tpm-font) * .5);
+  height: calc(var(--dsh-tpm-font) * .5);
+  border-radius: 1px;
+  background: var(--dsw-alias-label-tertiary, #a2a4a6);
+  transform: translateY(-1px);
+}
+.dsh-tpm-legend-item[data-series="output"] .dsh-tpm-legend-swatch {
+  background: var(--dsh-tpm-accent);
+}
+.dsh-tpm-peak {
+  display: inline-flex;
+  align-items: baseline;
+  gap: calc(var(--dsh-tpm-font) * .32);
+  white-space: nowrap;
+}
+.dsh-tpm-peak-label { color: var(--dsw-alias-label-tertiary, #a2a4a6); }
+.dsh-tpm-peak-value {
+  font-size: calc(var(--dsh-tpm-font) * 1.25);
+  font-weight: 600;
+  color: var(--dsh-tpm-accent);
+}
+.dsh-tpm-peak-unit { color: var(--dsw-alias-label-tertiary, #a2a4a6); }
+.dsh-tpm-plot {
+  display: flex;
+  align-items: stretch;
+  height: calc(var(--dsh-tpm-font) * 3.7);
+  margin-top: calc(var(--dsh-tpm-font) * .43);
+  min-width: 0;
+}
+.dsh-tpm-plot-area {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.dsh-tpm-plot-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.dsh-tpm-series {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.dsh-tpm-series[data-series="reasoning"] { stroke: var(--dsw-alias-label-tertiary, #a2a4a6); }
+.dsh-tpm-series[data-series="output"] { stroke: var(--dsh-tpm-accent); }
+.dsh-tpm-peak-dot {
+  position: absolute;
+  width: calc(var(--dsh-tpm-font) * .42);
+  height: calc(var(--dsh-tpm-font) * .42);
+  margin: 0;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--dsw-alias-label-secondary, #7f8287);
+}
+.dsh-tpm-peak-dot[data-leader="output"] { background: var(--dsh-tpm-accent); }
+.dsh-tpm-axis-max {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  padding-inline-start: calc(var(--dsh-tpm-font) * .4);
+  font-size: calc(var(--dsh-tpm-font) * .85);
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+.dsh-tpm-plot-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  font-size: calc(var(--dsh-tpm-font) * .92);
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
 .dsh-tpm-foot {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 4px 10px;
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
-  font-size: 11px;
-  line-height: 15px;
+  gap: calc(var(--dsh-tpm-font) * .35) calc(var(--dsh-tpm-font) * .8);
+  margin: calc(var(--dsh-tpm-font) * .6) calc(var(--dsh-tpm-font) * 2) 0;
+  padding-top: calc(var(--dsh-tpm-font) * .5);
+  border-top: .5px solid var(--dsh-tpm-hairline);
+  font-size: calc(var(--dsh-tpm-font) * .85);
+  line-height: 1.4;
   color: var(--dsw-alias-label-tertiary, #a2a4a6);
 }
 .dsh-tpm-foot-item {
@@ -5954,24 +6878,95 @@ body[data-ds-dark-theme] .dsh-tpm-root {
 }
 .dsh-tpm-foot-item + .dsh-tpm-foot-item::before {
   content: '·';
-  margin-inline-end: 10px;
+  margin-inline-end: calc(var(--dsh-tpm-font) * .8);
   color: var(--dsw-alias-label-tertiary, #a2a4a6);
 }
 @media (max-width: 34rem) {
-  .dsh-tpm-cells { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 10px; }
-  .dsh-tpm-cell:nth-child(odd) {
-    border-inline-start-color: transparent;
-    padding-inline-start: 0;
+  .dsh-tpm-cells {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: calc(var(--dsh-tpm-font) * .8);
   }
-  .dsh-tpm-cell:nth-child(even) { padding-inline-end: 0; }
+  .dsh-tpm-cell:nth-child(odd) { border-inline-start-color: transparent; }
   .dsh-tpm-cell:nth-child(n + 3) {
-    border-block-start: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
-    padding-block-start: 8px;
+    border-block-start: .5px solid var(--dsh-tpm-hairline);
+    padding-block-start: calc(var(--dsh-tpm-font) * .6);
+  }
+  .dsh-tpm-curve-panel + .dsh-tpm-cell {
+    border-inline-start-color: transparent;
+    border-block-start: .5px solid var(--dsh-tpm-hairline);
+    padding-block-start: calc(var(--dsh-tpm-font) * .6);
+  }
+  .dsh-tpm-curve-panel + .dsh-tpm-cell + .dsh-tpm-cell {
+    border-block-start: .5px solid var(--dsh-tpm-hairline);
+    padding-block-start: calc(var(--dsh-tpm-font) * .6);
   }
 }
 `
 
 ;Object.assign(__exports, { COMPLETED_STYLE_ID, COMPLETED_CSS })
+			},
+			"src/client/base-css.js": function (__exports) {
+/**
+ * Shared scoped tokens for the plugin's two stylesheets.
+ *
+ * Delivered as a module string for the same reason as the view stylesheets: a
+ * DSH factory bundle has no CSS import mechanism, and the module system claims
+ * `style[data-plugin]` tags for HMR bookkeeping. `MeterRoot.js` concatenates
+ * this block with the live and completed sheets into one tag.
+ *
+ * Rules:
+ *   - every selector is scoped under `.dsh-tpm-root`; the only exception is the
+ *     documented `body[data-ds-dark-theme] .dsh-tpm-root` theme override, which
+ *     is the selector the shipped DSH theme CSS itself uses;
+ *   - no element selectors, no `body` typography, no global `div`/`span`/`svg`
+ *     rules — the plugin must not be able to restyle anything it does not own;
+ *   - every colour resolves through a host `--dsw-*` alias token so light and
+ *     dark come from the active DSH theme; the fallbacks exist only so a missing
+ *     token degrades to a readable value;
+ *   - **one type scale.** `--dsh-tpm-font` follows the host's secondary content
+ *     size (the same variable `StatsPills` reads), and every other size is a
+ *     multiple of it. A user who changes DSH's font size therefore scales the
+ *     whole meter with the surrounding UI instead of leaving one card behind.
+ */
+
+/**
+ * `--dsh-tpm-accent` is the plugin's single self-defined value.
+ *
+ * Measured from `docs/assets/reference-completed-summary.png`, whose output-rate
+ * number is `#fb8147`. That exact value scores 2.31:1 against the reference's own
+ * card surface, which is below the 3:1 floor for large text, so the shipped
+ * accent keeps the reference's hue (about 21 degrees) and darkens it to 3.4:1 —
+ * closer to the reference than the previous `#d9480f` while remaining legible.
+ * `docs/IMPLEMENTATION_LOG.md` records the measurement and the deviation.
+ */
+const BASE_STYLE_ID = 'dsh-tpm-base-style'
+
+const BASE_CSS = `
+.dsh-tpm-root {
+  --dsh-tpm-font: var(--dsh-content-font-size-secondary, 13px);
+  --dsh-tpm-accent: #d9600f;
+  --dsh-tpm-surface: var(--dsw-alias-bg-module-platform, var(--dsw-specific-tip, rgba(127, 130, 135, .10)));
+  --dsh-tpm-hairline: var(--dsw-alias-separator-primary, var(--dsw-alias-border-l1, rgba(127, 130, 135, .28)));
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  justify-content: center;
+  font-size: var(--dsh-tpm-font);
+  font-variant-numeric: tabular-nums;
+}
+body[data-ds-dark-theme] .dsh-tpm-root {
+  --dsh-tpm-accent: #ff9a5c;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dsh-tpm-root * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+`
+
+;Object.assign(__exports, { BASE_STYLE_ID, BASE_CSS })
 			},
 			"src/client/live/MeterRoot.js": function (__exports) {
 /**
@@ -5983,10 +6978,11 @@ body[data-ds-dark-theme] .dsh-tpm-root {
  *   - the live pill while a turn is open;
  *   - the completed card once the session's turn has settled;
  *   - exactly one subscription per attached session (attach is idempotent);
- *   - exactly one ~200 ms presentation ticker while a **live** view is on screen,
- *     and **no timer at all** while the completed card is on screen. A settled
- *     turn is static, so the card is written once and never re-rendered by a
- *     clock; the scheduler stops on the same state advance that reveals it;
+ *   - exactly one presentation ticker while a **live** view is on screen, at the
+ *     single cadence owned by `./cadence.js`, and **no timer at all** while the
+ *     completed card is on screen. A settled turn is static, so the card is
+ *     written once and never re-rendered by a clock; the scheduler stops on the
+ *     same state advance that reveals it;
  *   - one reference-counted style tag for the whole plugin (live pill CSS and
  *     completed card CSS together), removed with the last unmount so HMR cannot
  *     accumulate `style` elements.
@@ -5995,20 +6991,43 @@ body[data-ds-dark-theme] .dsh-tpm-root {
  * from a single state advance in the controller (see `controller.js` `project`),
  * so a `turn/end` publish yields the card immediately and a following
  * `turn/start` yields the pill immediately.
+ *
+ * ## One state update per presentation tick
+ *
+ * `onRender` calls `refreshView()` and nothing else. An earlier revision also
+ * called a `useReducer` bump to "force" the render; the audit that removed it:
+ *
+ *   - `refreshView` calls `setView` with the object `controller.project(id,
+ *     Date.now())` returned;
+ *   - the projection key includes the presentation instant
+ *     (`controller.js` `projectionKey`), so a tick never re-uses the cached
+ *     view object — `setView` therefore always receives a new identity and
+ *     always schedules exactly one render;
+ *   - a second dispatcher in the same tick could therefore only ever add a
+ *     redundant update, and at the selected cadence that is a measurable cost
+ *     with no visible effect.
+ *
+ * The invariant is asserted by `test/meter-root.test.js`, which drives a real
+ * `onRender` through a recording React stub and counts dispatches per tick.
  */
 
-const { createElement: h, useEffect, useReducer, useRef, useState } = __ext("react")
+const { createElement: h, useEffect, useRef, useState } = __ext("react")
 const { createPresentationScheduler } = __req("src/client/live/refresh.js")
 const { LivePill, meterDiagnostics } = __req("src/client/live/LiveMeter.js")
 const { CompletedMeter } = __req("src/client/completed/CompletedMeter.js")
 const { LIVE_CSS, LIVE_STYLE_ID } = __req("src/client/live/live-css.js")
 const { COMPLETED_CSS } = __req("src/client/completed/completed-css.js")
+const { BASE_CSS } = __req("src/client/base-css.js")
 
 /** Reference count for the plugin's single style tag. */
 let styleUsers = 0
 
-/** Live pill CSS first, card CSS second; both are scoped under `.dsh-tpm-root`. */
-const PLUGIN_CSS = `${LIVE_CSS}\n${COMPLETED_CSS}`
+/**
+ * Shared tokens first, then the pill sheet, then the card sheet. The order is
+ * the cascade: the base block declares the tokens both view sheets consume, and
+ * neither view sheet redeclares them.
+ */
+const PLUGIN_CSS = `${BASE_CSS}\n${LIVE_CSS}\n${COMPLETED_CSS}`
 
 /** A projection that cannot change until an event arrives. */
 function isStatic(view) {
@@ -6046,7 +7065,6 @@ function makeMeterSlot({ controller, t, debug = false }) {
 
   return function TurnPerformanceMeter(props) {
     const sessionId = typeof props?.sessionId === 'string' && props.sessionId !== '' ? props.sessionId : null
-    const [, bump] = useReducer(count => count + 1, 0)
 
     // Debug-only: report the seat's actual prop shape once per session value, so
     // a missing `sessionId` standard prop shows up as itself rather than as a
@@ -6062,9 +7080,9 @@ function makeMeterSlot({ controller, t, debug = false }) {
     /**
      * The projected view is *state*, refreshed only by the presentation
      * scheduler (once per mount/session change, and while live on each tick) —
-     * never during render. The conversation dock re-renders its occupants on
-     * every chat update; if each of those renders re-projected `Date.now()`, the
-     * DOM would update at the chat's cadence and bypass the throttle.
+     * never during render. The slot's owner re-renders its occupants on every
+     * chat update; if each of those renders re-projected `Date.now()`, the DOM
+     * would update at the chat's cadence and bypass the throttle.
      */
     const [view, setView] = useState(() => (
       sessionId === null
@@ -6090,10 +7108,10 @@ function makeMeterSlot({ controller, t, debug = false }) {
       diagnostics.schedulerCreated += 1
       const created = createPresentationScheduler({
         intervalMs: controller.refreshMs,
+        // Exactly one state update per tick: `refreshView` owns the render.
         onRender: () => {
           diagnostics.renderCalls += 1
           refreshView()
-          bump()
         },
       })
       diagnostics.currentScheduler = created
@@ -6191,6 +7209,12 @@ const LOCALE_DICTS = Object.freeze({
     unavailable: 'unavailable',
     'quality.exact': 'exact',
     'quality.approximate': 'approximate',
+    // Curve view: the legend reuses `thinking`/`output`, so only the panel's own
+    // copy and the peak readout need entries here.
+    curveLabel: 'Throughput curve',
+    curveHint: 'Hover or focus for the throughput curve',
+    curveUnavailable: 'no throughput samples',
+    peak: 'peak',
   }),
   zh: Object.freeze({
     meterLabel: '实时性能',
@@ -6217,6 +7241,10 @@ const LOCALE_DICTS = Object.freeze({
     unavailable: '不可用',
     'quality.exact': '精确',
     'quality.approximate': '近似',
+    curveLabel: '吞吐曲线',
+    curveHint: '悬停或聚焦查看吞吐曲线',
+    curveUnavailable: '无吞吐采样',
+    peak: '峰值',
   }),
 })
 
@@ -6254,9 +7282,35 @@ function wrapTranslate(rawT) {
  *   2. create the presentation controller over `ctx.sessions`;
  *   3. dispose both on fiber teardown (HMR-safe);
  *   4. inject an independent `turn-performance-meter` entry into
- *      `conversation.composer.dock` — additive, `order: -10` places it
- *      directly beside the composer while the native `stats` occupant
- *      (order 0) stays untouched.
+ *      `conversation.input.dock` — the verified full-width seat **above the
+ *      composer card**, which is where the reference layout puts the meter.
+ *
+ * ## Why the seat moved (Phase 5B)
+ *
+ * Phase 3 registered in `conversation.composer.dock`, documented by DSH as
+ * "Ambient entries below the composer card". That seat is *below* the composer
+ * and already holds the native chat statistics (`client-ui-chat` `StatsPills`,
+ * id `stats`), so the meter rendered between the input box and the numbers it
+ * was competing with for width and attention.
+ *
+ * DSH exposes the correct region as `conversation.input.dock`
+ * (`kind: 'list'`, `scope: 'session'`, `owner: InputZone`, "Full-width entries
+ * above the composer card"), rendered by the owner immediately before
+ * `inputBar`:
+ *
+ *     zone !== undefined && renderSlot("conversation.input.dock", zone),
+ *     inputBar
+ *
+ * Native `stats` is untouched: it keeps its own seat and its own id.
+ *
+ * ## Order
+ *
+ * `order` is ascending within the list. The seat's shipped occupants are
+ * `todo` (0), `goal` (10) and `queue` (20), so `order: 30` places this entry
+ * **last** — directly above the composer card, below the native state panels.
+ * A negative order would have floated the meter above `todo`/`goal`, i.e. the
+ * one position that is *not* adjacent to the composer whenever a plan or a goal
+ * bar is on screen.
  *
  * Service keys (`slots`, `sessions`, `locale`) are the Cordis service names;
  * the package names they arrive from are declared in `package.json`
@@ -6268,8 +7322,15 @@ const { createController } = __req("src/client/live/controller.js")
 const { makeMeterSlot } = __req("src/client/live/MeterRoot.js")
 const { meterDiagnostics } = __req("src/client/live/LiveMeter.js")
 const { LOCALE_DICTS, LOCALE_NS, wrapTranslate } = __req("src/client/live/locale.js")
+const { DEFAULT_PRESENTATION_REFRESH_MS, REFRESH_OVERRIDE_STORAGE_KEY, resolvePresentationRefreshMs } = __req("src/client/live/cadence.js")
 
 const inject = ['slots', 'sessions', 'locale']
+
+/** The seat this plugin occupies, and the id it must never reuse. */
+const SLOT_NAME = 'conversation.input.dock'
+const SLOT_ID = 'turn-performance-meter'
+/** Last among the shipped occupants (`todo` 0, `goal` 10, `queue` 20). */
+const SLOT_ORDER = 30
 
 /**
  * Diagnostic switch (default OFF). When the browser local-storage key
@@ -6288,6 +7349,24 @@ function debugEnabled() {
   }
 }
 
+/**
+ * Debug-only cadence override, read once at apply time.
+ *
+ * This exists so the Phase 5A A/B could run the *production* code path at
+ * 200 ms, 50 ms and 10 ms without three rebuilds. It is unreachable unless the
+ * diagnostic switch is already on, so the shipped cadence has exactly one
+ * source (`./live/cadence.js`) and no persisted value can change it.
+ */
+function cadenceOverride() {
+  try {
+    return typeof window === 'undefined'
+      ? null
+      : window.localStorage?.getItem(REFRESH_OVERRIDE_STORAGE_KEY) ?? null
+  } catch {
+    return null
+  }
+}
+
 function apply(ctx) {
   const debug = debugEnabled()
 
@@ -6303,15 +7382,24 @@ function apply(ctx) {
   } catch { /* fall back to the built-in dictionary */ }
   const t = wrapTranslate(rawTranslate)
 
-  const controller = createController({ sessions: ctx.sessions, debug })
+  const refreshMs = debug
+    ? resolvePresentationRefreshMs(cadenceOverride())
+    : DEFAULT_PRESENTATION_REFRESH_MS
+
+  const controller = createController({ sessions: ctx.sessions, debug, refreshMs })
 
   /**
-   * Cordis effect semantics (verified live): `ctx.effect(fn)` runs `fn`
-   * immediately as setup and calls the **returned** function at fiber
-   * teardown — the same shape as the shipped `ctx.effect(() =>
-   * ctx.webServer.register(...))` call sites. Registering the disposal body
-   * directly would dispose the controller at startup, which is exactly the
-   * failure this comment exists to prevent.
+   * Cordis effect semantics: `ctx.effect(fn)` runs `fn` as setup and calls the
+   * **returned** function at fiber teardown — the same shape as the shipped
+   * `ctx.effect(() => ctx.webServer.register(...))` call sites. Registering the
+   * disposal body directly would dispose the controller at startup, which is
+   * exactly the failure this comment exists to prevent.
+   *
+   * The whole debug handle is built **inside** the setup callback, including the
+   * `meter()` accessor. An earlier revision attached `meter` right after
+   * `ctx.effect(...)` returned; that silently produced a handle without its
+   * accessor in the browser, because the setup callback had not run yet and the
+   * assignment threw into its own `catch`. One construction site, one lifetime.
    */
   ctx.effect(() => {
     if (debug) {
@@ -6320,6 +7408,25 @@ function apply(ctx) {
           controller,
           diagnostics: (sessionId) => controller.diagnostics(sessionId),
           attachedSessions: () => controller.attachedSessions(),
+          meter: () => {
+            const diag = meterDiagnostics()
+            const scheduler = diag.currentScheduler
+            return {
+              /** Selected/overridden cadence actually handed to the scheduler. */
+              refreshMs: controller.refreshMs,
+              productionRefreshMs: DEFAULT_PRESENTATION_REFRESH_MS,
+              schedulerCreated: diag.schedulerCreated,
+              notifyCalls: diag.notifyCalls,
+              renderCalls: diag.renderCalls,
+              refreshCalls: diag.refreshCalls,
+              scheduler: scheduler === null ? null : {
+                ticking: scheduler.ticking,
+                disposed: scheduler.disposed,
+                timerCount: scheduler.timerCount,
+                intervalMs: scheduler.intervalMs,
+              },
+            }
+          },
         }
       } catch { /* diagnostics must never break telemetry */ }
     }
@@ -6332,35 +7439,14 @@ function apply(ctx) {
     }
   })
 
-  if (debug) {
-    try {
-      window.__dshTurnPerformanceMeter.meter = () => {
-        const diag = meterDiagnostics()
-        const scheduler = diag.currentScheduler
-        return {
-          schedulerCreated: diag.schedulerCreated,
-          notifyCalls: diag.notifyCalls,
-          renderCalls: diag.renderCalls,
-          refreshCalls: diag.refreshCalls,
-          scheduler: scheduler === null ? null : {
-            ticking: scheduler.ticking,
-            disposed: scheduler.disposed,
-            timerCount: scheduler.timerCount,
-            intervalMs: scheduler.intervalMs,
-          },
-        }
-      }
-    } catch { /* diagnostics must never break telemetry */ }
-  }
-
-  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-    name: 'conversation.composer.dock',
-    id: 'turn-performance-meter',
-    order: -10,
+  ctx.slots.inject(SLOT_NAME, () => ctx.slots.register({
+    name: SLOT_NAME,
+    id: SLOT_ID,
+    order: SLOT_ORDER,
   }, makeMeterSlot({ controller, t, debug })))
 }
 
-;Object.assign(__exports, { inject, apply })
+;Object.assign(__exports, { inject, SLOT_NAME, SLOT_ID, SLOT_ORDER, apply })
 			}
 		}
 		return __req("src/client/main.js")

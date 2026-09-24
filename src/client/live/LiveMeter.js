@@ -8,16 +8,26 @@
  *   - the component receives a finished view model from `LivePresenter` and
  *     formats strings; it never parses events, never computes TPS/TTFT/tool
  *     time, and never touches raw `SessionEvent` shapes;
- *   - presentation lifecycle — the single 200 ms ticker, the session
+ *   - presentation lifecycle — the single presentation ticker, the session
  *     subscription and the reference-counted style tag — belongs to
  *     `MeterRoot.js`, which chooses between this pill and the completed card;
+ *   - **one dominant number per state.** Every branch renders its own value
+ *     through `.dsh-tpm-number` (the `1.7 x` step of the plugin's type scale) and
+ *     keeps labels, units and elapsed readings strictly below it. Reference:
+ *     `docs/assets/reference-live-streaming.png`, where the rate is the focus and
+ *     the elapsed reading is visibly subordinate;
  *   - high-frequency numbers are plain text: NO `aria-live` region, so a screen
- *     reader is never read a new TPS five times a second. The root carries a
+ *     reader is never read a new TPS twenty times a second. The root carries a
  *     per-state `aria-label` and `data-state` instead.
  */
 
 import { createElement as h } from 'react'
-import { formatApproxTps, formatElapsed, formatStopwatch, formatToolLabel } from './live-format.js'
+import {
+  formatApproxTps,
+  formatElapsed,
+  formatToolLabel,
+  stopwatchParts,
+} from './live-format.js'
 
 /**
  * Debug counters (always cheap increments; read only via the debug handle).
@@ -48,20 +58,33 @@ function stateLabelKey(view) {
   }
 }
 
+/** A value and its unit as one non-wrapping run: `2.80` `s`, `≈338` `tokens/s`. */
+function metric(value, unit, { tone = 'primary', className = 'dsh-tpm-number' } = {}) {
+  return h('span', { className: 'dsh-tpm-metric' }, [
+    h('span', { key: 'v', className, 'data-tone': tone }, value),
+    unit === null ? null : h('span', { key: 'u', className: 'dsh-tpm-unit' }, unit),
+  ])
+}
+
 function pillContent(view, label) {
   switch (view.kind) {
-    case 'ttft':
+    case 'ttft': {
+      /**
+       * The running first-response counter is the state's only number, so it is
+       * the state's focus: `2.80 S` beside the state label.
+       */
+      const parts = stopwatchParts(view.counterMs ?? 0)
       return [
-        h('span', { key: 'c', className: 'dsh-tpm-lead' }, formatStopwatch(view.counterMs ?? 0)),
+        metric(parts.value, parts.unit),
         h('span', { key: 's', className: 'dsh-tpm-sep' }),
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
       ]
+    }
 
     case 'streaming':
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
-        h('span', { key: 't', className: 'dsh-tpm-tps' }, formatApproxTps(view.tps, view.approximate)),
-        h('span', { key: 'u', className: 'dsh-tpm-unit' }, 'tokens/s'),
+        metric(formatApproxTps(view.tps, view.approximate), 'tokens/s', { tone: 'accent' }),
         h('span', { key: 's', className: 'dsh-tpm-sep' }),
         h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
       ]
@@ -74,13 +97,15 @@ function pillContent(view, label) {
         h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
       ]
 
-    case 'waiting':
+    case 'waiting': {
+      const parts = stopwatchParts(view.waitMs ?? 0)
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
-        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatStopwatch(view.waitMs ?? 0)}`),
+        metric(parts.value, parts.unit),
         h('span', { key: 's', className: 'dsh-tpm-sep' }),
         h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
       ]
+    }
 
     case 'transition':
       return [
@@ -105,6 +130,7 @@ export function LivePill({ view, translate }) {
   const ariaLabel = `${label} · ${formatElapsed(view.elapsedMs ?? 0)}`
   return h('div', {
     className: 'dsh-tpm-root',
+    'data-kind': 'live',
     'data-state': view.state,
     'data-turn': view.turn ?? '',
     'aria-label': ariaLabel,

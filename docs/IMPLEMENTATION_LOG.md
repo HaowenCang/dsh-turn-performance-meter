@@ -1280,9 +1280,212 @@ not obtained: the host serializes turns, so a fresh short turn could not run whi
 and the two DSH tabs used for reload-based verification stopped answering DevTools evaluation while re-rendering
 multi-megabyte conversations. That gap is recorded in `TEST_PLAN.md` §3 rather than papered over.
 
-### Phase 5
+### Phase 5 — UI correction, slot migration and the completed TPS curve
 
-- Curve:
+Baseline `3781b974288e00211fb2c7127c37fee518d94c6f` (`main`, `origin/main`, working tree clean, MIT, public),
+317 tests / 0 failures before the first edit.
+
+#### 1. What was actually wrong, and what replaced it
+
+| # | Defect, as read from the code | Correction |
+|---|---|---|
+| A | `DEFAULT_REFRESH_MS = 200` in `controller.js` **and** `intervalMs = 200` in `refresh.js` **and** `LiveMeter`'s own `refreshMs` — three defaults for one contract | one constant, `DEFAULT_PRESENTATION_REFRESH_MS`, in `src/client/live/cadence.js`; the scheduler, the controller and `main.js` all import it |
+| B | `ctx.slots.inject('conversation.composer.dock', …)`, `order: -10`, i.e. *below* the composer and immediately above the native `stats` pill | `conversation.input.dock`, `order: 30`; the composer dock is no longer touched at all |
+| C | `live-css.js` / `completed-css.js` were functional but flat: one text size, no dominant number, no card rhythm | both sheets rebuilt from the four references, plus a shared token block (`base-css.js`) |
+| D | `downsampleSeries` kept every local extremum and then thinned the overflow by uniform stride, which can step over the global maximum | anchors (endpoints, global max, global min) reserved first, then extrema ranked by prominence, then shape samples |
+| E | `curve.js` documented `peakTps` as "the peak of the rendered series" while `telemetry-design.js` computes it before downsampling | comment corrected at both sites; the implementation was already right and was not changed |
+| F | Phase 4 reporting claimed `≈108.2s · ≈37,498` for the duration+token line; the code emits `108.2s · ≈37,498` | the code is right, the report was wrong; docs updated, no `≈` added to a duration |
+
+#### 2. Slot migration (Phase 5B)
+
+DSH's own contract table (`dsh-cordis-client-runner`, generated from
+`packages/client/ui-conversation/src/client/contract/slots.ts:166`) states:
+
+- `conversation.input.dock` — `kind: 'list'`, `scope: 'session'`, owner `InputZone`, doc
+  "Full-width entries above the composer card", occupants `queue` (20), `todo` (0), `goal` (10);
+- `conversation.composer.dock` — "Ambient entries below the composer card", occupant
+  `client-ui-chat StatsPills` id `stats`.
+
+The owner renders the seat as `renderSlot("conversation.input.dock", zone)` immediately **before** `inputBar`
+(`ownerProps = { session, input }`), and the seat's standard props include `sessionId: SessionId`, so the
+plugin's existing `props.sessionId` dependence carries over unchanged — no DOM query was needed or used.
+
+`order` was decided from the occupant list rather than copied: the shipped occupants are 0, 10 and 20, so
+`order: 30` places the meter **last**, i.e. directly above the composer card, instead of floating above the
+todo/goal panels where it would be furthest from the input it describes.
+
+Structural verification from the running GUI (`dev/screenshots/phase5/`), via the slot wrappers:
+
+```
+conversation.input.dock     hasMeter = true
+conversation.composer.dock  hasMeter = false
+```
+
+Pixel evidence, 1440x950: meter `y = 667…816`, native stats `y = 920…946`; the composer sits between them.
+
+#### 3. Refresh cadence A/B (Phase 5A)
+
+Three full turns on the running DSH web GUI, one per cadence, driven through the production code path with the
+debug-only `dsh-turn-performance-meter.refreshMs` override. In-page instrumentation: a `requestAnimationFrame`
+frame-time sampler, a `MutationObserver` on the meter's own subtree, and a Long Task observer. Raw evidence:
+`dev/screenshots/phase5/ab-{200,50,10}ms.json`.
+
+| cadence | turn | renders | renders/s | DOM writes | DOM/s | DOM peak/s | frame p50 | p95 | max | slow frames (>33 ms) | long tasks |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 200 ms | 90.9 s | 448 | 4.9 | 1 154 | 12.8 | 25 | 4.2 ms | 4.3 ms | 108.4 ms | 79 | 0 |
+| 50 ms | 125.5 s | 2 447 | 19.5 | 2 897 | 23.2 | 45 | 4.2 ms | 4.3 ms | 108.4 ms | 93 | 0 |
+| 10 ms | 95.0 s | 8 433 | 88.8 | 4 515 | 48.0 | 123 | 4.2 ms | 4.3 ms | 112.5 ms | 125 | 0 |
+
+`tested 50 ms`: 4x the presentation rate of the baseline and 1.8x the DOM writes; frame p50/p95 unchanged; no
+long task in 125 s of streaming. The 200 ms baseline is visibly steppy — the two-decimal TTFT counter jumps 20
+hundredths per update — while 20 updates/s reads as continuous.
+
+`tested 10 ms`: 3.4x the React renders and 2.1x the DOM writes of 50 ms for **identical** frame p50/p95/max
+(4.2/4.3/112.5 vs 4.2/4.3/108.4) and a higher slow-frame rate. The only field that can change between two 10 ms
+ticks is the hundredths digit of a stopwatch, which is not readable at that speed.
+
+`selected: 50 ms`. `reason`: it removes the measured steppiness of 200 ms, and 10 ms buys no frame-time
+improvement for 3.4x the render work. The display in this environment runs at ~215–220 Hz effective, so the
+comparison is not resolution-limited in 10 ms's favour. `timerCount` was 0 with `ticking: false` at the end of
+every leg, at every cadence.
+
+The rolling TPS window (1 000 ms) and the curve sampling cadence (250 ms) were **not** touched: the live
+presentation cadence, the measurement window and the chart grid are three different numbers.
+
+#### 4. Redundant double update (Phase 5A)
+
+`MeterRoot`'s `onRender` called `refreshView()` **and** a `useReducer` bump. The audit: `refreshView` calls
+`setView(controller.project(id, Date.now()))`, and the projection key includes the presentation instant
+(`controller.js` `projectionKey`), so every tick receives a fresh object identity and `setView` always schedules
+a render. The `bump` could therefore only add a second update per tick. It was removed and the property it
+relied on is now a test (`test/completed-lifecycle.test.js`, "every live presentation tick yields a fresh view
+object"). Browser confirmation: `refreshDelta == renderDelta` in all three A/B legs (449/448, 2448/2447,
+8433/8433) — exactly one projection per render.
+
+#### 5. Visual redesign (Phase 5C)
+
+Measured from the references (device pixels, then corrected to CSS pixels against the composer placeholder's ink
+height; scale approximately 1.14x for `reference-completed-summary.png`):
+
+| property | reference | shipped |
+|---|---|---|
+| card width | 884 px / 1.14 = **775** | **774** (`max-width: var(--dsh-composer-card-max-width)`) |
+| card radius | 11 device px | **10 px** |
+| card padding | ~24 px vertical | **20.15 px** (`1.55 x` the host content size) |
+| metric columns | 4 equal, 221 device px | **4 equal, 193 px** |
+| column inline padding | 32 device px | **26 px** |
+| label / value / secondary | 14 / 18 / 13 device px ink | **12.35 / 22.1 / 11.96 px** |
+| live pill | 324x70 device px, radius ~14 | **content-sized, radius 10, `.62em x 1.55em` padding** |
+| curve area | 50 % of the card, two metric columns at 25 % | **same, via `grid-column: span 2`** |
+| legend | `思考 ▪ 输出 ▪` at the top left | **same, text before swatch** |
+| peak readout | `峰值 730token/s`, top right | **`峰值 ≈543 tokens/s`, same position, `≈` mandatory** |
+
+`reference mismatch: the reference's output-rate orange is #fb8147, which scores 2.31:1 on the reference's own
+card surface — below the 3:1 floor for large text. correction: keep the hue (~21°) and darken to #d9600f
+(3.4:1); dark theme #ff9a5c.` This is a deliberate, measured deviation, not an oversight.
+
+`reference mismatch: the reference card has no footer; this plugin's card carries tools/attempts/status below a
+hairline. correction: keep it — the Phase 4 metric semantics freeze four principal columns and put tool
+statistics on a secondary line — and make it quiet (11.05 px, tertiary, top hairline). The card is therefore
+149 px rather than the reference's 113 px.`
+
+`reference mismatch: the reference is a warm grey palette; DSH's tokens are cool grey. correction: use the host
+tokens (`--dsw-alias-bg-module-platform` = #f5f6f7 light / #353638 dark, `--dsw-alias-label-*`), because a
+plugin must follow the active DSH theme.`
+
+Every state was rebuilt together, not just the curve: live TTFT, live streaming, live tool, live waiting and
+transition, completed summary and completed curve. Each live state now renders exactly one number through
+`.dsh-tpm-number` (1.7x the host content size) and keeps labels, units and elapsed readings strictly below it.
+The plugin type scale is expressed as multiples of `--dsh-content-font-size-secondary`, so a DSH font-size
+setting scales the whole meter.
+
+#### 6. Curve semantics (Phases 5D/5E)
+
+- **Compressed time**: unchanged, `compressAttempts`; a tool call and inter-attempt waiting still consume zero
+  chart width, an intra-attempt stall keeps its full width. `test/curve.test.js` holds the 1 s vs 60 s
+  identical-geometry assertion.
+- **Series availability**: `settle()` now also emits `curve.phaseSpans` — per phase, first token-producing
+  sample to last sample plus the rolling window. `curveViewModel` draws each phase only inside its span, so the
+  reasoning series stops when reasoning ends instead of being drawn as a flat zero across the output phase. The
+  series values themselves are untouched. Verified on real fixtures:
+  `t1` reasoning span `null` (no reasoning evidence) → no reasoning line;
+  `t3` (interrupted) output span `null` → no output line; `t5` spans overlap by exactly 1 000 ms, the window.
+- **Two series**: `reasoning` (neutral stroke) and `output` (accent stroke), never a synthetic total; the legend
+  carries text, so colour is not the only channel.
+- **Peak**: `curve.peakTps` is computed from the full pre-downsample series, and the rendered series is
+  independently guaranteed to retain that point, so the drawn curve reaches the axis top. It renders as
+  `≈`, because a single curve sample is not a provider-certified maximum even when the token total is exact.
+- **Sampling cadence**: `DEFAULT_SAMPLE_EVERY_MS = 250` is unchanged. Nothing about the 50 ms presentation
+  cadence touches it.
+- **Seam**: `settled.curve -> curveViewModel(settled) -> curve-tree.js -> SVG`. React decodes nothing,
+  aggregates nothing, compresses nothing, rolls nothing and downsamples nothing.
+
+#### 7. Downsample retention (Phase 5D)
+
+Priority order, all of it unconditional: endpoints, then the global maximum, then the global minimum (when the
+budget can hold it), then local extrema ranked by prominence, then uniform shape samples. Ties resolve to the
+earliest index, so the function is deterministic. Output is emitted in non-decreasing `timeMs` order and never
+exceeds `maxPoints`; a budget below 3 raises `TypeError` rather than silently dropping one of the three hard
+guarantees.
+
+The counterexample that defeats the previous stride is in `test/curve.test.js`: a series whose every interior
+index is a local extremum (alternating values) with the global spike parked on an index the old stride stepped
+over. The old algorithm returns a peak of 101 where the series peak is 9 999; the new one returns 9 999.
+
+#### 8. Interaction and accessibility (Phase 5F)
+
+`view-mode.js` is the whole state machine and is pure. Hover and focus open the curve; leave, blur and view
+change close it; a blur that stays inside the card keeps it open. Focus is the touch path — no separate touch
+handler exists. A card whose turn has no curve is not focusable and carries no handlers, because a focus stop
+that reveals nothing is worse than none.
+
+Both views are stacked in one grid cell, so the card's height is the taller of the two at every width and font
+size: measured 149 px at 1440 px and 240 px at 520 px, **identical in both views** at each width. The hidden
+layer is `aria-hidden="true"` with `pointer-events: none`; the SVG is `aria-hidden` and the panel carries one
+textual description; the focus ring is `2px solid` accent on `:focus-visible` with no `outline: none` anywhere;
+`prefers-reduced-motion` cancels the 220 ms opacity cross-fade without cancelling the switch.
+
+Browser verification (deterministic pointer control, `dev/screenshots/phase5/interaction-probe.json`):
+
+```
+rest -> summary            hover -> curve          leave -> summary
+focus -> curve             blur -> summary         focus-visible ring -> 2px solid rgb(217, 96, 15)
+aria-hidden: summary:true, curve:false while rest; the reverse while hovering
+settled card: scheduler.ticking = false, timerCount = 0
+```
+
+#### 9. Fixture verification
+
+Replayed through the durable window and shaped by `completedViewModel` + `curveViewModel`:
+
+| fixture | status | attempts | tools | TTFT | generated | reasoning TPS | output TPS | peak | axis | drawn pts | reasoning line | output line |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| t1-reasoning-tool-reasoning | completed | 2 | 2 | 4.42 | 134 | — | ≈305 | ≈12.8 | 20 | 2 | no | yes |
+| t2-pwsh-write-edit | completed | 4 | 3 | 1.97 | 458 | ≈186 | ≈175 | ≈206 | 250 | 14 | yes | yes |
+| t3-interrupted-mid-reasoning | interrupted | 1 | 0 | 4.98 | — | ≈211 | — | ≈263 | 500 | 16 | yes | no |
+| t4-reasoning-tool-deepseek-official | completed | 2 | 1 | 7.58 | 151 | ≈50.6 | 138 | ≈74.5 | 100 | 12 | yes | yes |
+| t5-reasoning-text-deepseek-official | completed | 1 | 0 | 2.88 | 1 308 | 39.5 | 35.8 | ≈84.0 | 100 | 140 | yes | yes |
+
+t1's compressed duration is 440 ms and carries no reasoning evidence, which is why its reasoning line is absent
+rather than flat; t3 shows the mirror case.
+
+#### 10. Browser verification
+
+`dev/screenshots/phase5/` (gitignored, as required) holds the ten required captures plus the raw JSON evidence:
+live TTFT, live streaming, live tool-running, completed summary, completed curve on hover, completed curve on
+keyboard focus (focus ring visible), light theme, dark theme (summary and curve), narrow viewport (520 px: two
+column wrap, no horizontal overflow, height stable across views) and the seat-order capture showing the meter
+above the composer with the native statistics below it. The dark run flipped `ui-theme.preference` in the DSH
+settings file and restored it byte-identically in a `finally` block (verified by comparison with the backup).
+
+Runtime checks on that page: exactly one `turn-performance-meter` slot entry, the fixture recorder not injected,
+native statistics still rendering, no console error attributable to the plugin.
+
+#### 11. Debt removed
+
+`src/client/styles.js` was a second, unreferenced set of `.dsh-tpm-card` / `.dsh-tpm-pill` / `.dsh-tpm-view`
+rules — an early scaffold superseded by `live-css.js`. Nothing imported it; it was deleted rather than left as a
+second source for the same class names.
 
 ### Phase 6–8
 

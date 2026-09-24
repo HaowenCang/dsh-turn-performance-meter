@@ -107,12 +107,18 @@ test('apply registers the locale namespace, the additive slot entry and a dispos
   exports.apply(ctx)
   assert.equal(boundTranslateCalls, 1)
   assert.equal(injected.length, 1)
-  assert.equal(injected[0].name, 'conversation.composer.dock', 'the verified composer dock seat')
+  assert.equal(injected[0].name, 'conversation.input.dock',
+    'the verified full-width seat above the composer card')
 
   const registration = injected[0].factory()
   assert.equal(registration.options.id, 'turn-performance-meter', 'an independent id; the native stats id stays untouched')
-  assert.equal(registration.options.name, 'conversation.composer.dock')
-  assert.equal(registration.options.order, -10, 'positioned directly beside the composer')
+  assert.equal(registration.options.name, 'conversation.input.dock')
+  /**
+   * The seat's shipped occupants are `todo` (0), `goal` (10) and `queue` (20), so
+   * an ascending order of 30 places this entry last — immediately above the
+   * composer card — rather than above the native state panels.
+   */
+  assert.equal(registration.options.order, 30, 'last among the shipped occupants, next to the composer')
   assert.equal(typeof registration.component, 'function', 'a React component is registered')
 
   // Teardown (HMR/unload): `ctx.effect` runs its callback as setup NOW and
@@ -121,6 +127,44 @@ test('apply registers the locale namespace, the additive slot entry and a dispos
   const dispose = effects[0]()
   assert.equal(typeof dispose, 'function', 'the effect returns its disposer')
   assert.doesNotThrow(() => dispose())
+})
+
+test('the plugin never occupies the composer dock, so the native stats keep their seat', () => {
+  /**
+   * The migration is a *removal*, not a reordering: with `order: -10` in
+   * `conversation.composer.dock` the meter rendered between the composer and the
+   * native `stats` pill (id `stats`, `client-ui-chat`). Both facts are asserted
+   * against the shipped bundle, because a stale re-export or a leftover
+   * registration would otherwise reintroduce the old seat silently.
+   */
+  const { exports, requested } = materialize({ react: reactStub })
+  assert.equal(exports.SLOT_NAME, 'conversation.input.dock')
+  assert.equal(exports.SLOT_ORDER, 30)
+  assert.equal(exports.SLOT_ID, 'turn-performance-meter')
+  /**
+   * The quoted form, not the bare word: the module keeps the migration's history
+   * in prose comments, and a test that forbade the *name* would forbid explaining
+   * why the seat changed. What must never come back is a registration literal.
+   */
+  assert.equal(text.includes("'conversation.composer.dock'"), false,
+    'the superseded seat is gone from the executable bundle, not merely reordered')
+  assert.equal(requested.includes('react'), true)
+
+  /** Only one `register` call happens, and it never claims the shipped id. */
+  const registrations = []
+  const ctx = {
+    locale: { register: () => () => {}, bind: () => null },
+    sessions: { binding: () => undefined },
+    slots: {
+      inject: (name, factory) => { factory() },
+      register: (options, component) => { registrations.push({ options, component }); return { options, component } },
+    },
+    effect: fn => fn(),
+  }
+  exports.apply(ctx)
+  assert.equal(registrations.length, 1)
+  assert.equal(registrations[0].options.id === 'stats', false,
+    'the native statistics occupant id must never be reused, which would replace it')
 })
 
 test('a second apply/teardown cycle leaves no cross-generation state (HMR remount shape)', () => {
@@ -155,12 +199,13 @@ test('a second apply/teardown cycle leaves no cross-generation state (HMR remoun
   assert.doesNotThrow(() => secondDispose())
 })
 
-test('the bundle carries both view stylesheets and exactly one style tag id', async () => {
+test('the bundle carries all three stylesheets and exactly one style tag id', async () => {
   /**
-   * HMR discipline: one `#dsh-tpm-live-style` element holds the pill CSS *and* the
-   * card CSS, so a remount cannot accumulate `style` elements and the two views
-   * can never disagree about the theme tokens they read.
+   * HMR discipline: one `#dsh-tpm-live-style` element holds the shared token
+   * block, the pill CSS *and* the card CSS, so a remount cannot accumulate
+   * `style` elements and the views can never disagree about the tokens they read.
    */
+  const { BASE_CSS } = await import('../src/client/base-css.js')
   const { LIVE_CSS, LIVE_STYLE_ID } = await import('../src/client/live/live-css.js')
   const { COMPLETED_CSS, COMPLETED_STYLE_ID } = await import('../src/client/completed/completed-css.js')
   const root = await readFile(new URL('../src/client/live/MeterRoot.js', import.meta.url), 'utf8')
@@ -169,16 +214,36 @@ test('the bundle carries both view stylesheets and exactly one style tag id', as
   assert.equal(COMPLETED_STYLE_ID === LIVE_STYLE_ID, false, 'the two stylesheets have distinct ids')
   assert.equal((text.match(/document\.createElement\('style'\)/g) ?? []).length, 1,
     'exactly one style tag is ever created')
-  for (const selector of ['.dsh-tpm-root', '.dsh-tpm-pill']) {
+  for (const selector of ['.dsh-tpm-pill', '.dsh-tpm-number', '.dsh-tpm-sep']) {
     assert.equal(LIVE_CSS.includes(selector), true, `the pill CSS is bundled (${selector})`)
   }
+  assert.equal(BASE_CSS.includes('.dsh-tpm-root'), true, 'the shared token block owns the root')
   for (const selector of ['.dsh-tpm-card', '.dsh-tpm-cells', '.dsh-tpm-cell', '.dsh-tpm-foot']) {
     assert.equal(COMPLETED_CSS.includes(selector), true, `the card CSS is bundled (${selector})`)
   }
+  assert.equal(BASE_CSS.includes('--dsh-tpm-font: var(--dsh-content-font-size-secondary, 13px)'), true,
+    'the plugin type scale follows the host content size')
+  /** The curve view's own vocabulary, which is what Phase 5 added. */
+  for (const selector of ['.dsh-tpm-curve-panel', '.dsh-tpm-plot', '.dsh-tpm-series', '.dsh-tpm-legend-swatch']) {
+    assert.equal(COMPLETED_CSS.includes(selector), true, `the curve CSS is bundled (${selector})`)
+  }
   assert.equal(text.includes('src/client/completed/CompletedMeter.js'), true, 'the card component is in the graph')
   assert.equal(text.includes('src/client/completed/completed-tree.js'), true, 'the card tree is in the graph')
+  assert.equal(text.includes('src/client/completed/curve-view-model.js'), true, 'the curve seam is in the graph')
+  assert.equal(text.includes('src/client/completed/curve-tree.js'), true, 'the SVG tree is in the graph')
   assert.equal(text.includes('src/client/live/MeterRoot.js'), true, 'the meter root owns the shared lifecycle')
-  for (const forbidden of ["'svg'", "'canvas'", "'polyline'", "'path'", 'createElementNS']) {
-    assert.equal(text.includes(forbidden), false, `Phase 4 ships no chart markup (${forbidden})`)
+})
+
+test('the chart is hand-built SVG with no charting dependency', () => {
+  /**
+   * The brief forbids d3/chart.js/echarts/recharts and any comparable payload.
+   * The visible consequence is that the only drawing primitive in the bundle is
+   * a plain `path` element built from a string this repository produced.
+   */
+  assert.equal(text.includes("createElement('path'"), true, 'the curve is a hand-built path element')
+  for (const forbidden of ['d3-', 'chart.js', 'echarts', 'recharts', 'createElementNS', "'canvas'"]) {
+    assert.equal(text.includes(forbidden), false, `no charting dependency or canvas fallback (${forbidden})`)
   }
+  assert.equal(/from\s+'[^.'][^']*'/.test(text), false, 'the bundle has no bare-specifier import left')
+  assert.equal(text.includes('viewBox'), true, 'the plot is a fixed logical viewBox, not a measured canvas')
 })

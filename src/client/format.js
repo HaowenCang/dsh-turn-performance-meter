@@ -17,10 +17,25 @@ export function formatSeconds(ms, digits = 1) {
   return `${(ms / 1000).toFixed(digits)}s`
 }
 
+/**
+ * Running stopwatch split into its number and its unit.
+ *
+ * The reference renders the first-response counter as a large number followed by
+ * a visibly smaller unit, so the two parts must be separately styleable. Keeping
+ * the split here — next to the rules that decide the digits — means the visible
+ * pair and `formatCountdown`'s flat string can never disagree about precision.
+ *
+ * @returns {{value: string, unit: string|null}} `unit` is `null` for absent evidence
+ */
+export function countdownParts(ms, digits = 2) {
+  if (!Number.isFinite(ms)) return { value: DASH, unit: null }
+  return { value: (ms / 1000).toFixed(digits), unit: 's' }
+}
+
 /** Running TTFT counter form: `2.80 s`. */
 export function formatCountdown(ms, digits = 2) {
-  if (!Number.isFinite(ms)) return DASH
-  return `${(ms / 1000).toFixed(digits)} s`
+  const parts = countdownParts(ms, digits)
+  return parts.unit === null ? parts.value : `${parts.value} ${parts.unit}`
 }
 
 /**

@@ -4,17 +4,19 @@ A turn-level performance meter for DeepSeek Harness (DSH) agent workflows. It is
 
 面向 DeepSeek Harness（DSH）Agent 工作流的 turn 级性能统计插件。它适用于一个 turn 内存在多次模型调用、工具调用、重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计卡片。完成态卡片按整个 turn 聚合。
 
-> Status: Phase 4 complete. The turn-level engine, the DSH adapter with both semantic preflight audits, the production
-> Live Client integration and the **completed turn summary card** are in place. The live meter and the completed card
-> run inside the real DSH web client against `ctx.sessions.binding().eventSource`, verified by 317 offline tests and a
-> live browser session run. The completed card is a static settled view: it aggregates the whole turn (all model
-> attempts, all tool calls) and never re-derives metrics in React. The mandatory hover/focus **TPS curve is Phase 5**
-> and is deliberately absent.
+> Status: Phase 5 complete. The turn-level engine, the DSH adapter with both semantic preflight audits, the production
+> Live Client integration, the **completed turn summary card** and the **hover/focus TPS curve** are in place. The live
+> meter and the completed card run inside the real DSH web client against `ctx.sessions.binding().eventSource`, verified
+> by 365 offline tests and by instrumented real-browser sessions (light, dark, narrow, and a measured 200/50/10 ms
+> presentation-cadence A/B). Both views are a projection of settled or live evidence and never re-derive a metric in
+> React. The meter sits in `conversation.input.dock`, above the composer; the native statistics keep their own seat
+> below it.
 >
-> 状态：Phase 4 已完成。指标口径、DSH adapter（含两项前置语义审计）、生产级实时 Client 集成与**完成态统计卡片**均已落地：
-> 实时组件与完成态卡片都在真实 DSH Web 客户端中基于 `ctx.sessions.binding().eventSource` 运行，由 317 个离线测试与真实
-> 浏览器会话运行共同验证。完成态卡片是静态的 settled 视图：它聚合整个 turn（全部模型 attempt、全部工具调用），且 React 层
-> 不重新计算任何指标。必选的悬停/聚焦 **TPS 曲线属于 Phase 5**，当前刻意不实现。
+> 状态：Phase 5 已完成。指标口径、DSH adapter（含两项前置语义审计）、生产级实时 Client 集成、**完成态统计卡片**与
+> **悬停/聚焦 TPS 曲线**均已落地：实时组件与完成态卡片都在真实 DSH Web 客户端中基于
+> `ctx.sessions.binding().eventSource` 运行，由 365 个离线测试与带页面内埋点的真实浏览器会话（light / dark /
+> narrow，以及 200/50/10 ms 刷新节奏 A/B 实测）共同验证。两个视图都只是既有证据的投影，React 层不重新计算任何指标。
+> 插件挂载在 `conversation.input.dock`（输入框上方）；原生统计保留其输入框下方的原位置。
 
 ## 1. Frozen product requirements / 已冻结需求
 
@@ -26,11 +28,12 @@ During model generation, the live meter displays the **current trailing 1-second
 
 模型生成期间，实时组件显示**当前活动 attempt 最近 1 秒向后滑动窗口的 TPS**，且始终带 `≈` 近似标记，不显示曲线。工具返回后开始新的模型调用，或进入新的尝试边界时，窗口重置，禁止混合两个独立模型调用的数据。非模型解码阶段（工具执行、步骤间隙、重试退避）显示各自的计时器，不显示任何 TPS 数值。
 
-After the turn settles, the same slot shows the completed card instead: turn-level averages over every model attempt and tool call in that turn, with the reasoning/output split marked `≈` whenever the provider did not report `reasoningTokens`. The card is static — no ticker, no curve, no hover behaviour. Tool execution time occupies **zero horizontal width** on the Phase 5 curve, whose x-axis is compressed model-generation time, because the curve is meant to diagnose model throughput stability rather than end-to-end latency.
+After the turn settles, the same slot shows the completed card instead: turn-level averages over every model attempt and tool call in that turn, with the reasoning/output split marked `≈` whenever the provider did not report `reasoningTokens`. The card is static — no ticker — and hovering it or focusing it with the keyboard replaces the two TPS columns with the throughput curve while keeping the generated-token and TTFT columns in place. Tool execution time occupies **zero horizontal width** on the curve, whose x-axis is compressed model-generation time, because the curve is meant to diagnose model throughput stability rather than end-to-end latency.
 
 turn 结束后，同一 slot 切换为完成态卡片：对该 turn 内全部模型 attempt 与工具调用做 turn 级平均；当 provider 未报告
-`reasoningTokens` 时，reasoning/output 拆分标 `≈`。卡片是静态的——没有 ticker、没有曲线、没有悬停行为。Phase 5 曲线的横轴上，
-工具执行时间占用**零宽度**；横轴采用压缩后的模型生成时间，因为曲线用于诊断模型吞吐率稳定性，而不是表现端到端时延。
+`reasoningTokens` 时，reasoning/output 拆分标 `≈`。卡片是静态的——没有 ticker；鼠标悬停或用键盘聚焦时，前两个 TPS 栏位
+被吞吐曲线替换，生成 Tokens 与首响应栏位保持原位。曲线的横轴上，工具执行时间占用**零宽度**；横轴采用压缩后的模型生成
+时间，因为曲线用于诊断模型吞吐率稳定性，而不是表现端到端时延。
 
 Model-generated ordinary text and model-generated tool-call arguments count as model output. Therefore PowerShell commands, shell scripts, write-file payloads, edit patches/diffs, and other tool arguments belong to output accounting. Tool results such as stdout, file contents returned by a tool, or API responses do **not** count as model output; they may become input to a later model call.
 

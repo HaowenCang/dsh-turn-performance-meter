@@ -221,6 +221,41 @@ test('completed -> a new turn returns the pill immediately and never shows both'
   controller.dispose()
 })
 
+test('every live presentation tick yields a fresh view object, so one state update per tick is enough', () => {
+  /**
+   * Phase 5A removed a second `useReducer` dispatch from the meter's render
+   * callback. That is only safe if `setView` always receives a *new identity*
+   * while a turn is live — otherwise React would bail out of the update and the
+   * clock would freeze. The projection key includes the presentation instant, so
+   * this is the property that makes the removal provable rather than hopeful.
+   */
+  const fixture = loadFixture('t5-reasoning-text-deepseek-official')
+  const entries = fixtureEntries(fixture)
+  const sessions = fakeSessionsService()
+  const source = sessions.createSource(fixture.sessionId)
+  const controller = createController({ sessions })
+  controller.attach(fixture.sessionId)
+  let revision = 1
+  // Stop short of the turn's end so the machine stays live.
+  for (const entry of entries) {
+    if (entry?.type === 'event' && entry.event?.type === 'turn/end') break
+    source.appendEntry(entry, (revision += 1))
+  }
+
+  const liveAt = (atMs) => controller.project(fixture.sessionId, atMs)
+  const first = liveAt(10_000)
+  assert.equal(first.kind === 'hidden', false, 'the fixture is mid-turn at this instant')
+
+  const identities = new Set()
+  for (let index = 0; index < 40; index += 1) identities.add(liveAt(10_000 + index))
+  assert.equal(identities.size, 40, 'each distinct instant is a distinct object: setView always schedules a render')
+
+  /** The memo still collapses repeats at one instant; the clock is what bypasses it. */
+  assert.equal(liveAt(10_000), liveAt(10_000), 'the same instant returns the same object')
+  assert.notEqual(liveAt(10_000), liveAt(10_001), 'the next tick is a new object, so one setView is a real update')
+  controller.dispose()
+})
+
 test('a completed card is not rebuilt once per ingested delta', () => {
   const fixture = loadFixture('t5-reasoning-text-deepseek-official')
   const entries = fixtureEntries(fixture)
