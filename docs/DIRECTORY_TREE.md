@@ -1,0 +1,132 @@
+# Directory Tree
+
+```text
+dsh-turn-performance-meter/
+├── README.md                         User/developer entry point
+├── package.json                      DSH bundle + client manifest (test / build:client / verify)
+├── cordis.patch.yml                  Bundle row insertion
+├── index.js                          Host entry (no-op by design)
+├── client.js                         GENERATED browser bundle (scripts/build-client.mjs)
+├── lib/client.js                     byte-identical mirror validated by dsh-super-injector
+├── .gitignore
+│
+├── docs/
+│   ├── ARCHITECTURE.md               Layering, state, timing domains, transport
+│   ├── METRICS_SPEC.md               Normative formulas, quality axes, evidence rules
+│   ├── UI_SPEC.md                    Live/completed/hover interaction contract
+│   ├── DSH_API_NOTES.md              Verified DSH extension/API evidence
+│   ├── TASKS.md                      Ordered implementation phases + gates
+│   ├── TEST_PLAN.md                  Unit/integration/browser test matrix
+│   ├── DIRECTORY_TREE.md             This file
+│   ├── START_PROMPT.md               Prompt to start DeepSeek V4.1 Flash
+│   ├── IMPLEMENTATION_LOG.md         Local API findings, fixture provenance, build diary
+│   └── assets/
+│       ├── reference-live-ttft.png
+│       ├── reference-live-streaming.png
+│       ├── reference-completed-summary.png
+│       └── reference-hover-curve.png
+│
+├── fixtures/                         Recorded DSH turn evidence (offline; no DSH needed)
+│   ├── README.md                     Scenario table, file shape, regeneration steps
+│   ├── index.json                    Generated index of the recorded set
+│   ├── dsh-turns/                    Five real turns: durable + transient planes verbatim
+│   │   ├── t1-reasoning-tool-reasoning.json
+│   │   ├── t2-pwsh-write-edit.json
+│   │   ├── t3-interrupted-mid-reasoning.json
+│   │   ├── t4-reasoning-tool-deepseek-official.json
+│   │   └── t5-reasoning-text-deepseek-official.json
+│   └── derived/                      Four declared synthetic mutations
+│       ├── d1-no-reasoning-tokens.json
+│       ├── d2-partial-usage.json
+│       ├── d3-attempt-without-message.json
+│       └── d4-unmatched-tool-result.json
+│
+├── src/
+│   ├── core/                         Pure metric engine — zero @deepseek-ai/* imports
+│   │   ├── types.js                  JSDoc normalized domain records
+│   │   ├── metric-quality.js         exact/calibrated/estimated/unavailable + rateQuality
+│   │   ├── quality-model.js          tokenTotal / phaseSplit / temporalShape axes + ceilings
+│   │   ├── delta-accounting.js       Delta classification, strict compact-stream decoder
+│   │   ├── phase-duration.js         Non-overlapping phase-duration attribution policy
+│   │   ├── token-allocation.js       Delta shape weighting + usage calibration
+│   │   ├── sliding-window.js         Trailing-1s meter with attempt epochs
+│   │   ├── live-metrics.js           LiveMeter: rolling window, TTFT, tool phase
+│   │   ├── tool-timing.js            Sum and union tool durations
+│   │   ├── time-axis.js              Compressed model-attempt chart clock
+│   │   ├── curve.js                  Rolling completed curve, peak, downsampling
+│   │   ├── aggregate-turn.js         Turn-level weighted final metrics + quality axes
+│   │   └── turn-state.js             Pure lifecycle state machine + turn/end mapping
+│   │
+│   ├── dsh/                          DSH rc.2 raw evidence -> normalized events
+│   │   ├── index.js                  Public surface of the adapter layer
+│   │   ├── raw.js                    Plane discriminants; the only wire-shape predicates
+│   │   ├── adapter.js                Field mapping (the only place DSH names are read)
+│   │   ├── stream-decoder.js         Durable AssistantStreamRecord decoder + quality
+│   │   ├── live-path.js              Path A: transient frames + durable boundaries
+│   │   ├── durable-path.js           Path B: settlements only; tail measurement source
+│   │   └── client-feed.js            SessionEventWindow wire -> normalized events
+│   │
+│   ├── host/
+│   │   └── telemetry-design.js       DSH-agnostic normalized store, session+turn keyed
+│   │
+│   └── client/
+│       ├── ui-model.js               Pure UI view-model shaping
+│       ├── format.js                 Number/time formatting with `—` for absent evidence
+│       ├── styles.js                 Scoped style constants over host theme tokens
+│       ├── main.js                   Browser entry: locale + controller + slot registration
+│       ├── live/                     Phase 3 live UI
+│       │   ├── live-state.js         Eight-state UI machine (explicit transitions)
+│       │   ├── live-presenter.js     machine + LiveMeter snapshot -> view model
+│       │   ├── live-format.js        ≈ TPS / stopwatches / tool labels
+│       │   ├── refresh.js            single presentation ticker (200 ms, coalesced lead)
+│       │   ├── controller.js         eventSource attach -> store + presenter, per session
+│       │   ├── locale.js             turnPerformanceMeter en/zh dictionary + fallback
+│       │   ├── live-css.js           scoped stylesheet string (light/dark accent)
+│       │   └── LiveMeter.js          React slot component (browser-only, imports react)
+│       └── README.md                 Client implementation constraints
+│
+├── dev/                              Dev-only capture tooling (not in the bundle)
+│   ├── README.md
+│   ├── fixture-recorder/             Injected host recorder (session/event + assistant-stream)
+│   ├── capture-scenario.ps1          Launch/interrupt a recorded scenario
+│   ├── harvest-fixtures.mjs          Raw recording -> fixtures/dsh-turns/*
+│   ├── mutate-fixtures.mjs           Deterministic synthetic derivatives with provenance
+│   ├── measure-generation-tail.mjs   Generation-tail evidence for the duration policy
+│   ├── inspect-recording.mjs         Chronology dump of one raw recording
+│   ├── recordings/                   Launch receipts + captured model catalog
+│   └── scratch/                      Working directory the B1 scenario wrote into
+│
+├── test/
+│   ├── helpers/
+│   │   ├── fixtures.js               Fixture loading contract
+│   │   └── equivalence.js            Live-vs-durable harness + metric tuple comparison
+│   ├── core …                        pure-engine tests (one per src/core module)
+│   ├── quality-model.test.js
+│   ├── dsh-adapter.test.js
+│   ├── dsh-stream-decoder.test.js
+│   ├── dsh-equivalence.test.js        Phase 2 acceptance: both paths agree per fixture
+│   ├── dsh-fixtures.test.js           Fixture contract + synthetic provenance
+│   ├── dsh-degradation.test.js        The twelve required degradation/corruption cases
+│   ├── generation-tail.test.js        Frozen phase-duration evidence
+│   └── telemetry-store.test.js / format.test.js / ui-model.test.js
+│
+└── scripts/
+    └── verify-structure.mjs
+```
+
+Expected evolution during implementation:
+
+```text
+src/client/
+  meter-root.*                    Slot component tree (live pill / completed card)
+  live-meter.*
+  completed-card.*
+  tps-chart.*
+  locale.*                        Dictionary registration for `turnPerformanceMeter`
+
+test/
+  component tests
+  browser/e2e tests (if local DSH harness supports them)
+```
+
+Do not create parallel copies of the same metric formula in host and client. Pure formulas remain in `src/core` and are reused wherever the final build pipeline permits. `scripts/verify-structure.mjs` fails when a `src/core` module has no matching test.

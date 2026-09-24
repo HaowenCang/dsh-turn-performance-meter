@@ -1,0 +1,39 @@
+{
+  "fixtures": [
+    {
+      "fixture": "t1-reasoning-tool-reasoning",
+      "sessionId": "fixture-muf44tre-1",
+      "scenario": "One turn, two model attempts. Attempt 1 emitted two sequential pwsh tool-call arguments; attempt 2 answered with ordinary text.",
+      "durableEventCount": 26,
+      "transientFrameCount": 85
+    },
+    {
+      "fixture": "t2-pwsh-write-edit",
+      "sessionId": "fixture-muf46zj3-2",
+      "scenario": "One turn, four model attempts. Model reasoning plus a write call, an edit call, a pwsh call, then a final text answer.",
+      "durableEventCount": 35,
+      "transientFrameCount": 369
+    },
+    {
+      "fixture": "t3-interrupted-mid-reasoning",
+      "sessionId": "fixture-muf471nx-3",
+      "scenario": "One turn, one attempt, cancelled by user request 9 s into a long reasoning stream. The settlement carries interrupted:true and no usage.",
+      "durableEventCount": 19,
+      "transientFrameCount": 718
+    },
+    {
+      "fixture": "t4-reasoning-tool-deepseek-official",
+      "sessionId": "fixture-muf49uxv-1",
+      "scenario": "The same shape as t1 but on the deepseek-official adapter, which reports provider reasoningTokens. One turn, two attempts.",
+      "durableEventCount": 26,
+      "transientFrameCount": 122
+    },
+    {
+      "fixture": "t5-reasoning-text-deepseek-official",
+      "sessionId": "fixture-muf49yr9-2",
+      "scenario": "One turn, one attempt on the deepseek-official adapter: a 1038-fragment reasoning stream followed by a 269-fragment text stream, with authoritative reasoningTokens.",
+      "durableEventCount": 21,
+      "transientFrameCount": 1315
+    }
+  ]
+}

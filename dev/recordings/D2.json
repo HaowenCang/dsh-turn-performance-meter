@@ -1,0 +1,8 @@
+﻿{
+    "ok":  true,
+    "sessionId":  "fixture-muf49yr9-2",
+    "agentPreset":  "standard",
+    "provider":  "deepseek-official",
+    "model":  "deepseek-v4-pro",
+    "interruptArmed":  false
+}

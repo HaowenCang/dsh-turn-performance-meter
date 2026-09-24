@@ -1,0 +1,30 @@
+{
+  "name": "dsh-turn-performance-meter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn-level live and completed throughput/latency telemetry for DeepSeek Harness agent workflows.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build:client": "node scripts/build-client.mjs",
+    "verify": "node scripts/verify-structure.mjs && node --test test/*.test.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

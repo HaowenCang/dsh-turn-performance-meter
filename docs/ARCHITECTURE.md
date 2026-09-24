@@ -1,0 +1,260 @@
+# Architecture
+
+## 1. Objective
+
+`dsh-turn-performance-meter` is a turn-scoped telemetry and presentation plugin for DSH. Its design assumes agentic turns rather than one request/one response. The fundamental object is a Turn containing zero or more tool calls and one or more model attempts.
+
+```text
+Turn
+├─ LLM attempt A
+│  ├─ reasoning deltas
+│  └─ output deltas (text + tool-call arguments)
+├─ Tool calls
+├─ LLM attempt B
+│  ├─ reasoning deltas
+│  └─ output deltas
+├─ Tool calls
+└─ LLM attempt C
+   └─ final output
+```
+
+The architecture separates raw DSH evidence from normalized telemetry, pure metrics, and UI. No UI component should know raw `session/event` or `agent/assistant-stream` details.
+
+## 2. Layers
+
+```text
+DSH Host/runtime
+  │
+  ├─ durable session/event facts
+  │    turn/start, step boundaries, assistant settlements,
+  │    tool/call, tool/result, turn/end, retry/attempt records
+  │
+  └─ transient assistant stream
+       agent/assistant-stream start/chunk/end
+       └─ timestamped StreamChunk deltas
+                 │
+                 ▼
+        DSH adapter / normalization layer
+                 │
+                 ▼
+        TurnTelemetryStore (session + turn keyed)
+          ├─ AttemptRecord[]
+          ├─ ToolCallRecord[]
+          ├─ live SlidingWindowMeter
+          └─ turn lifecycle
+                 │
+        ┌────────┴─────────┐
+        ▼                  ▼
+  Live snapshot        Settled snapshot
+  (estimated)          (exact/calibrated where possible)
+        │                  │
+        └────────┬─────────┘
+                 ▼
+        client projection/resource
+                 ▼
+      conversation.composer.dock
+        ├─ live compact pill
+        └─ completed card
+             └─ hover curve view
+```
+
+## 3. Source-of-truth policy
+
+The integration layer must use DSH extension points and client services, not DOM scraping. DSH's public architecture explicitly distinguishes durable facts (`session/event`) from transient live model presentation (`agent/assistant-stream`). The plugin should combine them:
+
+- transient assistant frames: live current-window TPS and in-flight sample timestamps;
+- durable turn/step/tool/assistant settlements: authoritative boundaries, completion status, replay/reload reconstruction, and provider usage;
+- provider usage: exact aggregate output/reasoning token totals when available.
+
+Do not derive metrics by observing rendered chat DOM, another plugin's DOM, or text animation timing.
+
+## 4. Host state model
+
+Key all active state by `(sessionId, turn)`; never maintain one global "current turn" because multiple sessions can exist and background/parallel activity may occur.
+
+```ts
+TurnRecord = {
+  sessionId,
+  turn,
+  startMs,
+  endMs?,
+  firstTokenMs?,
+  status,
+  attempts: AttemptRecord[],
+  tools: ToolCallRecord[],
+}
+
+AttemptRecord = {
+  attemptId,
+  turn,
+  step,
+  samples: DeltaSample[],
+  usage?,
+  reasoningMs?,
+  outputMs?,
+  outcome?,
+}
+
+ToolCallRecord = {
+  callId,
+  name,
+  startMs,
+  endMs?,
+  status,
+  parentCallId?,
+}
+```
+
+`attemptId` is the live identity for one assistant streaming attempt. A retry/new attempt must create a new live rolling-window epoch.
+
+## 5. Normalized delta accounting
+
+A timestamped `StreamChunk` contributes to model-output telemetry only if it carries non-empty generated content:
+
+- `reasoning-delta` → reasoning phase;
+- `text-delta` → output phase;
+- `tool-call-delta.argumentsDelta` → output phase;
+- empty deltas, `block-start`, `block-end`, `usage`, `finish` → no direct token sample.
+
+Tool execution results never enter this stream-accounting path.
+
+This rule means model-generated `pwsh` commands, write-file payloads and edit patches are naturally counted because they are generated inside tool-call argument deltas.
+
+## 6. Turn lifecycle
+
+Recommended normalized states:
+
+```text
+idle
+  -> pending          turn/start, no first generated delta yet
+  -> streaming        first/current model delta
+  -> tool             tool executing; live TPS cleared
+  -> pending          next model attempt waiting for first delta
+  -> streaming
+  -> completed | interrupted | errored
+```
+
+A tool may be parallel with another tool. State presentation can still say `tool` while `activeToolIds.size > 0`; timing must retain individual intervals.
+
+### Live rolling-window reset rule
+
+Every `AssistantStreamFrame.start` / accepted new attempt resets the 1-second live meter. A later model call must not inherit tokens from a preceding call separated by a tool or retry.
+
+## 7. Timing domains
+
+The project deliberately has several clocks; do not collapse them.
+
+### Wall clock
+
+Used for:
+
+- turn elapsed time;
+- TTFT;
+- individual tool latency;
+- tool wall-union latency;
+- model intra-attempt streaming stalls.
+
+### Phase generation duration
+
+Used as TPS denominator. Tool waiting is excluded. Reasoning/output duration must be derived from model-generated delta boundaries under one documented policy and tested against edge cases.
+
+### Compressed curve clock
+
+Used only for the completed TPS chart. For each model attempt, preserve the internal time spacing from first generated delta to last generated delta; concatenate attempts with no inter-attempt gap:
+
+```text
+wall clock:
+A model ===== | tool 30 s | B model === | tool | C model ======
+
+curve clock:
+A model =====B model ===C model ======
+```
+
+Thus tool execution and second-call pre-first-token wait consume zero chart width, while a real stall *inside* an active model stream remains visible as a local TPS reduction.
+
+Formally, the chart is equivalent to an active model-generation coordinate, but implementation is safer as explicit attempt concatenation than subtracting arbitrary wall intervals from one global clock.
+
+## 8. Retry, interruption and failure semantics
+
+The implementation must not assume one attempt per step. DSH publishes an `attemptId` and can durably record attempts/retries.
+
+Recommended policy:
+
+- include every attempt in the turn that actually emitted non-empty generated deltas;
+- use provider usage for an attempt when it exists;
+- an abandoned/failed attempt without authoritative usage may still contribute observed timing/curve shape with degraded metric quality;
+- a user-stopped turn settles the card as `interrupted`, not `completed`;
+- provider/request failure settles as `errored` when DSH's turn end says so;
+- do not fabricate exact final token totals when contributing attempts lack authoritative usage. The UI should show `≈`/quality detail or `—` according to `METRICS_SPEC.md`.
+
+DeepSeek must validate these policies against the local DSH retry/assistant-attempt event semantics before finalizing integration.
+
+## 9. Transport from host to client
+
+**Decided and implemented (Phase 3).** One session-scoped read model in the browser, fed by
+`ctx.sessions.binding(sessionId).eventSource`: its `SessionEventWindow` carries the durable `SessionEvent` plane and
+the client-folded transient `assistant/live-chunk` plane in one synchronously-published window with `change` payloads
+(`replace` / `append` / `prepend` / `settle-assistant`). No host half, no plugin projection, no polling loop, no DOM
+scraping, no synthetic durable events.
+
+```text
+SessionEventWindow (change payloads)
+  -> src/dsh/client-feed.js      window wire -> normalized events (the only DSH-wire parser)
+  -> TurnTelemetryStore          (sessionId, turn) keyed statistics + per-session LiveMeter
+  -> LivePresenter               per-session UI state machine + projection guards
+  -> React LiveMeter             one 200 ms presentation ticker; stored view state
+```
+
+Rejected alternatives and their reasons are recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 0 §"Host→client telemetry
+seam"): plugin-owned session projection (committed-event-driven, cannot publish at transient cadence), host push
+socket (re-implements shipped transport, HMR-fragile), `sessionStats`/`tokenUsage` projections (whole-session scope),
+DOM polling (forbidden).
+
+The exact mechanism was intentionally not hardcoded in the scaffold; Phase 0 recorded the chosen seam before any
+integration code was written, and Phase 3 verified it live.
+
+## 10. Client/UI architecture
+
+Mount in `conversation.composer.dock` as an independent entry `turn-performance-meter` (`order: -10`, additive;
+the native `stats` occupant at order `0` is untouched).
+
+One root component projects an explicit state machine onto one view:
+
+```text
+MeterRoot (slot component)
+├─ hidden            inactive | settled | no session — renders null
+├─ LiveMeter pill
+│  ├─ pending-first-token   running first-response stopwatch (once per turn)
+│  ├─ streaming-reasoning   trailing-1s ≈TPS + turn elapsed
+│  ├─ streaming-output      (tool-call arguments included)
+│  ├─ tool-running          episode wall timer + tool label(s), no TPS field
+│  ├─ waiting-model         post-TTFT wait stopwatch, never the TTFT counter
+│  └─ transition            neutral 处理中…, no TPS field
+└─ (CompletedMeter + curve — later phases, placeholder types only)
+```
+
+The projected view is stored state: only the 200 ms ticker (and mount/session changes) writes it, so the conversation
+dock's high-frequency re-renders cannot bypass the presentation throttle. Hover must not create a detached tooltip
+(completed view); keyboard focus provides equivalent access when that view arrives.
+
+## 11. Resource ownership
+
+All timers, listeners, subscriptions, styles, and observers must be effect-scoped and disposed when the plugin/client contribution unmounts. Avoid singleton browser intervals. Avoid duplicate React. Prefer CSS variables/inherited host theme values; only the output accent color should be plugin-defined if no suitable host token exists.
+
+Implemented ownership (Phase 3): the slot component owns exactly one presentation scheduler (cleared on hide and
+unmount), one eventSource subscription per attached session inside the controller (unsubscribed on controller
+dispose), and a reference-counted style tag (single `#dsh-tpm-live-style`, removed with the last unmount). The
+controller disposes every subscription, machine and store entry on fiber teardown (`ctx.effect` returns-disposer
+form — the callback runs as setup, its return value at teardown). React comes from the browser module table seed;
+`window.React` stays undefined and no duplicate-instance error appears in the console.
+
+## 12. Non-goals
+
+This project is not:
+
+- a billing/token-cost meter;
+- a session-wide aggregate stats replacement;
+- an end-to-end timeline visualization;
+- a profiler for tool stdout throughput;
+- a DOM observer;
+- a DSH core patch.

@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+*.log
+coverage/
+dist/
+verify-out.txt
+dev/verify-*.txt
+dev/screenshots/
+dev/scratch/

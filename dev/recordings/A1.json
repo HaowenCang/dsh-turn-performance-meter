@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "sessionId": "fixture-muf44tre-1",
+  "agentPreset": "standard",
+  "provider": "command-goat",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "interruptArmed": false,
+  "scenario": "A1",
+  "task": "Do exactly this and nothing else. Do not read or write files. Do not describe your plan.\n1. Call the pwsh tool with exactly this command: Write-Output 'alpha-7'\n2. Then call the pwsh tool with exactly this command: Write-Output 'beta-9'\n3. Then reply with one short sentence that contains both outputs.",
+  "cwd": "E:\\Projects\\DSHarness\\dsh-turn-performance-meter",
+  "fixture": "t1-reasoning-tool-reasoning",
+  "note": "Recorded via dev/capture-scenario.ps1 -Name A1. The sessionId is the raw recording key under $DSH_HOME/turn-meter-fixtures/raw; dev/harvest-fixtures.mjs maps it to fixtures/dsh-turns/t1-reasoning-tool-reasoning.json."
+}

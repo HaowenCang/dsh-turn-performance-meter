@@ -1,0 +1,5487 @@
+/**
+ * GENERATED FILE — do not edit.
+ * Rebuild with: npm run build:client
+ * Source graph: src/client/main.js + its imports (scripts/bundle-client.mjs).
+ */
+window.__ModuleLoader__.load({
+	id: "dsh-turn-performance-meter",
+	factory(require) {
+		'use strict'
+		const __cache = new Map()
+		function __ext(spec) { return require(spec) }
+		function __req(id) {
+			const hit = __cache.get(id)
+			if (hit !== undefined) return hit
+			const factory = __modules[id]
+			if (factory === undefined) throw new Error('dsh-turn-performance-meter bundle: unknown module ' + id)
+			const record = { exports: {} }
+			__cache.set(id, record.exports)
+			factory(record.exports)
+			return record.exports
+		}
+		const __modules = {
+			"src/core/sliding-window.js": function (__exports) {
+/**
+ * Trailing rolling-window token meter.
+ *
+ * The samples may be calibrated token counts or live token-shape estimates;
+ * quality is tracked by the caller. The window is closed on the left and open on
+ * the right — a sample exactly `windowMs` old no longer counts — which is the
+ * boundary the metric spec writes as `(t - 1000 ms, t]`.
+ *
+ * The meter is bound to one **model attempt identity**. `reset` is mandatory at
+ * every new attempt so a later model call can never inherit tokens from a call
+ * that a tool or a retry separated it from
+ * (docs/METRICS_SPEC.md §6).
+ */
+class SlidingWindowMeter {
+  constructor(windowMs = 1000) {
+    if (!(windowMs > 0) || !Number.isFinite(windowMs)) throw new TypeError('windowMs must be a finite number > 0')
+    this.windowMs = windowMs
+    this.samples = []
+    this.attemptId = null
+  }
+
+  /**
+   * Drop every sample and adopt a new attempt identity.
+   * @param {string|null} attemptId identity of the attempt the window now serves
+   */
+  reset(attemptId = null) {
+    this.samples.length = 0
+    this.attemptId = attemptId
+  }
+
+  /**
+   * Start a new attempt epoch. Returns `true` when the identity actually
+   * changed, so callers can distinguish "new attempt" from a repeated frame of
+   * the attempt already being measured.
+   */
+  beginAttempt(attemptId) {
+    const changed = this.attemptId !== attemptId
+    if (changed) this.reset(attemptId)
+    return changed
+  }
+
+  /** Whether the meter currently holds any sample inside the live horizon. */
+  get isEmpty() {
+    return this.samples.length === 0
+  }
+
+  /** Number of retained samples (all of them are newer than the last evaluated `nowMs`). */
+  get size() {
+    return this.samples.length
+  }
+
+  /** Timestamp of the newest retained sample, or `null`. */
+  newestTimeMs() {
+    return this.samples.length > 0 ? this.samples[this.samples.length - 1].timeMs : null
+  }
+
+  add(timeMs, tokenWeight) {
+    if (!Number.isFinite(timeMs)) throw new TypeError('timeMs must be finite')
+    if (!(tokenWeight >= 0) || !Number.isFinite(tokenWeight)) {
+      throw new TypeError('tokenWeight must be a finite non-negative number')
+    }
+    if (tokenWeight === 0) return
+    this.samples.push({ timeMs, tokenWeight })
+  }
+
+  /** Add a whole batch of `{timeMs, weight|tokens}` records. */
+  addAll(records) {
+    if (!Array.isArray(records)) return
+    for (const record of records) {
+      if (!record) continue
+      const weight = record.tokens ?? record.weight
+      if (weight === undefined) continue
+      this.add(record.timeMs, weight)
+    }
+  }
+
+  /**
+   * Current trailing-window TPS at `nowMs`.
+   *
+   * Samples strictly in the future of `nowMs` are retained but not counted, so
+   * the value is a function of the requested instant rather than of arrival
+   * order. Expired samples are evicted from the head.
+   */
+  value(nowMs) {
+    if (!Number.isFinite(nowMs)) throw new TypeError('nowMs must be finite')
+    const lowerExclusive = nowMs - this.windowMs
+    while (this.samples.length && this.samples[0].timeMs <= lowerExclusive) {
+      this.samples.shift()
+    }
+    let weight = 0
+    for (const sample of this.samples) {
+      if (sample.timeMs <= nowMs) weight += sample.tokenWeight
+    }
+    return weight * 1000 / this.windowMs
+  }
+}
+
+;Object.assign(__exports, { SlidingWindowMeter })
+			},
+			"src/core/metric-quality.js": function (__exports) {
+/**
+ * Metric quality is ordered from strongest to weakest evidence. It exists so
+ * that no display path can pretend a live estimate is a provider-exact number
+ * (docs/METRICS_SPEC.md §11).
+ */
+const MetricQuality = Object.freeze({
+  EXACT: 'exact',
+  CALIBRATED: 'calibrated',
+  ESTIMATED: 'estimated',
+  UNAVAILABLE: 'unavailable',
+})
+
+const ORDER = Object.freeze([
+  MetricQuality.EXACT,
+  MetricQuality.CALIBRATED,
+  MetricQuality.ESTIMATED,
+  MetricQuality.UNAVAILABLE,
+])
+
+const RANK = new Map(ORDER.map((quality, index) => [quality, index]))
+
+/** Whether the value is one of the four declared qualities. */
+function isMetricQuality(value) {
+  return RANK.has(value)
+}
+
+/** Return the weakest quality among the supplied values. */
+function weakestQuality(...values) {
+  if (values.length === 0) return MetricQuality.UNAVAILABLE
+  let weakest = MetricQuality.EXACT
+  for (const value of values) {
+    const rank = RANK.get(value)
+    if (rank === undefined) return MetricQuality.UNAVAILABLE
+    if (rank > RANK.get(weakest)) weakest = value
+  }
+  return weakest
+}
+
+/**
+ * Quality of an aggregate whose denominator is the sum of phase durations.
+ *
+ * `null` duration is deliberately not coerced to zero: a single-delta attempt
+ * has no measurable generation interval, so any rate computed from it would be
+ * fabricated. Callers receive `unavailable` and must render `—`.
+ *
+ * `measuredRatio` is the share of contributing attempts that supplied a
+ * duration. Below 1 the aggregate under-counts the true generation time, so the
+ * resulting rate is optimistic and cannot be `exact`.
+ */
+function rateQuality({ measuredRatio = 1, tokensExact = true, phaseSplitExact = true } = {}) {
+  if (!(measuredRatio > 0)) return MetricQuality.UNAVAILABLE
+  if (measuredRatio < 1) return MetricQuality.ESTIMATED
+  if (!phaseSplitExact) return MetricQuality.CALIBRATED
+  return tokensExact ? MetricQuality.EXACT : MetricQuality.ESTIMATED
+}
+
+;Object.assign(__exports, { MetricQuality, isMetricQuality, weakestQuality, rateQuality })
+			},
+			"src/core/phase-duration.js": function (__exports) {
+/**
+ * Deterministic phase-duration attribution for one model attempt.
+ *
+ * Normative policy (docs/METRICS_SPEC.md §7 "Phase-duration policy"), which this
+ * module is the only implementation of:
+ *
+ *  1. TTFT — the interval from attempt start to the first generated delta — is
+ *     excluded, because the samples begin at the first generated delta.
+ *  2. Tool and inter-attempt time is excluded: this function only ever sees one
+ *     attempt's own samples, and only intervals between two samples of that
+ *     attempt are charged.
+ *  3. Intra-stream stalls between consecutive generated deltas are retained:
+ *     every gap is charged to the phase of the *earlier* delta. A 3 s stall
+ *     inside a reasoning stream is model-delivery instability and must lower the
+ *     reported reasoning TPS, not disappear.
+ *  4. Reasoning and output never double-count: each pairwise interval is charged
+ *     to exactly one phase, so a reasoning -> output -> reasoning interleave
+ *     produces three disjoint intervals rather than overlapping `[first,last]`
+ *     spans.
+ *  5. Degenerate attempts never produce division by zero or infinite TPS. An
+ *     attempt with fewer than two generated deltas, or with all deltas sharing
+ *     one timestamp, yields `null` durations, never `0`: "no evidence" and
+ *     "measured zero duration" are different facts and only the former is true.
+ *     Consumers translate `null` duration plus non-zero tokens into
+ *     `unavailable` quality rather than an infinite rate.
+ *
+ * The trailing interval from the last generated delta to attempt settlement is
+ * deliberately **not** charged. DSH's settlement timestamp is a host commit
+ * boundary (`assistant/message` event time), not a provider decode boundary, so
+ * charging it would mix host overhead into the decode denominator. This is the
+ * documented fallback branch of METRICS_SPEC §7.
+ */
+
+const PHASE = Object.freeze({ REASONING: 'reasoning', OUTPUT: 'output' })
+
+function toSamples(samples) {
+  if (!Array.isArray(samples)) return []
+  return samples
+    .filter(sample => sample && Number.isFinite(sample.timeMs))
+    .slice()
+    .sort((a, b) => a.timeMs - b.timeMs)
+}
+
+/**
+ * Attribute one attempt's inter-delta intervals to phases.
+ *
+ * @param {readonly {timeMs:number, phase:'reasoning'|'output'}[]} samples
+ * @returns {{
+ *   reasoningMs:number|null,
+ *   outputMs:number|null,
+ *   spanMs:number,
+ *   sampleCount:number,
+ *   generatedCount:number,
+ * }}
+ */
+function attributePhaseDurations(samples) {
+  const ordered = toSamples(samples)
+  let reasoningMs = 0
+  let outputMs = 0
+  let reasoningSeen = false
+  let outputSeen = false
+
+  for (let i = 1; i < ordered.length; i += 1) {
+    const gap = ordered[i].timeMs - ordered[i - 1].timeMs
+    if (!(gap > 0)) continue
+    if (ordered[i - 1].phase === PHASE.REASONING) {
+      reasoningMs += gap
+      reasoningSeen = true
+    } else if (ordered[i - 1].phase === PHASE.OUTPUT) {
+      outputMs += gap
+      outputSeen = true
+    }
+  }
+
+  const first = ordered[0]?.timeMs
+  const last = ordered.at(-1)?.timeMs
+  return {
+    reasoningMs: reasoningSeen ? reasoningMs : null,
+    outputMs: outputSeen ? outputMs : null,
+    spanMs: ordered.length > 1 ? Math.max(0, last - first) : 0,
+    sampleCount: ordered.length,
+    generatedCount: ordered.length,
+  }
+}
+
+;Object.assign(__exports, { PHASE, attributePhaseDurations })
+			},
+			"src/core/live-metrics.js": function (__exports) {
+/**
+ * Live meter state and snapshots.
+ *
+ * This is the only place the "what is happening right now" question is answered,
+ * and it exists so the client half contains no statistics of its own. It is
+ * transport-agnostic: it consumes *normalized* events, which `src/host` (or the
+ * browser adapter) produces from verified DSH data.
+ *
+ * Frozen behaviours implemented here:
+ *
+ *   - the trailing window is bound to one model attempt and is reset at every new
+ *     attempt, so two calls separated by a tool or a retry never mix
+ *     (docs/METRICS_SPEC.md §6);
+ *   - while no attempt is streaming — including while a tool runs — the meter
+ *     reports `tps: null` and a phase of `tool`/`pending`, never a stale or zero
+ *     TPS dressed up as current (UI_SPEC §3.3);
+ *   - TTFT is measured once per turn, from turn start to the first non-empty
+ *     generated delta, and is never redefined by a later call
+ *     (docs/METRICS_SPEC.md §4).
+ */
+
+const { SlidingWindowMeter } = __req("src/core/sliding-window.js")
+const { MetricQuality } = __req("src/core/metric-quality.js")
+const { PHASE } = __req("src/core/phase-duration.js")
+
+const LivePhase = Object.freeze({
+  IDLE: 'idle',
+  PENDING: 'pending',
+  STREAMING: 'streaming',
+  TOOL: 'tool',
+  SETTLED: 'settled',
+})
+
+class LiveMeter {
+  /**
+   * @param {{windowMs?:number, refreshMs?:number}} [options]
+   */
+  constructor(options = {}) {
+    this.windowMs = options.windowMs ?? 1000
+    /** UI refresh target; the caller owns the timer, this only reports it. */
+    this.refreshMs = options.refreshMs ?? 200
+    this.meter = new SlidingWindowMeter(this.windowMs)
+    this.reset()
+  }
+
+  reset() {
+    this.turn = null
+    this.turnStartMs = null
+    this.turnEndMs = null
+    this.firstTokenMs = null
+    this.attemptId = null
+    this.step = null
+    this.phase = LivePhase.IDLE
+    this.status = null
+    /** Insertion-ordered so the compact label lists tools in call order. */
+    this.tools = new Map()
+    /**
+     * Start of the current *continuous* tool-activity episode: the earliest
+     * boundary of the union of overlapping tool intervals that is still open.
+     * A tool starting while another runs extends the episode; an episode ends
+     * only when the last running call settles. This is the wall-clock figure
+     * the compact live timer shows (`toolWall`, never a sum of call durations).
+     */
+    this.toolEpisodeStartMs = null
+    this.lastDeltaMs = null
+    /** Phase of the most recent generated sample of the active attempt. */
+    this.streamingPhase = null
+    this.meter.reset(null)
+  }
+
+  /** Begin a new turn; any previous turn's live state is discarded. */
+  turnStarted({ turn, timeMs }) {
+    this.reset()
+    this.turn = turn
+    this.turnStartMs = timeMs
+    this.phase = LivePhase.PENDING
+  }
+
+  /**
+   * Begin a new model attempt. Always resets the window: a new attempt identity
+   * is exactly the boundary across which a rolling window must not be bridged.
+   * @returns {boolean} whether the identity actually changed
+   */
+  attemptStarted({ attemptId, step = null, timeMs = null }) {
+    const changed = this.meter.beginAttempt(attemptId)
+    this.attemptId = attemptId
+    this.step = step
+    this.streamingPhase = null
+    // A model attempt cannot be generating while tools are still running, so the
+    // phase leaves `tool` only once the last one has settled.
+    if (this.runningTools().length === 0) this.phase = LivePhase.PENDING
+    if (Number.isFinite(timeMs)) this.attemptStartMs = timeMs
+    return changed
+  }
+
+  /**
+   * Accept one generated sample (`{timeMs, phase, tokens|weight}`). Non-generated
+   * chunks must have been filtered out upstream by `sampleFromChunk`.
+   *
+   * A sample carrying an `attemptId` other than the active one is rejected: a
+   * late frame from an attempt the turn has already moved past must not enter the
+   * current window, or the rolling rate would bridge two model calls.
+   */
+  acceptSample(sample) {
+    if (!sample || !Number.isFinite(sample.timeMs)) return false
+    if (this.turn === null) return false
+    if (sample.attemptId !== undefined && sample.attemptId !== null && sample.attemptId !== this.attemptId) {
+      return false
+    }
+    const weight = sample.tokens ?? sample.weight
+    if (!(weight > 0) || !Number.isFinite(weight)) return false
+    if (this.firstTokenMs === null) this.firstTokenMs = sample.timeMs
+    this.lastDeltaMs = sample.timeMs
+    this.phase = LivePhase.STREAMING
+    this.streamingPhase = sample.phase ?? null
+    this.meter.add(sample.timeMs, weight)
+    return true
+  }
+
+  /** Which phase the active attempt is currently generating, or `null`. */
+  activePhase() {
+    return this.streamingPhase
+  }
+
+  toolStarted({ callId, name, timeMs }) {
+    const wasRunning = this.runningTools().length > 0
+    this.tools.set(callId, { callId, name: name ?? 'tool', startMs: timeMs, endMs: null, status: 'running' })
+    // A call starting while others run belongs to the same continuous episode;
+    // only the first call of a quiet period opens a new one.
+    if (!wasRunning) this.toolEpisodeStartMs = timeMs
+    this.phase = LivePhase.TOOL
+    // The model is not generating while a tool runs, so the attempt window is
+    // cleared rather than frozen: a later frame must not read a stale speed.
+    this.meter.reset(null)
+    this.attemptId = null
+  }
+
+  toolSettled({ callId, timeMs, status = 'ok' }) {
+    const call = this.tools.get(callId)
+    if (call) {
+      call.endMs = timeMs
+      call.status = status
+    }
+    if (this.runningTools().length === 0) {
+      // The continuous activity interval ended with the last running call.
+      this.toolEpisodeStartMs = null
+      if (this.phase === LivePhase.TOOL) this.phase = LivePhase.PENDING
+    }
+  }
+
+  runningTools() {
+    return [...this.tools.values()].filter(call => call.endMs === null)
+  }
+
+  turnSettled({ timeMs, status = 'completed' }) {
+    this.turnEndMs = timeMs
+    this.status = status
+    this.phase = LivePhase.SETTLED
+    this.meter.reset(null)
+    this.attemptId = null
+  }
+
+  /**
+   * Current wall clock, clamped so a paused tab cannot produce negative elapsed
+   * times or count samples from the future.
+   */
+  clock(nowMs) {
+    if (!Number.isFinite(nowMs)) return this.lastDeltaMs ?? this.turnStartMs ?? 0
+    return Math.max(this.turnStartMs ?? nowMs, nowMs)
+  }
+
+  /**
+   * The live view snapshot. `tps` is `null` whenever no model attempt is
+   * generating, so a renderer cannot accidentally print a stale rate.
+   */
+  snapshot(nowMs) {
+    if (this.turn === null) return { phase: LivePhase.IDLE }
+    const now = this.clock(nowMs)
+    const elapsedMs = Number.isFinite(this.turnStartMs) ? Math.max(0, now - this.turnStartMs) : 0
+    const base = {
+      turn: this.turn,
+      phase: this.phase,
+      turnElapsedMs: elapsedMs,
+      ttftMs: this.firstTokenMs !== null && Number.isFinite(this.turnStartMs)
+        ? Math.max(0, this.firstTokenMs - this.turnStartMs)
+        : null,
+      attemptId: this.attemptId,
+      step: this.step,
+    }
+
+    if (this.phase === LivePhase.STREAMING && this.meter.attemptId !== null) {
+      const tps = this.meter.value(now)
+      return {
+        ...base,
+        tps,
+        /**
+         * Live TPS is a shape estimate anchored to nothing yet: DSH streams no
+         * per-delta token counts, so the value cannot be `exact` until provider
+         * usage arrives and calibration happens after settlement.
+         */
+        tpsQuality: MetricQuality.ESTIMATED,
+        activePhase: this.activePhase(),
+      }
+    }
+
+    if (this.phase === LivePhase.TOOL) {
+      const running = this.runningTools()
+      return {
+        ...base,
+        tps: null,
+        tpsQuality: MetricQuality.UNAVAILABLE,
+        runningToolCount: running.length,
+        runningToolNames: running.map(call => call.name),
+        /**
+         * Wall-clock duration of the current continuous tool-activity episode
+         * (the open union interval), not the sum and not merely the oldest
+         * still-running call: a call that joined an already-running episode
+         * keeps the episode's original start even after the first call ends.
+         */
+        toolElapsedMs: this.toolEpisodeStartMs === null ? 0 : Math.max(0, now - this.toolEpisodeStartMs),
+        toolEpisodeStartMs: this.toolEpisodeStartMs,
+      }
+    }
+
+    /**
+     * Pending — turn open, or an attempt begun with no generated delta yet. The
+     * window is knowingly empty, so the value is a measured zero rather than
+     * absent evidence: the UI shows a running TTFT counter here, not a rate.
+     */
+    if (this.phase === LivePhase.PENDING && this.meter.attemptId !== null) {
+      return { ...base, tps: 0, tpsQuality: MetricQuality.ESTIMATED }
+    }
+
+    return { ...base, tps: null, tpsQuality: MetricQuality.UNAVAILABLE }
+  }
+}
+
+
+
+;Object.assign(__exports, { PHASE, LivePhase, LiveMeter })
+			},
+			"src/core/delta-accounting.js": function (__exports) {
+/**
+ * Delta accounting: which DSH stream/chunk shapes contribute to model-output
+ * telemetry, and how the compact durable stream runs reconstruct their exact
+ * timed delta sequence.
+ *
+ * Local evidence for these shapes (DSH 0.1.5-rc.2):
+ *   @deepseek-ai/dsh-llm/lib/types/types.d.ts:359-389       StreamChunk union
+ *   @deepseek-ai/dsh-llm/lib/types/assistant-stream.d.ts:16-40  AssistantStreamRecord
+ *   @deepseek-ai/dsh-llm/lib/index.js:1206-1246             expandAssistantStream
+ *   @deepseek-ai/dsh-llm/lib/index.js:1495-1505             validateRun (dt invariants)
+ *   @deepseek-ai/dsh-llm/lib/types/assistant-stream.d.ts:72-78  isTokenDelta
+ *
+ * Nothing here is imported from DSH: `@deepseek-ai/dsh-llm` declares no
+ * `dsh.client` manifest, so its modules are not requireable from a browser
+ * bundle (see docs/IMPLEMENTATION_LOG.md). This module is the single
+ * implementation of the rule for both halves.
+ */
+
+/** Content kinds this project accounts for. `null` means "not model output". */
+const MODEL_PHASE = Object.freeze({ REASONING: 'reasoning', OUTPUT: 'output' })
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0
+}
+
+/**
+ * Whether one chunk carries the model's first output token, mirroring DSH's
+ * `isTokenDelta`: true for a non-empty text, reasoning or tool-argument
+ * fragment and for every name-bearing tool-call delta; false for block, usage
+ * and finish chunks.
+ *
+ * @param {unknown} chunk
+ * @returns {boolean}
+ */
+function isTokenDelta(chunk) {
+  if (!chunk || typeof chunk !== 'object') return false
+  switch (chunk.type) {
+    case 'text-delta':
+    case 'reasoning-delta':
+      return isNonEmptyString(chunk.text)
+    case 'tool-call-delta':
+      // DSH's predicate is `argumentsDelta !== '' || name !== undefined`, i.e. a
+      // name-*bearing* delta qualifies even when the name is the empty string
+      // (`dsh-llm/lib/types/assistant-stream.js`, isTokenDelta). The accumulator
+      // can emit such a delta: an empty name degrades to a raw `chunk` record,
+      // whose expansion restores `name: ''`. Matching DSH exactly matters here
+      // because this predicate defines the first-token boundary used by TTFT.
+      return isNonEmptyString(chunk.argumentsDelta) || chunk.name !== undefined
+    default:
+      return false
+  }
+}
+
+/**
+ * Map one StreamChunk to the phase it contributes tokens to.
+ *
+ * `tool-call-delta.argumentsDelta` is model output: shell commands, file
+ * bodies, edit patches and any other tool arguments are generated by the
+ * model. Tool results never reach this function.
+ *
+ * @param {unknown} chunk
+ * @returns {'reasoning'|'output'|null}
+ */
+function classifyDelta(chunk) {
+  if (!chunk || typeof chunk !== 'object') return null
+  if (chunk.type === 'reasoning-delta' && isNonEmptyString(chunk.text)) return MODEL_PHASE.REASONING
+  if (chunk.type === 'text-delta' && isNonEmptyString(chunk.text)) return MODEL_PHASE.OUTPUT
+  if (chunk.type === 'tool-call-delta' && isNonEmptyString(chunk.argumentsDelta)) return MODEL_PHASE.OUTPUT
+  return null
+}
+
+/** Generated text of one chunk, or the empty string for non-generated chunks. */
+function deltaText(chunk) {
+  if (!chunk || typeof chunk !== 'object') return ''
+  switch (chunk.type) {
+    case 'reasoning-delta':
+    case 'text-delta':
+      return typeof chunk.text === 'string' ? chunk.text : ''
+    case 'tool-call-delta':
+      return typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
+    default:
+      return ''
+  }
+}
+
+/** One in-stream `usage` chunk carries authoritative aggregate usage mid-attempt. */
+function usageFromChunk(chunk) {
+  if (!chunk || typeof chunk !== 'object') return null
+  if (chunk.type !== 'usage') return null
+  const usage = chunk.usage
+  if (!usage || typeof usage !== 'object') return null
+  return Number.isFinite(usage.outputTokens) ? usage : null
+}
+
+/**
+ * Rebuild the exact timed delta sequence of one compact durable stream.
+ *
+ * `dt` is a per-step gap array with `dt.length === members.length - 1`; member
+ * `i > 0` occurs `dt[i - 1]` ms after member `i - 1`
+ * (`dsh-llm/lib/index.js:1218-1220`, invariant at `:1499`). Delta boundaries are
+ * therefore preserved exactly, which is what lets the completed curve keep real
+ * intra-stream stalls after a reload.
+ *
+ * Malformed records are skipped rather than throwing: a curve with one missing
+ * run degrades, while an exception would lose the whole turn card.
+ *
+ * @param {readonly object[]} records compact `AssistantStreamRecord` values
+ * @returns {{timeMs:number, chunk:object}[]} timed chunks in stream order
+ */
+function expandAssistantStream(records) {
+  const out = []
+  if (!Array.isArray(records)) return out
+  for (const record of records) {
+    if (!record || typeof record !== 'object') continue
+    if (record.type === 'chunk') {
+      if (Number.isFinite(record.time) && record.chunk && typeof record.chunk === 'object') {
+        out.push({ timeMs: record.time, chunk: record.chunk })
+      }
+      continue
+    }
+    const members = runMembers(record)
+    if (members === null) continue
+    const dt = Array.isArray(record.dt) ? record.dt : null
+    if (members.length > 1 && (dt === null || dt.length !== members.length - 1)) continue
+    let timeMs = record.time0
+    if (!Number.isFinite(timeMs)) continue
+    for (let i = 0; i < members.length; i += 1) {
+      if (i > 0) {
+        const gap = dt[i - 1]
+        if (!Number.isFinite(gap)) { timeMs = NaN; break }
+        timeMs += gap
+      }
+      const chunk = runMemberChunk(record, members[i])
+      if (chunk === null) continue
+      out.push({ timeMs, chunk })
+    }
+  }
+  return out
+}
+
+function runMembers(record) {
+  if (record.type === 'tool-call-chunks') return Array.isArray(record.args) ? record.args : null
+  if (record.type === 'text-chunks' || record.type === 'reasoning-chunks') {
+    return Array.isArray(record.texts) ? record.texts : null
+  }
+  return null
+}
+
+function runMemberChunk(record, member) {
+  // A member that is not a string cannot reconstruct a delta; skipping it keeps
+  // one malformed member from costing the whole run.
+  if (typeof member !== 'string') return null
+  if (record.type === 'text-chunks') {
+    return { type: 'text-delta', index: record.index, text: member }
+  }
+  if (record.type === 'reasoning-chunks') {
+    return { type: 'reasoning-delta', index: record.index, text: member }
+  }
+  const chunk = { type: 'tool-call-delta', index: record.index, id: record.id, argumentsDelta: member }
+  if (typeof record.name === 'string') chunk.name = record.name
+  return chunk
+}
+
+/** Time of the first member that {@link isTokenDelta} accepts, or `null`. */
+function firstTokenTime(timedChunks) {
+  if (!Array.isArray(timedChunks)) return null
+  for (const entry of timedChunks) {
+    if (!entry || !Number.isFinite(entry.timeMs)) continue
+    if (isTokenDelta(entry.chunk)) return entry.timeMs
+  }
+  return null
+}
+
+/**
+ * Why one compact stream record could not be decoded exactly.
+ *
+ * These are the *whole* failure surface. Anything not listed here is decoded,
+ * so a caller that sees an empty `issues` array has every original delta
+ * boundary, in order, with its exact reconstructed timestamp.
+ */
+const DECODE_ISSUE = Object.freeze({
+  /** The record is not a JSON object. */
+  NOT_AN_OBJECT: 'not-an-object',
+  /** `record.type` is absent or unrecognized. */
+  UNKNOWN_TYPE: 'unknown-type',
+  /** The record has keys outside its declared shape. */
+  UNEXPECTED_KEYS: 'unexpected-keys',
+  /** A required key is missing. */
+  MISSING_KEYS: 'missing-keys',
+  /** The member array (`texts`/`args`) is absent, not an array, or holds a non-string. */
+  BAD_MEMBERS: 'bad-members',
+  /** The member array is empty, which the accumulator never produces. */
+  EMPTY_RUN: 'empty-run',
+  /** `time0`/`time` is not a safe integer. */
+  BAD_TIME: 'bad-time',
+  /** `dt` is absent, not an array of safe integers, or not exactly members - 1 long. */
+  BAD_DT: 'bad-dt',
+  /** Reconstructed member times leave the safe-integer range. */
+  TIME_OVERFLOW: 'time-overflow',
+  /** A tool-call run has no usable `id`. */
+  BAD_CALL_ID: 'bad-call-id',
+  /** A raw `chunk` record carries no usable chunk object. */
+  BAD_RAW_CHUNK: 'bad-raw-chunk',
+})
+
+function isSafeInteger(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value)
+}
+
+function exactKeys(record, keys) {
+  const own = Object.keys(record)
+  if (own.length !== keys.length) return false
+  return keys.every(key => Object.hasOwn(record, key))
+}
+
+/** Decide the member array and the issue for one non-`chunk` record. */
+function strictRunMembers(type, record) {
+  const label = type === 'tool-call-chunks' ? 'args' : 'texts'
+  const value = record[label]
+  if (!Array.isArray(value)) return { members: null, issue: DECODE_ISSUE.BAD_MEMBERS }
+  if (value.some(member => typeof member !== 'string')) return { members: null, issue: DECODE_ISSUE.BAD_MEMBERS }
+  // The accumulator always packs at least one member, so an empty run is a
+  // malformed record rather than an attempt that produced nothing.
+  if (value.length === 0) return { members: null, issue: DECODE_ISSUE.EMPTY_RUN }
+  return { members: value, issue: null }
+}
+
+/**
+ * Strict decoder for DSH's compact durable `AssistantStreamRecord[]`.
+ *
+ * This is the validating counterpart of {@link expandAssistantStream}, which
+ * exists for the tolerant live path. The two differ deliberately:
+ *
+ *   - `expandAssistantStream` never throws and skips what it cannot read, so a
+ *     single corrupt record costs one curve segment instead of the whole card;
+ *   - this decoder reports *every* deviation with its record index and never
+ *     fabricates a delta. It is the one a durable reconstruction must use,
+ *     because a reconstruction that silently drops half a stream would produce
+ *     a TPS curve that looks authoritative and is wrong.
+ *
+ * The validation rules mirror `validateRecord`/`validateRun`
+ * (`dsh-llm/lib/types/assistant-stream.js`): exact key sets, non-empty string
+ * member arrays, safe-integer `time0`/`time`, `dt.length === members - 1` with
+ * safe-integer entries, non-empty `id`, and non-empty `name` when present.
+ *
+ * @param {unknown} records candidate compact records
+ * @returns {{
+ *   chunks: {timeMs:number, chunk:object, recordIndex:number, memberIndex:number}[],
+ *   issues: {kind:string, recordIndex:number, detail?:unknown}[],
+ *   issuesTruncated: boolean,
+ *   recordCount: number,
+ *   decodedRecordCount: number,
+ *   deltaCount: number,
+ *   firstTimeMs: number|null,
+ *   lastTimeMs: number|null,
+ *   complete: boolean,
+ * }}
+ */
+function decodeAssistantStream(records, { maxIssues = 50 } = {}) {
+  const chunks = []
+  const issues = []
+  let issuesTruncated = false
+  const list = Array.isArray(records) ? records : null
+
+  const report = (kind, recordIndex, detail) => {
+    if (issues.length >= maxIssues) { issuesTruncated = true; return }
+    issues.push(detail === undefined ? { kind, recordIndex } : { kind, recordIndex, detail })
+  }
+
+  if (list === null) {
+    report(Array.isArray(records) ? DECODE_ISSUE.NOT_AN_OBJECT : DECODE_ISSUE.NOT_AN_OBJECT, -1, records)
+    return {
+      chunks,
+      issues,
+      issuesTruncated,
+      recordCount: 0,
+      decodedRecordCount: 0,
+      deltaCount: 0,
+      firstTimeMs: null,
+      lastTimeMs: null,
+      complete: false,
+    }
+  }
+
+  for (let recordIndex = 0; recordIndex < list.length; recordIndex += 1) {
+    const candidate = list[recordIndex]
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+      report(DECODE_ISSUE.NOT_AN_OBJECT, recordIndex)
+      continue
+    }
+    const type = candidate.type
+    if (type === 'chunk') {
+      if (!exactKeys(candidate, ['type', 'time', 'chunk'])) {
+        report(DECODE_ISSUE.UNEXPECTED_KEYS, recordIndex, Object.keys(candidate))
+        continue
+      }
+      if (!isSafeInteger(candidate.time)) {
+        report(DECODE_ISSUE.BAD_TIME, recordIndex, candidate.time)
+        continue
+      }
+      const chunk = candidate.chunk
+      if (typeof chunk !== 'object' || chunk === null || Array.isArray(chunk)) {
+        report(DECODE_ISSUE.BAD_RAW_CHUNK, recordIndex)
+        continue
+      }
+      chunks.push({ timeMs: candidate.time, chunk, recordIndex, memberIndex: 0 })
+      continue
+    }
+
+    if (type !== 'text-chunks' && type !== 'reasoning-chunks' && type !== 'tool-call-chunks') {
+      report(DECODE_ISSUE.UNKNOWN_TYPE, recordIndex, type)
+      continue
+    }
+
+    const isToolRun = type === 'tool-call-chunks'
+    const memberLabel = isToolRun ? 'args' : 'texts'
+    const keys = isToolRun
+      ? (Object.hasOwn(candidate, 'name')
+        ? ['type', 'time0', 'index', 'dt', 'id', 'name', 'args']
+        : ['type', 'time0', 'index', 'dt', 'id', 'args'])
+      : ['type', 'time0', 'index', 'dt', 'texts']
+    if (!exactKeys(candidate, keys)) {
+      const own = Object.keys(candidate)
+      const missing = keys.filter(key => !own.includes(key))
+      report(missing.length > 0 ? DECODE_ISSUE.MISSING_KEYS : DECODE_ISSUE.UNEXPECTED_KEYS, recordIndex, {
+        expected: keys,
+        own,
+      })
+      continue
+    }
+    if (!isSafeInteger(candidate.time0)) {
+      report(DECODE_ISSUE.BAD_TIME, recordIndex, candidate.time0)
+      continue
+    }
+    const membersResult = strictRunMembers(type, candidate)
+    if (membersResult.members === null) {
+      report(membersResult.issue, recordIndex, candidate[memberLabel])
+      continue
+    }
+    const members = membersResult.members
+    const dt = candidate.dt
+    if (!Array.isArray(dt) || dt.length !== members.length - 1 || dt.some(gap => !isSafeInteger(gap))) {
+      report(DECODE_ISSUE.BAD_DT, recordIndex, { dtLength: Array.isArray(dt) ? dt.length : null, memberCount: members.length })
+      continue
+    }
+    if (isToolRun) {
+      if (typeof candidate.id !== 'string' || candidate.id.length === 0) {
+        report(DECODE_ISSUE.BAD_CALL_ID, recordIndex, candidate.id)
+        continue
+      }
+      if (candidate.name !== undefined && (typeof candidate.name !== 'string' || candidate.name.length === 0)) {
+        report(DECODE_ISSUE.BAD_MEMBERS, recordIndex, { name: candidate.name })
+        continue
+      }
+    }
+
+    let timeMs = candidate.time0
+    let overflowed = false
+    for (let memberIndex = 0; memberIndex < members.length; memberIndex += 1) {
+      if (memberIndex > 0) {
+        timeMs += dt[memberIndex - 1]
+        if (!Number.isSafeInteger(timeMs)) { overflowed = true; break }
+      }
+      const chunk = isToolRun
+        ? toolCallChunk(candidate, members[memberIndex])
+        : deltaChunk(type, candidate.index, members[memberIndex])
+      chunks.push({ timeMs, chunk, recordIndex, memberIndex })
+    }
+    if (overflowed) {
+      // Members already produced stay in `chunks`: dropping them would discard
+      // real evidence, and `complete` already reports that the run is short.
+      report(DECODE_ISSUE.TIME_OVERFLOW, recordIndex)
+    }
+  }
+
+  const times = chunks.map(entry => entry.timeMs)
+  return {
+    chunks,
+    issues,
+    issuesTruncated,
+    recordCount: list.length,
+    decodedRecordCount: new Set(chunks.map(entry => entry.recordIndex)).size,
+    deltaCount: chunks.length,
+    firstTimeMs: times.length > 0 ? Math.min(...times) : null,
+    lastTimeMs: times.length > 0 ? Math.max(...times) : null,
+    complete: issues.length === 0,
+  }
+}
+
+function deltaChunk(type, index, text) {
+  return type === 'text-chunks'
+    ? { type: 'text-delta', index, text }
+    : { type: 'reasoning-delta', index, text }
+}
+
+function toolCallChunk(record, argumentsDelta) {
+  const chunk = { type: 'tool-call-delta', index: record.index, id: record.id, argumentsDelta }
+  if (typeof record.name === 'string') chunk.name = record.name
+  return chunk
+}
+
+;Object.assign(__exports, { MODEL_PHASE, isTokenDelta, classifyDelta, deltaText, usageFromChunk, expandAssistantStream, firstTokenTime, DECODE_ISSUE, decodeAssistantStream })
+			},
+			"src/core/token-allocation.js": function (__exports) {
+const { MetricQuality } = __req("src/core/metric-quality.js")
+const { classifyDelta, deltaText } = __req("src/core/delta-accounting.js")
+
+/**
+ * Live token-shape weighting and post-hoc calibration.
+ *
+ * DSH does not attach an exact token count to each streamed delta; provider
+ * usage arrives as an aggregate (`TokenUsage`). Every per-delta number this
+ * module produces is therefore a *shape*, and the only honest operations are
+ * (a) label it estimated and (b) rescale the shape so its integral equals the
+ * authoritative aggregate once that aggregate is known.
+ *
+ * Calibration guarantees, asserted by tests:
+ *   - the rescaled per-phase float integral equals the exact aggregate total
+ *     exactly (relative error < 1e-9), because the sum of the scaling products
+ *     is algebraically the total;
+ *   - a phase with tokens but no shape weight distributes evenly rather than
+ *     dividing by zero;
+ *   - a phase with no samples keeps its authoritative total with zero samples
+ *     when the total is zero, and reports the shortfall otherwise instead of
+ *     inventing curve points.
+ */
+
+/**
+ * Fallback shape weight for live display only. This is **not** a tokenizer and
+ * must never be presented as provider-exact: the project rules forbid assuming
+ * GPT/tiktoken tokenization for DeepSeek or any other route, and DSH's own token
+ * meter uses an approximate character heuristic when provider-exact usage is
+ * unavailable.
+ *
+ * CJK-like code points weigh 1; everything else weighs 0.25. The ratio is a
+ * deliberate coarse prior (roughly one token per CJK character, roughly four
+ * Latin characters per token) whose only role is to shape the live and curve
+ * series until calibration replaces it.
+ */
+function heuristicTokenWeight(text) {
+  if (!text) return 0
+  let weight = 0
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)
+    const cjk = (cp >= 0x3400 && cp <= 0x9fff)
+      || (cp >= 0x3040 && cp <= 0x30ff)
+      || (cp >= 0xac00 && cp <= 0xd7af)
+      || (cp >= 0xf900 && cp <= 0xfaff)
+    weight += cjk ? 1 : 0.25
+  }
+  return weight
+}
+
+/**
+ * Build one chart/live sample from a chunk, or `null` when the chunk carries no
+ * generated content (block, usage and finish chunks carry none).
+ *
+ * @param {number} timeMs
+ * @param {unknown} chunk
+ * @param {(text:string, phase:string, chunk:unknown)=>number} [estimate]
+ */
+function sampleFromChunk(timeMs, chunk, estimate = heuristicTokenWeight) {
+  const phase = classifyDelta(chunk)
+  if (phase === null) return null
+  if (!Number.isFinite(timeMs)) return null
+  const text = deltaText(chunk)
+  const weight = estimate(text, phase, chunk)
+  if (!(weight > 0) || !Number.isFinite(weight)) {
+    // A generated delta whose shape weight is zero is still evidence that
+    // generation happened. Give it a minimal non-zero shape so it cannot vanish
+    // from the series; calibration later fixes its magnitude.
+    return { timeMs, phase, weight: Number.EPSILON, tokens: Number.EPSILON, quality: MetricQuality.ESTIMATED }
+  }
+  return { timeMs, phase, weight, tokens: weight, quality: MetricQuality.ESTIMATED }
+}
+
+/** Sample a whole timed chunk list, dropping non-generated chunks. */
+function samplesFromTimedChunks(timedChunks, estimate = heuristicTokenWeight) {
+  const out = []
+  if (!Array.isArray(timedChunks)) return out
+  for (const entry of timedChunks) {
+    if (!entry) continue
+    const sample = sampleFromChunk(entry.timeMs, entry.chunk, estimate)
+    if (sample !== null) out.push(sample)
+  }
+  return out
+}
+
+/**
+ * Rescale one phase's shape weights so their integral equals `exactTokens`.
+ * Pure: returns new objects and never mutates the input.
+ */
+function calibratePhase(samples, exactTokens) {
+  if (!Array.isArray(samples)) return []
+  if (!Number.isFinite(exactTokens) || exactTokens < 0) return samples.slice()
+  if (samples.length === 0) return []
+  const totalWeight = samples.reduce((sum, s) => sum + Math.max(0, s.weight ?? 0), 0)
+  const each = exactTokens / samples.length
+  if (!(totalWeight > 0)) {
+    return samples.map(s => ({ ...s, tokens: each, quality: MetricQuality.CALIBRATED }))
+  }
+  const scale = exactTokens / totalWeight
+  return samples.map(s => ({
+    ...s,
+    tokens: Math.max(0, s.weight ?? 0) * scale,
+    quality: MetricQuality.CALIBRATED,
+  }))
+}
+
+/**
+ * Calibrate one attempt's samples against authoritative provider usage and
+ * report how trustworthy the reasoning/output split is.
+ *
+ * `reasoningTokens`, when present, is already included in `outputTokens`
+ * (verified local contract at `dsh-llm/lib/types/types.d.ts:136-150`), so the
+ * non-reasoning output total is `outputTokens - reasoningTokens`. The two
+ * counters are never added.
+ *
+ * @param {readonly object[]} samples
+ * @param {{outputTokens?:number, reasoningTokens?:number}|null|undefined} usage
+ * @returns {{
+ *   samples: object[],
+ *   phaseTokens: {reasoning:number|null, output:number|null},
+ *   totalTokens: number|null,
+ *   totalQuality: string,
+ *   splitQuality: string,
+ *   totalAnchored: boolean,
+ *   note: string|null,
+ * }}
+ */
+function calibrateAttemptSamples(samples, usage) {
+  const list = Array.isArray(samples) ? samples : []
+  const outputTokens = usage?.outputTokens
+  if (!Number.isFinite(outputTokens) || outputTokens < 0) {
+    return {
+      // No authoritative anchor exists, so the per-delta allocation stays at the
+      // raw shape weight and is labelled `estimated`. It is never presented as a
+      // token count.
+      samples: list.map(s => ({
+        ...s,
+        tokens: Math.max(0, s.weight ?? 0),
+        quality: MetricQuality.ESTIMATED,
+      })),
+      phaseTokens: { reasoning: null, output: null },
+      totalTokens: null,
+      totalQuality: MetricQuality.UNAVAILABLE,
+      splitQuality: MetricQuality.UNAVAILABLE,
+      totalAnchored: false,
+      note: 'no authoritative usage',
+    }
+  }
+
+  const reasoningTokens = usage?.reasoningTokens
+  const splitExact = Number.isFinite(reasoningTokens) && reasoningTokens >= 0
+
+  if (splitExact) {
+    const reasoningTotal = Math.max(0, reasoningTokens)
+    const outputTotal = Math.max(0, outputTokens - reasoningTotal)
+    const reasoningSamples = calibratePhase(list.filter(s => s.phase === 'reasoning'), reasoningTotal)
+    const outputSamples = calibratePhase(list.filter(s => s.phase === 'output'), outputTotal)
+    let ri = 0
+    let oi = 0
+    const merged = list.map(s => (s.phase === 'reasoning' ? reasoningSamples[ri++] : outputSamples[oi++]))
+    const missing = []
+    if (reasoningTotal > 0 && reasoningSamples.length === 0) missing.push('reasoning')
+    if (outputTotal > 0 && outputSamples.length === 0) missing.push('output')
+    return {
+      samples: merged,
+      phaseTokens: { reasoning: reasoningTotal, output: outputTotal },
+      totalTokens: outputTokens,
+      totalQuality: MetricQuality.EXACT,
+      splitQuality: missing.length > 0 ? MetricQuality.UNAVAILABLE : MetricQuality.EXACT,
+      totalAnchored: true,
+      note: missing.length > 0
+        ? `authoritative ${missing.join(' and ')} tokens reported but the stream carried no such deltas`
+        : null,
+    }
+  }
+
+  // Only the combined output total is authoritative. Rescale every sample by one
+  // common factor so the whole-attempt integral matches exactly, and mark the
+  // reasoning/output split estimated: the split was never measured, so claiming
+  // it is exact would be a fabrication (docs/METRICS_SPEC.md §8.3).
+  const phaseWeights = { reasoning: 0, output: 0 }
+  for (const s of list) {
+    if (s.phase === 'reasoning') phaseWeights.reasoning += Math.max(0, s.weight ?? 0)
+    else if (s.phase === 'output') phaseWeights.output += Math.max(0, s.weight ?? 0)
+  }
+  const totalWeight = phaseWeights.reasoning + phaseWeights.output
+  const scale = totalWeight > 0 ? outputTokens / totalWeight : 0
+  const rescaled = list.map(s => ({
+    ...s,
+    tokens: totalWeight > 0
+      ? Math.max(0, s.weight ?? 0) * scale
+      : (list.length > 0 ? outputTokens / list.length : 0),
+    quality: MetricQuality.CALIBRATED,
+  }))
+  return {
+    samples: rescaled,
+    phaseTokens: {
+      reasoning: totalWeight > 0 ? phaseWeights.reasoning * scale : null,
+      output: totalWeight > 0 ? phaseWeights.output * scale : null,
+    },
+    totalTokens: outputTokens,
+    totalQuality: MetricQuality.EXACT,
+    splitQuality: MetricQuality.ESTIMATED,
+    totalAnchored: true,
+    note: 'reasoningTokens absent: whole-attempt integral anchored, reasoning/output split estimated',
+  }
+}
+
+;Object.assign(__exports, { heuristicTokenWeight, sampleFromChunk, samplesFromTimedChunks, calibratePhase, calibrateAttemptSamples })
+			},
+			"src/core/time-axis.js": function (__exports) {
+/**
+ * The compressed curve clock.
+ *
+ * The completed chart diagnoses model throughput stability, not end-to-end turn
+ * latency, so its x-axis is an *active model-generation* coordinate:
+ *
+ *   - an attempt's local x = 0 is its first non-empty generated delta, so the
+ *     attempt's own TTFT consumes no width;
+ *   - distances between deltas inside one attempt are preserved exactly, which
+ *     keeps real intra-stream stalls visible;
+ *   - the next attempt starts at the previous attempt's last delta, so tools,
+ *     inter-attempt waiting and the next call's TTFT consume no width.
+ *
+ * Formally this is a piecewise-linear remap of wall time. It is implemented as
+ * explicit per-attempt concatenation rather than as one global clock minus
+ * subtracted wall intervals, because concatenation cannot silently mis-attribute
+ * a gap that spans a boundary.
+ */
+
+/**
+ * @param {readonly {attemptId?:string, samples?:readonly object[]}[]} attempts
+ * @returns {{samples: object[], durationMs:number, segments: {attemptId:string|null, startMs:number, endMs:number}[]}}
+ */
+function compressAttempts(attempts) {
+  const out = []
+  const segments = []
+  let offsetMs = 0
+  if (!Array.isArray(attempts)) return { samples: out, durationMs: 0, segments }
+
+  for (const attempt of attempts) {
+    if (!attempt) continue
+    const samples = Array.isArray(attempt.samples)
+      ? attempt.samples.filter(s => s && Number.isFinite(s.timeMs)).slice().sort((a, b) => a.timeMs - b.timeMs)
+      : []
+    if (samples.length === 0) continue
+    const first = samples[0].timeMs
+    const last = samples[samples.length - 1].timeMs
+    const attemptId = attempt.attemptId ?? null
+    for (const sample of samples) {
+      out.push({
+        ...sample,
+        attemptId,
+        activeTimeMs: offsetMs + Math.max(0, sample.timeMs - first),
+      })
+    }
+    const span = Math.max(0, last - first)
+    segments.push({ attemptId, startMs: offsetMs, endMs: offsetMs + span })
+    offsetMs += span
+  }
+
+  return { samples: out, durationMs: offsetMs, segments }
+}
+
+;Object.assign(__exports, { compressAttempts })
+			},
+			"src/core/curve.js": function (__exports) {
+/**
+ * Completed-turn TPS curve: a trailing one-second rolling series sampled on the
+ * compressed active clock, plus the peak of the rendered series.
+ *
+ * The window and cadence are deliberately the same conceptual window the live
+ * meter uses (docs/METRICS_SPEC.md §8.2), so a point read off the curve at time
+ * `t` means the same thing as the live pill did at that instant.
+ *
+ * Curve points are `estimated` before provider usage arrives and `calibrated`
+ * afterwards; they are never `exact`. `peakTps` is the peak of the *rendered*
+ * series and must be labelled as such, not as a provider-certified maximum
+ * (docs/METRICS_SPEC.md §9).
+ */
+
+const DEFAULT_WINDOW_MS = 1000
+const DEFAULT_SAMPLE_EVERY_MS = 250
+
+/** Largest rendered series the SVG layer is allowed to receive. */
+const DEFAULT_MAX_POINTS = 512
+
+function assertPositive(value, label) {
+  if (!(Number.isFinite(value) && value > 0)) throw new TypeError(`${label} must be a finite number > 0`)
+}
+
+/**
+ * Build one phase's rolling TPS series on the compressed clock.
+ *
+ * @param {readonly object[]} samples compressed samples carrying `activeTimeMs`
+ * @param {{phase?:string|null, windowMs?:number, sampleEveryMs?:number, durationMs?:number}} [options]
+ * @returns {{timeMs:number, tps:number}[]}
+ */
+function rollingTpsSeries(samples, options = {}) {
+  const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS
+  const sampleEveryMs = options.sampleEveryMs ?? DEFAULT_SAMPLE_EVERY_MS
+  assertPositive(windowMs, 'windowMs')
+  assertPositive(sampleEveryMs, 'sampleEveryMs')
+
+  const phase = options.phase ?? null
+  const filtered = (Array.isArray(samples) ? samples : [])
+    .filter(s => s && (phase === null || s.phase === phase) && Number.isFinite(s.activeTimeMs))
+    .slice()
+    .sort((a, b) => a.activeTimeMs - b.activeTimeMs)
+
+  const end = Number.isFinite(options.durationMs)
+    ? Math.max(0, options.durationMs)
+    : Math.max(0, filtered.length > 0 ? filtered[filtered.length - 1].activeTimeMs : 0)
+
+  const result = []
+  let left = 0
+  let right = 0
+  let total = 0
+  const steps = Math.floor(end / sampleEveryMs + 1e-9)
+  for (let step = 0; step <= steps; step += 1) {
+    const t = step * sampleEveryMs
+    while (right < filtered.length && filtered[right].activeTimeMs <= t) {
+      total += filtered[right].tokens ?? filtered[right].weight ?? 0
+      right += 1
+    }
+    const lowerExclusive = t - windowMs
+    while (left < right && filtered[left].activeTimeMs <= lowerExclusive) {
+      total -= filtered[left].tokens ?? filtered[left].weight ?? 0
+      left += 1
+    }
+    result.push({ timeMs: t, tps: Math.max(0, total) * 1000 / windowMs })
+  }
+  return result
+}
+
+/** Peak of the rendered series across any number of series. */
+function peakTps(...seriesList) {
+  let peak = 0
+  for (const series of seriesList) {
+    if (!Array.isArray(series)) continue
+    for (const point of series) {
+      const value = point?.tps
+      if (Number.isFinite(value) && value > peak) peak = value
+    }
+  }
+  return peak
+}
+
+/**
+ * Reduce a series to at most `maxPoints` while preserving every local extremum
+ * and both endpoints.
+ *
+ * Rendering density must be independent of collection density so a long turn
+ * cannot produce an unbounded SVG path. Extrema are kept because the curve's
+ * purpose is diagnosing throughput stability: a naive stride that stepped over
+ * the single spike or the single stall would destroy the signal.
+ *
+ * @param {readonly {timeMs:number, tps:number}[]} series
+ * @param {number} [maxPoints]
+ */
+function downsampleSeries(series, maxPoints = DEFAULT_MAX_POINTS) {
+  const points = Array.isArray(series) ? series : []
+  if (!(Number.isFinite(maxPoints) && maxPoints >= 2) || points.length <= maxPoints) return points.slice()
+
+  const keep = new Set([0, points.length - 1])
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const prev = points[i - 1].tps
+    const next = points[i + 1].tps
+    const here = points[i].tps
+    if ((here > prev && here >= next) || (here < prev && here <= next)) keep.add(i)
+  }
+
+  const remaining = maxPoints - keep.size
+  if (remaining > 0) {
+    const stride = (points.length - 1) / (remaining + 1)
+    for (let k = 1; k <= remaining; k += 1) keep.add(Math.round(k * stride))
+  }
+
+  const ordered = [...keep].filter(i => i >= 0 && i < points.length).sort((a, b) => a - b)
+  if (ordered.length <= maxPoints) return ordered.map(i => points[i])
+
+  // Extremum-preserving set already exceeds the budget: thin it uniformly,
+  // always keeping the first and last point.
+  const thinned = []
+  const stride = (ordered.length - 1) / (maxPoints - 1)
+  for (let k = 0; k < maxPoints; k += 1) thinned.push(points[ordered[Math.round(k * stride)]])
+  return thinned
+}
+
+;Object.assign(__exports, { DEFAULT_WINDOW_MS, DEFAULT_SAMPLE_EVERY_MS, DEFAULT_MAX_POINTS, rollingTpsSeries, peakTps, downsampleSeries })
+			},
+			"src/core/quality-model.js": function (__exports) {
+/**
+ * Three-axis metric quality model.
+ *
+ * A single quality label for a whole curve cannot express what the evidence
+ * actually supports. The same turn routinely has an exactly known token total, an
+ * estimated reasoning/output split, and a reconstructed temporal shape, and
+ * collapsing those into one word forces one of them to be misreported.
+ *
+ * Three axes are therefore tracked independently:
+ *
+ *   tokenTotalQuality     how well the *total* generated tokens are known
+ *   phaseSplitQuality     how well that total is divided into reasoning vs output
+ *   temporalShapeQuality  how well the *timing* of generation is known
+ *
+ * Their acceptance criteria are the semantic examples frozen in
+ * `docs/METRICS_SPEC.md`. The strongest achievable value differs per axis, and
+ * that asymmetry is the point:
+ *
+ *   - `tokenTotalQuality` can reach `exact`, because providers report aggregate
+ *     output tokens;
+ *   - `phaseSplitQuality` can reach `exact`, because some routes also report
+ *     `reasoningTokens` — and only then, because a split nobody measured must
+ *     never be called exact;
+ *   - `temporalShapeQuality` can **never** reach `exact`. DSH attaches no token
+ *     count to a delta, so every curve point is a shape weight, rescaled or not.
+ *     The best achievable value is `reconstructed`: exact phase integrals on an
+ *     estimated local shape. This is enforced structurally by the per-axis
+ *     maximum below, not by convention.
+ */
+
+const { MetricQuality } = __req("src/core/metric-quality.js")
+
+/**
+ * Ordered weakest-to-strongest. `partial` and `reconstructed` are additions to
+ * the four frozen levels, not replacements: `partial` distinguishes "some
+ * contributors were authoritative and some were not" from a wholesale estimate,
+ * and `reconstructed` distinguishes "shape weight with an exact anchor and exact
+ * timing" from "rough estimate".
+ */
+const QualityLevel = Object.freeze({
+  UNAVAILABLE: 'unavailable',
+  ESTIMATED: 'estimated',
+  PARTIAL: 'partial',
+  RECONSTRUCTED: 'reconstructed',
+  CALIBRATED: 'calibrated',
+  EXACT: 'exact',
+})
+
+const RANK = Object.freeze({
+  [QualityLevel.UNAVAILABLE]: 0,
+  [QualityLevel.ESTIMATED]: 1,
+  [QualityLevel.PARTIAL]: 2,
+  [QualityLevel.RECONSTRUCTED]: 3,
+  [QualityLevel.CALIBRATED]: 4,
+  [QualityLevel.EXACT]: 5,
+})
+
+/** The strongest value each axis may ever carry. */
+const QUALITY_CEILING = Object.freeze({
+  tokenTotal: QualityLevel.EXACT,
+  phaseSplit: QualityLevel.EXACT,
+  temporalShape: QualityLevel.RECONSTRUCTED,
+})
+
+const QUALITY_AXIS = Object.freeze({
+  TOKEN_TOTAL: 'tokenTotal',
+  PHASE_SPLIT: 'phaseSplit',
+  TEMPORAL_SHAPE: 'temporalShape',
+})
+
+/** Whether a value is one of the six declared levels. */
+function isQualityLevel(value) {
+  return Object.hasOwn(RANK, value)
+}
+
+/** The weaker of two levels. */
+function weakestLevel(a, b) {
+  if (!isQualityLevel(a)) return QualityLevel.UNAVAILABLE
+  if (!isQualityLevel(b)) return QualityLevel.UNAVAILABLE
+  return RANK[a] <= RANK[b] ? a : b
+}
+
+/** Clamp a level to its axis ceiling. */
+function clampToAxis(axis, level) {
+  const ceiling = QUALITY_CEILING[axis]
+  if (ceiling === undefined) return QualityLevel.UNAVAILABLE
+  if (!isQualityLevel(level)) return QualityLevel.UNAVAILABLE
+  return RANK[level] <= RANK[ceiling] ? level : ceiling
+}
+
+/**
+ * Quality of the generated-token total.
+ *
+ * @param {{
+ *   contributingAttemptCount: number,
+ *   attemptsWithUsage: number,
+ *   recoveredTotals: number,
+ *   reportedTotals: number,
+ * }} input
+ */
+function tokenTotalQuality({
+  contributingAttemptCount = 0,
+  attemptsWithUsage = 0,
+  recoveredTotals = 0,
+  reportedTotals = 0,
+} = {}) {
+  if (contributingAttemptCount === 0) return QualityLevel.UNAVAILABLE
+  if (attemptsWithUsage === 0) return QualityLevel.UNAVAILABLE
+  if (recoveredTotals > 0) return QualityLevel.PARTIAL
+  if (attemptsWithUsage === contributingAttemptCount) return QualityLevel.EXACT
+  if (reportedTotals > 0) return QualityLevel.PARTIAL
+  return QualityLevel.UNAVAILABLE
+}
+
+/**
+ * Quality of the reasoning/output split.
+ *
+ * A split is only `exact` when every contributing attempt that carries the
+ * total also carries an authoritative `reasoningTokens`. When the totals are
+ * exact but the split is not, the honest answer is `estimated`: the shape prior
+ * still divides the anchored total, and that division was never measured.
+ *
+ * `reasoningStreamConflict` is the consistency guard: a provider that reports
+ * `reasoningTokens === 0` while the stream carries non-empty reasoning deltas
+ * contradicts itself, and a split derived from that counter can never be
+ * `exact` however many attempts reported it.
+ */
+function phaseSplitQuality({
+  contributingAttemptCount = 0,
+  attemptsWithSplit = 0,
+  attemptsWithUsage = 0,
+  splitIsAnchored = false,
+  hasReasoningDeltas = false,
+  hasOutputDeltas = false,
+  reasoningStreamConflict = false,
+} = {}) {
+  if (contributingAttemptCount === 0) return QualityLevel.UNAVAILABLE
+  if (attemptsWithSplit === 0) {
+    // No counter at all. If only one phase is present in the stream, the other
+    // phase is empty by observation rather than by assumption, and the reported
+    // split is still a shape division of an authoritative total.
+    if (!hasReasoningDeltas && !hasOutputDeltas) return QualityLevel.UNAVAILABLE
+    return attemptsWithUsage > 0 ? QualityLevel.ESTIMATED : QualityLevel.UNAVAILABLE
+  }
+  if (attemptsWithSplit === contributingAttemptCount && !reasoningStreamConflict) return QualityLevel.EXACT
+  return QualityLevel.ESTIMATED
+}
+
+/**
+ * Quality of the temporal shape.
+ *
+ * `durable` and `timestampsComplete` describe the *evidence*, not the accuracy:
+ * reconstructed timestamps are exact copies of the original envelope times, but
+ * the token magnitude carried at each timestamp is a shape weight, so no timing
+ * evidence can lift the axis past `reconstructed`.
+ */
+function temporalShapeQuality({
+  durable = false,
+  timestampsComplete = true,
+  anchored = false,
+  sampleCount = 0,
+} = {}) {
+  if (sampleCount === 0) return QualityLevel.UNAVAILABLE
+  // Anchored means the phase integrals are the authoritative provider totals;
+  // unanchored means the curve is still raw shape weight magnitudes.
+  if (!anchored) return QualityLevel.ESTIMATED
+  if (!timestampsComplete) return QualityLevel.ESTIMATED
+  // `durable` records *where* the timestamps came from. A durable settlement's
+  // embedded stream reproduces the original envelope times exactly, which is
+  // why the anchored durable case reads `reconstructed` while a live one does
+  // not: the live pane can be re-baselined or lose frames.
+  return durable ? QualityLevel.RECONSTRUCTED : QualityLevel.ESTIMATED
+}
+
+/**
+ * Assemble the three-axis quality object, enforcing the ceilings.
+ *
+ * @returns {{
+ *   tokenTotalQuality: string,
+ *   phaseSplitQuality: string,
+ *   temporalShapeQuality: string,
+ *   approximateTokenTotal: boolean,
+ *   approximatePhaseSplit: boolean,
+ *   displayTokenTotal: 'exact'|'approximate'|'unavailable',
+ *   displayPhaseSplit: 'exact'|'approximate'|'unavailable',
+ *   notes: string[],
+ * }}
+ */
+function qualityAxes(input = {}) {
+  const tokenTotal = clampToAxis(QUALITY_AXIS.TOKEN_TOTAL, tokenTotalQuality(input))
+  let phaseSplit = clampToAxis(QUALITY_AXIS.PHASE_SPLIT, phaseSplitQuality(input))
+  // A split cannot be better known than the total it divides.
+  phaseSplit = weakestLevel(phaseSplit, tokenTotal)
+  // The consistency guard is a hard ceiling on this axis: provider aggregate
+  // usage contradicting the stream's phase evidence downgrades the split to at
+  // most `estimated`, regardless of how many attempts reported the counter.
+  if (input.reasoningStreamConflict === true) {
+    phaseSplit = weakestLevel(phaseSplit, QualityLevel.ESTIMATED)
+  }
+  const temporalShape = clampToAxis(QUALITY_AXIS.TEMPORAL_SHAPE, temporalShapeQuality(input))
+
+  const notes = []
+  if (input.recoveredTotals > 0) {
+    notes.push(`${input.recoveredTotals} of ${input.contributingAttemptCount} attempts reported no usage; their totals were recovered from the stream`)
+  }
+  if (input.reasoningStreamConflict === true) {
+    notes.push('provider reported reasoningTokens=0 while the stream carries reasoning deltas; the reasoning/output split is downgraded')
+  }
+  if (tokenTotal === QualityLevel.EXACT && phaseSplit !== QualityLevel.EXACT && input.reasoningStreamConflict !== true) {
+    notes.push('generated-token total is authoritative but the reasoning/output split is not reported by the provider')
+  }
+  if (temporalShape === QualityLevel.RECONSTRUCTED) {
+    notes.push('phase integrals are anchored to authoritative totals; the local curve shape remains a delta-shape estimate')
+  }
+
+  return {
+    tokenTotalQuality: tokenTotal,
+    phaseSplitQuality: phaseSplit,
+    temporalShapeQuality: temporalShape,
+    approximateTokenTotal: tokenTotal !== QualityLevel.EXACT,
+    approximatePhaseSplit: phaseSplit !== QualityLevel.EXACT,
+    displayTokenTotal: displayMode(tokenTotal),
+    displayPhaseSplit: displayMode(phaseSplit),
+    notes,
+  }
+}
+
+function displayMode(level) {
+  if (level === QualityLevel.EXACT) return 'exact'
+  if (level === QualityLevel.UNAVAILABLE) return 'unavailable'
+  return 'approximate'
+}
+
+/**
+ * Whether a rate or chart value derived from these axes must render with an
+ * approximate marker. Live values are always approximate: no per-delta provider
+ * count exists, so nothing measured live can be `exact`.
+ */
+function requiresApproximateMarker(level) {
+  return level !== QualityLevel.EXACT && level !== QualityLevel.UNAVAILABLE
+}
+
+
+
+;Object.assign(__exports, { MetricQuality, QualityLevel, QUALITY_CEILING, QUALITY_AXIS, isQualityLevel, weakestLevel, clampToAxis, tokenTotalQuality, phaseSplitQuality, temporalShapeQuality, qualityAxes, requiresApproximateMarker })
+			},
+			"src/core/tool-timing.js": function (__exports) {
+/**
+ * Tool latency: per-call durations plus the two required aggregates.
+ *
+ * `workMs` is the arithmetic sum of every completed call duration.
+ * `wallMs` is the measure of the **union** of the same intervals, so parallel
+ * calls are not counted twice. `workMs >= wallMs` always holds, with equality
+ * exactly when no two counted calls overlap (docs/METRICS_SPEC.md §5).
+ *
+ * A call with no result yet is running and contributes to neither total: an open
+ * interval has no measurable duration, and treating its "duration so far" as
+ * completed latency would double-count when it closes.
+ */
+
+/** Merge completed intervals and return their union length in ms. */
+function unionDurationMs(intervals) {
+  const normalized = intervals
+    .filter(x => x && Number.isFinite(x.startMs) && Number.isFinite(x.endMs) && x.endMs >= x.startMs)
+    .map(x => ({ startMs: x.startMs, endMs: x.endMs }))
+    .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs)
+  if (!normalized.length) return 0
+  let total = 0
+  let start = normalized[0].startMs
+  let end = normalized[0].endMs
+  for (let i = 1; i < normalized.length; i += 1) {
+    const next = normalized[i]
+    if (next.startMs <= end) {
+      end = Math.max(end, next.endMs)
+    } else {
+      total += end - start
+      start = next.startMs
+      end = next.endMs
+    }
+  }
+  return total + end - start
+}
+
+function isCompleted(call) {
+  return call
+    && Number.isFinite(call.startMs)
+    && Number.isFinite(call.endMs)
+    && call.endMs >= call.startMs
+}
+
+/**
+ * Summarize a turn's tool calls.
+ *
+ * @param {readonly object[]} calls normalized `ToolCallRecord` values
+ */
+function summarizeToolCalls(calls) {
+  const list = (Array.isArray(calls) ? calls : []).filter(call => call && typeof call === 'object')
+  const completed = list.filter(isCompleted)
+  const intervals = completed.map(call => ({ startMs: call.startMs, endMs: call.endMs }))
+  const running = list.filter(call => !isCompleted(call))
+  return {
+    /** Every call seen, running or settled. */
+    count: list.length,
+    /** Calls with a result, i.e. the calls the two durations describe. */
+    completedCount: completed.length,
+    /** Calls whose result has not arrived. */
+    runningCount: running.length,
+    /** Sum of completed individual durations. */
+    workMs: completed.reduce((sum, call) => sum + call.endMs - call.startMs, 0),
+    /** Union of the same intervals; the figure the compact UI shows. */
+    wallMs: unionDurationMs(intervals),
+    failedCount: list.filter(call => call.status === 'error' || call.status === 'failed').length,
+    cancelledCount: list.filter(call => call.status === 'cancelled').length,
+    /** Distinct tool names in first-seen order, for the compact `a, b +1` label. */
+    names: [...new Set(list.map(call => call && call.name).filter(name => typeof name === 'string' && name.length > 0))],
+  }
+}
+
+;Object.assign(__exports, { unionDurationMs, summarizeToolCalls })
+			},
+			"src/core/aggregate-turn.js": function (__exports) {
+/**
+ * Attempt-level reduction and turn-level aggregation.
+ *
+ * The statistical unit is the whole **turn**. A turn may contain several model
+ * attempts, retries and tool calls, and the completed TPS values are ratios of
+ * turn-level sums:
+ *
+ *   reasoning TPS = sum(reasoning tokens) / sum(reasoning generation time)
+ *   output TPS    = sum(non-reasoning output tokens) / sum(output generation time)
+ *
+ * An arithmetic mean of per-step or per-attempt TPS values is never computed
+ * here or anywhere else (docs/METRICS_SPEC.md §1, §7).
+ *
+ * Provider usage semantics: `reasoningTokens`, when present, is already included
+ * in `outputTokens`, so non-reasoning output is `outputTokens - reasoningTokens`.
+ * The two counters are never added.
+ */
+
+const { MetricQuality, rateQuality, weakestQuality } = __req("src/core/metric-quality.js")
+const { QualityLevel, qualityAxes, QUALITY_AXIS, clampToAxis } = __req("src/core/quality-model.js")
+const { summarizeToolCalls } = __req("src/core/tool-timing.js")
+const { attributePhaseDurations, PHASE } = __req("src/core/phase-duration.js")
+const { calibrateAttemptSamples } = __req("src/core/token-allocation.js")
+
+/** Mask a usage object into the fields this project reads, or `null` when unusable. */
+function normalizeUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  const outputTokens = usage.outputTokens
+  if (!Number.isFinite(outputTokens) || outputTokens < 0) return null
+  const reasoningTokens = Number.isFinite(usage.reasoningTokens) && usage.reasoningTokens >= 0
+    ? usage.reasoningTokens
+    : null
+  return {
+    outputTokens,
+    reasoningTokens,
+    nonReasoningTokens: reasoningTokens === null ? null : Math.max(0, outputTokens - reasoningTokens),
+  }
+}
+
+/**
+ * Whether an attempt contributes a phase denominator to the turn.
+ *
+ * An attempt that produced no generated delta contributes nothing measurable and
+ * must not appear in a turn, because including it would introduce a zero-length
+ * phase and make the aggregate look worse than the evidence supports. An attempt
+ * that produced generated deltas does contribute even when it settled without a
+ * surface message or its outcome is unknown: its observed generation time really
+ * was spent on this turn.
+ */
+function isContributingAttempt(attempt) {
+  return Array.isArray(attempt?.samples) && attempt.samples.length > 0
+}
+
+/**
+ * Reduce one normalized attempt to its measured facts.
+ *
+ * @param {object} attempt `{attemptId, turn, step, samples, usage, status}`
+ */
+function reduceAttempt(attempt) {
+  const samples = Array.isArray(attempt?.samples) ? attempt.samples : []
+  const durations = attributePhaseDurations(samples)
+  const usage = normalizeUsage(attempt?.usage)
+  const calibration = calibrateAttemptSamples(samples, usage ?? undefined)
+
+  const reasoningTokens = calibration.phaseTokens.reasoning
+  const outputTokens = calibration.phaseTokens.output
+  const totalTokens = calibration.totalTokens
+  // With no authoritative usage the phase totals are unknown; the per-phase
+  // allocation sum is then the raw shape weight, which is reported as a shape
+  // rather than as a token count.
+  const shapeReasoning = phaseShapeSum(calibration.samples, 'reasoning')
+  const shapeOutput = phaseShapeSum(calibration.samples, 'output')
+
+  return {
+    attemptId: attempt?.attemptId ?? null,
+    turn: attempt?.turn ?? null,
+    step: attempt?.step ?? null,
+    /** Settlement type, surface visibility and execution outcome stay separate. */
+    settlementKind: attempt?.settlementKind ?? 'none',
+    surfaceCommitted: attempt?.surfaceCommitted === true,
+    attemptOutcome: attempt?.attemptOutcome ?? 'unknown',
+    sampleCount: samples.length,
+    /**
+     * Whether the stream carries at least one non-empty reasoning delta. This
+     * is the stream-side evidence half of the `reasoningTokens = 0` consistency
+     * guard: provider aggregate usage and stream phase evidence must agree
+     * before a split may be called exact.
+     */
+    hasReasoningStream: samples.some(sample => sample.phase === 'reasoning'),
+    reasoningMs: durations.reasoningMs,
+    outputMs: durations.outputMs,
+    spanMs: durations.spanMs,
+    usage,
+    /** Where the usage came from, so a recovered total stays distinguishable. */
+    usageSource: attempt?.usageSource ?? (usage === null ? null : 'attempt'),
+    /** Whether this attempt's per-delta allocation is anchored to a total. */
+    totalAnchored: calibration.totalAnchored,
+    calibration,
+    reasoningTokens,
+    outputTokens,
+    totalTokens,
+    shapeReasoning,
+    shapeOutput,
+    /** Anchored to usage but not split exactly. */
+    splitQuality: calibration.splitQuality,
+  }
+}
+
+function phaseShapeSum(samples, phase) {
+  let sum = 0
+  for (const sample of samples) {
+    if (sample.phase === phase) sum += sample.tokens ?? sample.weight ?? 0
+  }
+  return sum
+}
+
+/**
+ * Turn-level aggregation.
+ *
+ * @param {{
+ *   turn?: number|null,
+ *   turnStartMs?: number,
+ *   turnEndMs?: number|null,
+ *   firstTokenMs?: number|null,
+ *   attempts?: readonly object[],
+ *   tools?: readonly object[],
+ *   status?: 'completed'|'interrupted'|'errored',
+ * }} [input]
+ */
+function aggregateTurn(input = {}) {
+  const attempts = Array.isArray(input.attempts) ? input.attempts : []
+  const tools = Array.isArray(input.tools) ? input.tools : []
+  const status = input.status ?? 'completed'
+
+  const contributing = attempts.filter(isContributingAttempt)
+  const reduced = contributing.map(reduceAttempt)
+  /** Attempts that never emitted a generated delta: real events, no throughput evidence. */
+  const emptyAttemptCount = attempts.length - contributing.length
+
+  const withUsage = reduced.filter(a => a.usage !== null)
+  const usageComplete = reduced.length > 0 && withUsage.length === reduced.length
+  const splitComplete = usageComplete && withUsage.every(a => a.usage.reasoningTokens !== null)
+
+  /**
+   * Consistency guard: provider aggregate usage versus stream phase evidence.
+   * An attempt whose stream carries non-empty reasoning deltas while its usage
+   * reports `reasoningTokens === 0` is an internal contradiction in the
+   * evidence. The authoritative `outputTokens` total stays trusted (it is the
+   * only total the provider reports), but the reasoning/output split derived
+   * from the conflicting counter may never be called exact, and the conflict
+   * must be reported rather than silently ignored.
+   */
+  const consistencyIssues = []
+  for (const attempt of reduced) {
+    if (attempt.usage === null || attempt.usage.reasoningTokens !== 0) continue
+    if (!attempt.hasReasoningStream) continue
+    consistencyIssues.push(
+      `attempt ${attempt.attemptId ?? attempt.step ?? '?'}: provider reported reasoningTokens=0 `
+      + 'but the stream carries non-empty reasoning deltas; the phase split is downgraded',
+    )
+  }
+  const splitConflict = consistencyIssues.length > 0
+
+  // Authoritative token totals. A missing counter is never silently treated as
+  // zero: when coverage is incomplete the turn total is reported as unavailable
+  // together with the partial sum that *is* observed, so the UI can show "≈" or
+  // "—" honestly instead of under-reporting.
+  const observedGeneratedTokens = withUsage.reduce((sum, a) => sum + a.usage.outputTokens, 0)
+  const generatedTokens = usageComplete ? observedGeneratedTokens : null
+  const observedReasoningTokens = splitComplete
+    ? withUsage.reduce((sum, a) => sum + a.usage.reasoningTokens, 0)
+    : null
+  const observedNonReasoningTokens = splitComplete
+    ? withUsage.reduce((sum, a) => sum + a.usage.nonReasoningTokens, 0)
+    : null
+
+  // Phase denominators: sums of measured generation time. Attempts whose phase
+  // duration is not measurable (fewer than two generated deltas in that phase)
+  // are excluded from the sum and counted, so the rate can be marked optimistic
+  // rather than exact.
+  const reasoningDurations = reduced.map(a => a.reasoningMs)
+  const outputDurations = reduced.map(a => a.outputMs)
+  const reasoningMs = reasoningDurations.reduce((sum, ms) => sum + (ms ?? 0), 0)
+  const outputMs = outputDurations.reduce((sum, ms) => sum + (ms ?? 0), 0)
+  const reasoningMeasured = reasoningDurations.filter(ms => ms !== null && ms > 0).length
+  const outputMeasured = outputDurations.filter(ms => ms !== null && ms > 0).length
+
+  // Per-attempt allocations summed across the turn. For an attempt with usage
+  // these are calibrated values anchored to the authoritative total; for an
+  // attempt without usage they are raw shape weights. Reported for diagnostics
+  // only — neither figure is a measured token count, so they never become a
+  // published TPS numerator.
+  const shapeTokens = reduced.reduce(
+    (sum, a) => ({
+      reasoning: sum.reasoning + (a.reasoningTokens ?? a.shapeReasoning),
+      output: sum.output + (a.outputTokens ?? a.shapeOutput),
+    }),
+    { reasoning: 0, output: 0 },
+  )
+
+  const reasoningTps = observedReasoningTokens !== null && observedReasoningTokens > 0 && reasoningMs > 0
+    ? observedReasoningTokens * 1000 / reasoningMs
+    : null
+  const outputTps = observedNonReasoningTokens !== null && observedNonReasoningTokens > 0 && outputMs > 0
+    ? observedNonReasoningTokens * 1000 / outputMs
+    : null
+
+  const reasoningTokensReported = reduced.some(a => a.usage !== null && a.usage.reasoningTokens !== null)
+  const reasoningQuality = reasoningTps === null
+    ? MetricQuality.UNAVAILABLE
+    : rateQuality({
+      measuredRatio: measuredRatio(reasoningMeasured, reduced.length),
+      tokensExact: splitComplete,
+      phaseSplitExact: splitComplete && !splitConflict,
+    })
+  const outputQuality = outputTps === null
+    ? MetricQuality.UNAVAILABLE
+    : rateQuality({
+      measuredRatio: measuredRatio(outputMeasured, reduced.length),
+      tokensExact: splitComplete,
+      phaseSplitExact: splitComplete && !splitConflict,
+    })
+
+  const ttftMs = Number.isFinite(input.firstTokenMs) && Number.isFinite(input.turnStartMs)
+    ? Math.max(0, input.firstTokenMs - input.turnStartMs)
+    : null
+  const turnElapsedMs = Number.isFinite(input.turnEndMs) && Number.isFinite(input.turnStartMs)
+    ? Math.max(0, input.turnEndMs - input.turnStartMs)
+    : null
+
+  /**
+   * Three-axis quality, replacing the single blended label the scaffold used.
+   * A turn whose token total is authoritative but whose reasoning split is not
+   * reported must be able to say exactly that, which one label cannot express.
+   */
+  const quality = qualityAxes({
+    contributingAttemptCount: reduced.length,
+    attemptsWithUsage: withUsage.length,
+    // An attempt whose usage came from an in-stream usage chunk is authoritative
+    // too, but it is recorded with a source, so a recovered total is detectable.
+    recoveredTotals: reduced.filter(a => a.usage !== null && a.usageSource === 'recovered').length,
+    reportedTotals: withUsage.length,
+    attemptsWithSplit: withUsage.filter(a => a.usage.reasoningTokens !== null).length,
+    splitIsAnchored: splitComplete,
+    reasoningStreamConflict: splitConflict,
+    hasReasoningDeltas: reduced.some(a => a.shapeReasoning > 0),
+    hasOutputDeltas: reduced.some(a => a.shapeOutput > 0),
+    durable: input.durable === true,
+    timestampsComplete: input.timestampsComplete !== false,
+    anchored: reduced.length > 0 && reduced.every(a => a.totalAnchored === true),
+    sampleCount: reduced.reduce((sum, a) => sum + a.sampleCount, 0),
+  })
+
+  return {
+    turn: input.turn ?? null,
+    status,
+    turnStartMs: Number.isFinite(input.turnStartMs) ? input.turnStartMs : null,
+    turnEndMs: Number.isFinite(input.turnEndMs) ? input.turnEndMs : null,
+    ttftMs,
+    /** Wall-clock turn duration; includes model waits and tools by design (§10). */
+    turnElapsedMs,
+
+    // Four principal columns.
+    reasoningTps,
+    reasoningTpsQuality: reasoningQuality,
+    outputTps,
+    outputTpsQuality: outputQuality,
+    generatedTokens,
+    /** Partial sum over attempts that did report usage; diagnostic, never the headline. */
+    observedGeneratedTokens,
+    generatedTokensQuality: usageComplete
+      ? MetricQuality.EXACT
+      : (withUsage.length > 0 ? MetricQuality.ESTIMATED : MetricQuality.UNAVAILABLE),
+    reasoningTokens: observedReasoningTokens,
+    nonReasoningTokens: observedNonReasoningTokens,
+    splitQuality: splitConflict
+      ? MetricQuality.ESTIMATED
+      : (splitComplete
+        ? MetricQuality.EXACT
+        : (withUsage.length > 0 ? MetricQuality.ESTIMATED : MetricQuality.UNAVAILABLE)),
+    /**
+     * Provider-aggregate versus stream-evidence contradictions detected while
+     * aggregating. Empty array means the two evidence sources agreed.
+     */
+    consistencyIssues,
+
+    /**
+     * The quality model actually used by display code. `quality.tokenTotalQuality`
+     * answers "is the generated-token total trustworthy", `.phaseSplitQuality`
+     * answers "is the reasoning/output division trustworthy", and
+     * `.temporalShapeQuality` answers "how good is the timing shape".
+     */
+    quality,
+
+    // Phase denominators, for the secondary lines.
+    reasoningMs,
+    reasoningMeasuredAttempts: reasoningMeasured,
+    outputMs,
+    outputMeasuredAttempts: outputMeasured,
+    /** Shape-weighted token sums; diagnostics only, never a published rate numerator. */
+    shapeTokens,
+
+    // Coverage / diagnostics.
+    attemptCount: attempts.length,
+    contributingAttemptCount: reduced.length,
+    emptyAttemptCount,
+    usageAttemptCount: withUsage.length,
+    usageComplete,
+    splitComplete,
+    reasoningTokensReported,
+    attemptBreakdown: reduced,
+
+    tools: summarizeToolCalls(tools),
+    /**
+     * Retained for callers that only want the four frozen levels. It is the
+     * weakest of the three axes, so it can never be better than the honest
+     * answer; new code should read `quality` instead.
+     */
+    overallQuality: weakestQuality(
+      generatedTokens === null ? MetricQuality.UNAVAILABLE : MetricQuality.EXACT,
+      reasoningQuality,
+    ),
+    /** Reasoning/output phase coverage, for the secondary lines. */
+    measuredPhaseShare: {
+      reasoning: measuredRatio(reasoningMeasured, reduced.length),
+      output: measuredRatio(outputMeasured, reduced.length),
+    },
+  }
+}
+
+function measuredRatio(measured, total) {
+  if (total === 0) return 0
+  return measured / total
+}
+
+
+
+;Object.assign(__exports, { PHASE, normalizeUsage, isContributingAttempt, reduceAttempt, aggregateTurn })
+			},
+			"src/core/types.js": function (__exports) {
+/**
+ * Normalized domain types.
+ *
+ * These are this project's own records, deliberately independent of DSH wire
+ * shapes so that `src/core` stays testable without a DSH runtime. The adapter
+ * layer is responsible for translating verified DSH evidence into them; the
+ * evidence locations are recorded in docs/IMPLEMENTATION_LOG.md.
+ *
+ * @typedef {'reasoning'|'output'} TokenPhase
+ * @typedef {'exact'|'calibrated'|'estimated'|'unavailable'} MetricQualityValue
+ * @typedef {'completed'|'interrupted'|'errored'} TurnStatus
+ *
+ * @typedef {Object} DeltaSample
+ * @property {number} timeMs Wall-clock event timestamp (DSH `AssistantLiveChunkEvent.time`
+ *   or a timestamp reconstructed from an `AssistantStreamRecord` run).
+ * @property {TokenPhase} phase Which phase this delta's tokens belong to.
+ * @property {number} weight Live token-shape estimate; never a provider count.
+ * @property {number} [tokens] Calibrated allocation. Equal to `weight` until calibration.
+ * @property {MetricQualityValue} [quality]
+ * @property {number} [activeTimeMs] Compressed chart-clock coordinate (set by `compressAttempts`).
+ * @property {string} [attemptId] Set by `compressAttempts` so a curve segment is attributable.
+ *
+ * @typedef {Object} NormalizedUsage
+ * @property {number} outputTokens Provider output total, reasoning included.
+ * @property {number|null} reasoningTokens `null` when the provider did not report it.
+ * @property {number|null} nonReasoningTokens `outputTokens - reasoningTokens`, never a sum.
+ *
+ * @typedef {Object} AttemptRecord
+ * @property {string} attemptId DSH `LlmAttemptId` for one streaming attempt.
+ * @property {number} turn
+ * @property {number} step
+ * @property {DeltaSample[]} samples Generated deltas only.
+ * @property {NormalizedUsage} [usage] From `assistant/message.usage` or an in-stream usage chunk.
+ * @property {'message'|'attempt'|'none'} [settlementKind] Concept 1: which durable
+ *   surface settled the attempt. `message` = `assistant/message`;
+ *   `attempt` = `assistant/attempt` (durable settlement **without** a surface
+ *   message — not an abandonment); `none` = no durable settlement observed.
+ * @property {boolean} [surfaceCommitted] Concept 3: whether a model-visible
+ *   assistant message exists for this attempt.
+ * @property {'committed'|'interrupted'|'failed'|'retried'|'cancelled'|'stream-error'|'abandoned'|'unknown'} [attemptOutcome]
+ *   Concept 2: the execution outcome. `abandoned` comes only from a transient
+ *   `end` frame with `outcome.kind === 'abandoned'` (no durable settlement).
+ *   When the durable evidence cannot prove a cause the value is `unknown`.
+ * @property {number} [startedAtMs]
+ * @property {number} [settledAtMs]
+ *
+ * @typedef {Object} ToolCallRecord
+ * @property {string} callId DSH `ToolCallId`, the `tool/call` -> `tool/result` pair key.
+ * @property {string} name
+ * @property {number} startMs `tool/call` event time.
+ * @property {number} [endMs] `tool/result` event time. Absent while running.
+ * @property {'running'|'ok'|'error'|'cancelled'} status
+ * @property {string} [parentCallId] When DSH exposes nested calls.
+ *
+ * @typedef {Object} TurnRecord
+ * @property {string} sessionId State is always keyed by session as well as turn:
+ *   two sessions can be active at once and must never share a live window.
+ * @property {number} turn
+ * @property {number} startMs `turn/start` event time.
+ * @property {number} [endMs] `turn/end` event time.
+ * @property {number} [firstTokenMs] First non-empty reasoning/text/tool-argument delta, turn-wide.
+ * @property {TurnStatus} [status]
+ * @property {AttemptRecord[]} attempts
+ * @property {ToolCallRecord[]} tools
+ */
+
+/** Stable key for `(sessionId, turn)` isolation. */
+function turnKey(sessionId, turn) {
+  return `${String(sessionId)}::${String(turn)}`
+}
+
+
+
+;Object.assign(__exports, { turnKey })
+			},
+			"src/host/telemetry-design.js": function (__exports) {
+/**
+ * Normalized telemetry store.
+ *
+ * This layer sits between the DSH adapter and the pure metric engine. It knows
+ * nothing about DSH Context types and holds no browser resources: the adapter
+ * feeds it verified events, and it produces the live snapshot and the settled
+ * turn record that the UI consumes.
+ *
+ * Two invariants it exists to enforce:
+ *
+ *   1. **Isolation.** All state is keyed by `(sessionId, turn)`. There is no
+ *      global "current turn", because two sessions can run at once and a
+ *      background turn must never supply another session's numbers.
+ *   2. **One formula site.** Durations, calibration and turn aggregation come
+ *      from `src/core`; this class only routes facts into them.
+ */
+
+const { LiveMeter, LivePhase } = __req("src/core/live-metrics.js")
+const { sampleFromChunk, heuristicTokenWeight } = __req("src/core/token-allocation.js")
+const { compressAttempts } = __req("src/core/time-axis.js")
+const { rollingTpsSeries, peakTps, downsampleSeries } = __req("src/core/curve.js")
+const { aggregateTurn } = __req("src/core/aggregate-turn.js")
+const { turnKey } = __req("src/core/types.js")
+
+/** How many settled turns are retained per session, newest first. */
+const DEFAULT_HISTORY_LIMIT = 4
+
+class TurnTelemetryStore {
+  /**
+   * @param {{estimateTokens?:Function, historyLimit?:number, windowMs?:number, refreshMs?:number}} [options]
+   */
+  constructor(options = {}) {
+    this.estimateTokens = options.estimateTokens ?? heuristicTokenWeight
+    this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT
+    /** @type {Map<string, object>} keyed by `sessionId::turn` */
+    this.turns = new Map()
+    /** @type {Map<string, LiveMeter>} one live meter per session, so sessions cannot share a window. */
+    this.liveBySession = new Map()
+  }
+
+  /**
+   * The live meter serving one session. Created on demand: the meter is
+   * per-session state, and a session that is not selected still owns its own.
+   */
+  live(sessionId) {
+    let meter = this.liveBySession.get(sessionId)
+    if (meter === undefined) {
+      meter = new LiveMeter({ windowMs: this.windowMs ?? 1000, refreshMs: this.refreshMs ?? 200 })
+      this.liveBySession.set(sessionId, meter)
+    }
+    return meter
+  }
+
+  /**
+   * Open a turn. Idempotent: replaying the same durable `turn/start` (reload,
+   * reconnect) must not discard samples already observed for it.
+   */
+  beginTurn({ sessionId, turn, timeMs }) {
+    const key = turnKey(sessionId, turn)
+    let record = this.turns.get(key)
+    if (record === undefined) {
+      record = {
+        sessionId,
+        turn,
+        startMs: timeMs,
+        endMs: null,
+        firstTokenMs: null,
+        status: null,
+        statusNote: null,
+        attempts: [],
+        tools: [],
+        attemptIndex: new Map(),
+        toolIndex: new Map(),
+        settled: null,
+      }
+      this.turns.set(key, record)
+    }
+    const meter = this.live(sessionId)
+    if (meter.turn !== turn) meter.turnStarted({ turn, timeMs })
+    return record
+  }
+
+  /**
+   * Begin an attempt. A new `attemptId` is a hard window boundary: it is exactly
+   * the signal that the previous call ended, whether it committed, settled
+   * without a surface message, or is being retried.
+   */
+  beginAttempt(record, { attemptId, step = null, startedAtMs = null }) {
+    let attempt = record.attemptIndex.get(attemptId)
+    if (attempt === undefined) {
+      attempt = {
+        attemptId,
+        turn: record.turn,
+        step,
+        samples: [],
+        usage: null,
+        /** No durable settlement observed yet — an open attempt is not "abandoned". */
+        settlementKind: 'none',
+        surfaceCommitted: false,
+        attemptOutcome: 'unknown',
+        startedAtMs,
+        settledAtMs: null,
+      }
+      record.attempts.push(attempt)
+      record.attemptIndex.set(attemptId, attempt)
+    }
+    this.live(record.sessionId).attemptStarted({ attemptId, step, timeMs: startedAtMs })
+    return attempt
+  }
+
+  /**
+   * Accept one streamed chunk. Non-generated chunks (block, usage, finish) are
+   * ignored by `sampleFromChunk`; a `usage` chunk additionally updates the
+   * attempt's authoritative usage without becoming a sample.
+   *
+   * @returns {object|null} the accepted sample, or `null`
+   */
+  acceptChunk(record, attempt, { timeMs, chunk }) {
+    if (chunk && chunk.type === 'usage' && chunk.usage) {
+      attempt.usage = chunk.usage
+      return null
+    }
+    const sample = sampleFromChunk(timeMs, chunk, this.estimateTokens)
+    if (sample === null) return null
+    record.firstTokenMs ??= timeMs
+    attempt.samples.push(sample)
+    this.live(record.sessionId).acceptSample(sample)
+    return sample
+  }
+
+  /** Attach authoritative usage from a durable settlement. */
+  setAttemptUsage(attempt, usage, source = 'assistant-settlement') {
+    if (!usage) return
+    attempt.usage = usage
+    /**
+     * Which carrier the counter came from. Two carriers exist — the settlement
+     * and an in-stream `usage` chunk — and only one of them may be used, so the
+     * provenance is kept rather than inferred later.
+     */
+    attempt.usageSource = source
+  }
+
+  /**
+   * Record an attempt settlement.
+   *
+   * The three concepts travel separately and are never collapsed into one
+   * `status` string: `settlementKind` is which durable surface settled the
+   * attempt (`message`/`attempt`/`none`), `surfaceCommitted` says whether a
+   * model-visible message exists, and `attemptOutcome` is the execution
+   * outcome (`committed`/`interrupted`/`abandoned`/`retried`/`unknown`/…).
+   * Defaults describe "durable non-surface settlement of unknown cause" only
+   * when the caller passes `settlementKind: 'attempt'` explicitly; otherwise
+   * the message-settlement defaults apply.
+   */
+  settleAttempt(
+    attempt,
+    {
+      settledAtMs = null,
+      settlementKind = 'message',
+      surfaceCommitted = settlementKind === 'message',
+      attemptOutcome = 'unknown',
+      usage = null,
+      usageSource = null,
+      settlementSeq = null,
+    } = {},
+  ) {
+    attempt.settledAtMs = settledAtMs
+    attempt.settlementKind = settlementKind
+    attempt.surfaceCommitted = surfaceCommitted === true
+    attempt.attemptOutcome = attemptOutcome
+    if (usage) {
+      attempt.usage = usage
+      if (usageSource !== null) attempt.usageSource = usageSource
+    }
+    /**
+     * The durable sequence of the settlement that closed this attempt. Absence
+     * is meaningful: an attempt still open when the turn closes has no settled
+     * durable stream, so the turn's temporal shape can only be `estimated`.
+     */
+    if (Number.isFinite(settlementSeq)) attempt.settlementSeq = settlementSeq
+  }
+
+  toolStarted(record, { callId, name, timeMs }) {
+    if (record.toolIndex.has(callId)) return record.toolIndex.get(callId)
+    const call = { callId, name, startMs: timeMs, endMs: null, status: 'running' }
+    record.tools.push(call)
+    record.toolIndex.set(callId, call)
+    this.live(record.sessionId).toolStarted({ callId, name, timeMs })
+    return call
+  }
+
+  /** Pair a result with its call. An unpaired result is dropped rather than guessed. */
+  toolSettled(record, { callId, timeMs, status = 'ok' }) {
+    const call = record.toolIndex.get(callId)
+    if (call === undefined) return null
+    call.endMs = timeMs
+    call.status = status
+    this.live(record.sessionId).toolSettled({ callId, timeMs, status })
+    return call
+  }
+
+  /**
+   * Close the turn and compute the settled view. `status` comes from the verified
+   * `turn/end.reason` mapping in `src/core/turn-state.js`.
+   */
+  endTurn(record, { timeMs, status = 'completed', statusNote = null, reason = undefined } = {}) {
+    record.endMs = timeMs
+    record.status = status
+    record.statusNote = statusNote
+    if (reason !== undefined) record.reason = reason
+    this.live(record.sessionId).turnSettled({ timeMs, status })
+    record.settled = this.settle(record)
+    this.pruneHistory(record.sessionId)
+    return record.settled
+  }
+
+  /** Compute the settled snapshot for one turn. Pure over the stored records. */
+  settle(record) {
+    /**
+     * Whether the delta timing in hand is durable evidence rather than live
+     * observation. Every attempt carries a `settlementSeq` once its durable
+     * settlement has been seen, and a durable settlement's embedded stream
+     * reproduces the original delta timestamps exactly — that is what makes the
+     * settled temporal shape `reconstructed` instead of `estimated`. An attempt
+     * still streaming when the turn closes has no settlement and degrades the
+     * whole turn's timing claim, which is the honest outcome.
+     */
+    const durableShape = record.attempts.length > 0
+      && record.attempts.every(attempt => Number.isFinite(attempt.settlementSeq))
+    const timestampsComplete = record.attempts.every(attempt => (
+      (attempt.samples ?? []).every(sample => Number.isFinite(sample.timeMs))
+    ))
+
+    const aggregate = aggregateTurn({
+      turn: record.turn,
+      turnStartMs: record.startMs,
+      turnEndMs: record.endMs,
+      firstTokenMs: record.firstTokenMs,
+      attempts: record.attempts,
+      tools: record.tools,
+      status: record.status ?? 'completed',
+      durable: durableShape,
+      timestampsComplete,
+    })
+
+    // The curve is built from the same compressed clock the live meter used, so
+    // a point read off it means the same thing the pill showed at that instant.
+    const compressed = compressAttempts(record.attempts)
+    const reasoningSeries = rollingTpsSeries(compressed.samples, {
+      phase: 'reasoning',
+      durationMs: compressed.durationMs,
+    })
+    const outputSeries = rollingTpsSeries(compressed.samples, {
+      phase: 'output',
+      durationMs: compressed.durationMs,
+    })
+
+    return {
+      ...aggregate,
+      statusNote: record.statusNote,
+      curve: {
+        durationMs: compressed.durationMs,
+        segments: compressed.segments,
+        reasoning: downsampleSeries(reasoningSeries),
+        output: downsampleSeries(outputSeries),
+        peakTps: peakTps(reasoningSeries, outputSeries),
+        /** Curve points are shape estimates; their phase integrals are anchored to usage. */
+        quality: aggregate.usageComplete ? 'calibrated' : 'estimated',
+        sampleEveryMs: 250,
+        windowMs: 1000,
+      },
+    }
+  }
+
+  /** Current live snapshot for one session, or `{phase:'idle'}`. */
+  liveSnapshot(sessionId, nowMs) {
+    const meter = this.liveBySession.get(sessionId)
+    return meter === undefined ? { phase: LivePhase.IDLE } : meter.snapshot(nowMs)
+  }
+
+  /** Latest settled turn for one session, newest by turn number. */
+  latestSettled(sessionId) {
+    let best = null
+    for (const record of this.turns.values()) {
+      if (record.sessionId !== sessionId || record.settled === null) continue
+      if (best === null || record.turn > best.turn) best = record.settled
+    }
+    return best
+  }
+
+  /** Drop the oldest settled turns so memory stays bounded. */
+  pruneHistory(sessionId) {
+    const settled = [...this.turns.values()]
+      .filter(record => record.sessionId === sessionId && record.settled !== null)
+      .sort((a, b) => a.turn - b.turn)
+    while (settled.length > this.historyLimit) {
+      const victim = settled.shift()
+      this.turns.delete(turnKey(victim.sessionId, victim.turn))
+    }
+  }
+
+  /**
+   * Release every resource. The store owns no timers or listeners, but clearing
+   * is still required so an HMR reload cannot leave a previous generation's
+   * state addressing the same sessions.
+   */
+  dispose() {
+    this.turns.clear()
+    this.liveBySession.clear()
+  }
+}
+
+;Object.assign(__exports, { DEFAULT_HISTORY_LIMIT, TurnTelemetryStore })
+			},
+			"src/dsh/raw.js": function (__exports) {
+/**
+ * Raw DSH evidence discriminants.
+ *
+ * These predicates are the *only* place that inspects the DSH wire shape of an
+ * incoming record. Everything downstream consumes normalized events.
+ *
+ * Verified shapes (DSH 0.1.5-rc.2, see docs/IMPLEMENTATION_LOG.md):
+ *   SessionEvent                 dsh-session/lib/types/types.d.ts:460-479
+ *   SessionEventLikeEntry        dsh-api-session-controller/lib/types/client/contract/events.d.ts:20-26
+ *   AssistantLiveChunkEvent      …/events.d.ts:6-16
+ *   AssistantStreamFrame         dsh-agent/lib/types/runtime-types.d.ts:100-137
+ */
+
+/** Which of the two evidence planes one raw entry belongs to. */
+const DSH_RAW_KIND = Object.freeze({
+  /** A durable `SessionEvent` envelope. */
+  DURABLE: 'durable',
+  /** A client-folded `assistant/live-chunk` transient row. */
+  TRANSIENT: 'transient',
+  /** A host-published `agent/assistant-stream` frame. */
+  STREAM_FRAME: 'stream-frame',
+  /** None of the above. */
+  UNKNOWN: 'unknown',
+})
+
+function isObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** A durable session envelope: `{type, seq, time, data}` with a non-empty string type. */
+function isDurableSessionEventEntry(entry) {
+  if (!isObject(entry)) return false
+  // Wrapped form: `{ type: 'event', event }`.
+  if (entry.type === 'event') return isDurableSessionEventEntry(entry.event)
+  if (typeof entry.type !== 'string' || entry.type === '') return false
+  if (!Number.isFinite(entry.seq)) return false
+  if (!Number.isFinite(entry.time)) return false
+  return isObject(entry.data)
+}
+
+/** A client-folded transient row: `{type:'assistant/live-chunk', seq, time, data:{attemptId, chunk}}`. */
+function isTransientLiveChunkEntry(entry) {
+  if (!isObject(entry)) return false
+  if (entry.type === 'transient') return isTransientLiveChunkEntry(entry.event)
+  if (entry.type !== 'assistant/live-chunk') return false
+  return isObject(entry.data) && typeof entry.data.attemptId === 'string'
+}
+
+/** A host-published assistant-stream frame. */
+function isAssistantStreamFrame(value) {
+  if (!isObject(value)) return false
+  if (value.type !== 'start' && value.type !== 'chunk' && value.type !== 'end') return false
+  return typeof value.attemptId === 'string'
+}
+
+/** Classify one raw entry without interpreting it. */
+function classifyRawEntry(entry) {
+  if (isAssistantStreamFrame(entry)) return DSH_RAW_KIND.STREAM_FRAME
+  if (isTransientLiveChunkEntry(entry)) return DSH_RAW_KIND.TRANSIENT
+  if (isDurableSessionEventEntry(entry)) return DSH_RAW_KIND.DURABLE
+  return DSH_RAW_KIND.UNKNOWN
+}
+
+/**
+ * Identity of the session a raw entry belongs to, or `null`.
+ *
+ * The durable plane carries the session outside the envelope (the listener's
+ * `session` argument), so callers pass the session explicitly when they have it
+ * and fall back to this reader for wrapped fixture forms.
+ */
+function sessionKeyOf(entry) {
+  if (!isObject(entry)) return null
+  if (typeof entry.sessionId === 'string' && entry.sessionId !== '') return entry.sessionId
+  if (isObject(entry.session) && entry.session.id !== undefined) return String(entry.session.id)
+  return null
+}
+
+;Object.assign(__exports, { DSH_RAW_KIND, isDurableSessionEventEntry, isTransientLiveChunkEntry, isAssistantStreamFrame, classifyRawEntry, sessionKeyOf })
+			},
+			"src/dsh/stream-decoder.js": function (__exports) {
+/**
+ * Durable `AssistantStreamRecord` decoder — the DSH-facing surface.
+ *
+ * The decoding rules themselves live in `src/core/delta-accounting.js`
+ * (`decodeAssistantStream` / `expandAssistantStream`) so that exactly one
+ * implementation of the rule exists and `src/core` stays free of DSH imports.
+ * This module adds only what is DSH-specific: locating the record array inside
+ * a settlement payload, and turning decoder issues into this project's
+ * quality vocabulary.
+ *
+ * What a successful decode guarantees, and therefore what the durable
+ * reconstruction path is allowed to assume:
+ *
+ *   - every delta of the attempt, in logical stream order;
+ *   - each delta's exact reconstructed wall-clock time, hence the exact gap
+ *     (`dt`) to its predecessor;
+ *   - the phase of each delta: `text-delta` and `tool-call-delta` are output,
+ *     `reasoning-delta` is reasoning;
+ *   - the block boundaries, because `block-start`/`block-end` are never packed
+ *     into runs and therefore survive as raw `chunk` records;
+ *   - the in-stream `usage` chunk and the `finish` chunk, likewise raw.
+ *
+ * When any record is malformed the decode reports it and marks itself
+ * incomplete. It never invents a delta and never silently drops one: a stream
+ * that lost a record yields a *lower quality* observation, which is a different
+ * claim from an exact one.
+ */
+
+const { DECODE_ISSUE, decodeAssistantStream, expandAssistantStream, firstTokenTime, isTokenDelta } = __req("src/core/delta-accounting.js")
+const { MetricQuality } = __req("src/core/metric-quality.js")
+
+/** Chunk kinds a decoded stream can carry, in the vocabulary the core uses. */
+const RECORD_KIND = Object.freeze({
+  DELTA: 'delta',
+  RAW: 'raw',
+})
+
+/** Event types that settle one attempt and embed its stream. */
+const SETTLEMENT_EVENT_TYPES = Object.freeze(['assistant/message', 'assistant/attempt'])
+
+/** How much of the stream survived decoding, as a metric-quality value. */
+function decodeQuality(result) {
+  if (!result || result.recordCount === 0) return MetricQuality.UNAVAILABLE
+  if (result.deltaCount === 0 && result.recordCount > 0) return MetricQuality.UNAVAILABLE
+  return result.complete ? MetricQuality.EXACT : MetricQuality.ESTIMATED
+}
+
+/**
+ * Decode the compact records of one durable settlement.
+ *
+ * @param {unknown} records `assistant/message.stream` or `assistant/attempt.stream`
+ * @param {{maxIssues?:number}} [options]
+ * @returns {{
+ *   chunks: {timeMs:number, chunk:object, recordIndex:number, memberIndex:number}[],
+ *   issues: object[],
+ *   issuesTruncated: boolean,
+ *   recordCount: number,
+ *   decodedRecordCount: number,
+ *   deltaCount: number,
+ *   firstTimeMs: number|null,
+ *   lastTimeMs: number|null,
+ *   complete: boolean,
+ *   quality: string,
+ *   generatedChunkCount: number,
+ *   firstTokenTimeMs: number|null,
+ * }}
+ */
+function decodeStreamRecords(records, options = {}) {
+  const result = decodeAssistantStream(records, options)
+  return decorate(result)
+}
+
+/**
+ * Tolerant decode for the live path.
+ *
+ * The transient plane arrives one frame at a time and a rebaseline can hand the
+ * client a compact prefix mid-attempt, so the tolerant reader is the right one
+ * there: losing one curve segment beats losing the meter. It reports the same
+ * issue vocabulary by re-deriving it, so a caller can tell the two apart.
+ */
+function expandAssistantStreamRaw(records) {
+  const tolerant = expandAssistantStream(records)
+  const strict = decodeAssistantStream(records, { maxIssues: 50 })
+  const chunks = tolerant.map((entry, index) => ({
+    timeMs: entry.timeMs,
+    chunk: entry.chunk,
+    recordIndex: -1,
+    memberIndex: index,
+  }))
+  const times = chunks.map(entry => entry.timeMs)
+  return decorate({
+    chunks,
+    issues: strict.issues,
+    issuesTruncated: strict.issuesTruncated,
+    recordCount: strict.recordCount,
+    decodedRecordCount: strict.decodedRecordCount,
+    deltaCount: strict.deltaCount,
+    firstTimeMs: times.length > 0 ? Math.min(...times) : null,
+    lastTimeMs: times.length > 0 ? Math.max(...times) : null,
+    complete: strict.complete,
+  })
+}
+
+function decorate(result) {
+  const generated = result.chunks.filter(entry => isTokenDelta(entry.chunk))
+  return {
+    ...result,
+    quality: decodeQuality(result),
+    generatedChunkCount: generated.length,
+    firstTokenTimeMs: firstTokenTime(result.chunks),
+  }
+}
+
+/** Time of the first member this project counts as a generated first token. */
+function firstTokenTimeOf(chunks) {
+  return firstTokenTime(chunks)
+}
+
+
+
+;Object.assign(__exports, { DECODE_ISSUE, expandAssistantStream: expandAssistantStreamRaw, RECORD_KIND, SETTLEMENT_EVENT_TYPES, decodeQuality, decodeStreamRecords, expandAssistantStreamRaw, firstTokenTimeOf })
+			},
+			"src/dsh/adapter.js": function (__exports) {
+/**
+ * DSH rc.2 raw evidence -> normalized engine events.
+ *
+ * This is the only module in the project that reads a DSH field name. Its
+ * contract is deliberately narrow and total: given the durable events of one
+ * session and the transient frames of one session, produce the normalized
+ * `TurnRecord`/`AttemptRecord`/`ToolCallRecord` values that `src/core` consumes,
+ * plus an explicit list of everything that had to be degraded on the way.
+ *
+ * Field mapping (raw -> normalized), with the local evidence for each shape:
+ *
+ * | DSH raw                                                    | normalized                                  |
+ * |------------------------------------------------------------|---------------------------------------------|
+ * | `SessionEvent<'turn/start'>.time`                          | `TurnRecord.startMs`                        |
+ * | `SessionEvent<'turn/end'>.time`                            | `TurnRecord.endMs`                          |
+ * | `SessionEvent<'turn/end'>.data.reason`                     | `TurnRecord.status` (+ `endReason`)         |
+ * | `SessionEvent<'assistant/message'>{turn,step,stream,usage}`| one `AttemptRecord` (surface settlement)    |
+ * | `SessionEvent<'assistant/attempt'>{turn,step,stream}`      | one `AttemptRecord` (durable non-surface settlement — **not** an abandonment) |
+ * | `SessionEvent<'llm/retry'>`                                | `RETRY_SCHEDULED` (correlates `retried`)    |
+ * | `AssistantStreamRecord.text-chunks`                        | `text-delta` samples (output phase)         |
+ * | `AssistantStreamRecord.reasoning-chunks`                   | `reasoning-delta` samples (reasoning phase) |
+ * | `AssistantStreamRecord.tool-call-chunks`                   | `tool-call-delta` samples (output phase)    |
+ * | `AssistantStreamRecord.chunk`                              | block/usage/finish; no token sample         |
+ * | `StreamChunk.usage.usage` (in-stream)                      | `AttemptRecord.usage` fallback              |
+ * | `assistant/message.usage`                                  | `AttemptRecord.usage` (authoritative)       |
+ * | `SessionEvent<'tool/call'>{callId,name,arguments}.time`    | `ToolCallRecord.startMs`                    |
+ * | `SessionEvent<'tool/result'>.time`                         | `ToolCallRecord.endMs` + status             |
+ * | `AssistantLiveChunkEvent.time`                             | `DeltaSample.timeMs` (live path)            |
+ * | `AssistantLiveChunkEvent.data.attemptId`                   | `DeltaSample.attemptId` / attempt identity  |
+ * | `AssistantStreamFrame{start,chunk,end}`                    | the same, before the client fold            |
+ *
+ * Nothing here computes statistics. Every number this module produces is a
+ * measured boundary copied from an event envelope, or a token-shape weight
+ * obtained from `src/core/token-allocation.js`.
+ */
+
+const { classifyDelta, deltaText, isTokenDelta, usageFromChunk } = __req("src/core/delta-accounting.js")
+const { MetricQuality, weakestQuality } = __req("src/core/metric-quality.js")
+const { heuristicTokenWeight, sampleFromChunk } = __req("src/core/token-allocation.js")
+const { decodeStreamRecords, SETTLEMENT_EVENT_TYPES } = __req("src/dsh/stream-decoder.js")
+
+/** Normalized event kinds emitted by the mapping step. */
+const NORMALIZED_KIND = Object.freeze({
+  TURN_START: 'turn-start',
+  TURN_END: 'turn-end',
+  STEP_START: 'step-start',
+  STEP_END: 'step-end',
+  ATTEMPT_START: 'attempt-start',
+  ATTEMPT_DELTA: 'attempt-delta',
+  ATTEMPT_SETTLE: 'attempt-settle',
+  ATTEMPT_ABANDON: 'attempt-abandon',
+  RETRY_SCHEDULED: 'retry-scheduled',
+  TOOL_CALL: 'tool-call',
+  TOOL_RESULT: 'tool-result',
+  IGNORED: 'ignored',
+})
+
+/**
+ * Which durable surface settled one attempt (settlement type — concept 1).
+ *
+ * Verified against `dsh-session/lib/types/types.d.ts:309-327` in the local
+ * `0.1.5-rc.2` install:
+ *
+ *   `assistant/message` — an assembled assistant message on the model-visible
+ *     surface; a turn cancelled mid-stream finalizes its delivered prefix as
+ *     this event with `interrupted: true`.
+ *   `assistant/attempt` — "one model attempt that committed no surface
+ *     message. The embedded stream preserves a failed, retried, cancelled, or
+ *     stream-error attempt that reached **settlement** without fabricating
+ *     model-visible history."
+ *
+ * `NONE` means no durable settlement exists — either the attempt is still
+ * open or it was transiently abandoned (`AssistantStreamFrame.end.outcome.kind
+ * === 'abandoned'`, documented as "live abandonment without one [durable
+ * settlement]", `dsh-agent/lib/types/runtime-types.d.ts:129-136`).
+ */
+const SETTLEMENT_KIND = Object.freeze({
+  MESSAGE: 'message',
+  ATTEMPT: 'attempt',
+  NONE: 'none',
+})
+
+/**
+ * Execution outcome of one attempt (concept 2), strictly separated from the
+ * settlement type and from surface visibility (concept 3).
+ *
+ * Only `committed`, `interrupted` and `abandoned` are directly readable from
+ * rc.2 evidence. `failed`/`retried`/`cancelled`/`stream-error` are named by
+ * the `assistant/attempt` doc comment as *possible* causes, but the durable
+ * payload carries no cause field: `retried` is the single member derivable by
+ * correlation (a later `llm/retry` event names the same turn/step —
+ * `dsh-llm-retry` invariant code pairs them), and everything else stays
+ * `unknown` rather than being guessed.
+ */
+const ATTEMPT_OUTCOME = Object.freeze({
+  COMMITTED: 'committed',
+  INTERRUPTED: 'interrupted',
+  FAILED: 'failed',
+  RETRIED: 'retried',
+  CANCELLED: 'cancelled',
+  STREAM_ERROR: 'stream-error',
+  ABANDONED: 'abandoned',
+  UNKNOWN: 'unknown',
+})
+
+/**
+ * Classify one durable settlement into the three independent concepts.
+ *
+ * `assistant/attempt` is deliberately **not** mapped to `abandoned`: it is a
+ * durable settlement (surface visibility lost, settlement preserved), while
+ * abandonment is the transient condition of having no durable settlement at
+ * all. When the cause of a non-surface settlement cannot be derived from
+ * durable evidence the outcome is `unknown`.
+ *
+ * @param {string} eventType `assistant/message` | `assistant/attempt`
+ * @param {{interrupted?: boolean}} [data] settlement payload
+ * @returns {{settlementKind: string, surfaceCommitted: boolean, attemptOutcome: string}}
+ */
+function settlementClassification(eventType, data = {}) {
+  const surfaceCommitted = eventType === 'assistant/message'
+  const settlementKind = surfaceCommitted
+    ? SETTLEMENT_KIND.MESSAGE
+    : eventType === 'assistant/attempt' ? SETTLEMENT_KIND.ATTEMPT : SETTLEMENT_KIND.NONE
+  let attemptOutcome = ATTEMPT_OUTCOME.UNKNOWN
+  if (data?.interrupted === true) attemptOutcome = ATTEMPT_OUTCOME.INTERRUPTED
+  else if (surfaceCommitted) attemptOutcome = ATTEMPT_OUTCOME.COMMITTED
+  return { settlementKind, surfaceCommitted, attemptOutcome }
+}
+
+/**
+ * Classify a transient `end` frame outcome.
+ *
+ * `kind: 'abandoned'` is the **only** evidence for `ATTEMPT_OUTCOME.ABANDONED`:
+ * a live stream that ended without any durable settlement.
+ */
+function transientEndClassification(outcome) {
+  if (outcome?.kind === 'committed') return settlementClassification(outcome.eventType, {})
+  if (outcome?.kind === 'abandoned') {
+    return {
+      settlementKind: SETTLEMENT_KIND.NONE,
+      surfaceCommitted: false,
+      attemptOutcome: ATTEMPT_OUTCOME.ABANDONED,
+    }
+  }
+  return {
+    settlementKind: SETTLEMENT_KIND.NONE,
+    surfaceCommitted: false,
+    attemptOutcome: ATTEMPT_OUTCOME.UNKNOWN,
+  }
+}
+
+const STATUS_BY_TURN_END = Object.freeze({
+  completed: 'completed',
+  'max-tokens': 'completed',
+  aborted: 'interrupted',
+  interrupted: 'interrupted',
+  blocked: 'errored',
+  error: 'errored',
+})
+
+/**
+ * Map one durable `turn/end` reason to the card status, per the mapping table
+ * frozen in `docs/IMPLEMENTATION_LOG.md`.
+ *
+ * An unknown future reason kind must not be reported as a known cause: it maps
+ * to `errored` with `known: false`, and the caller surfaces the raw reason.
+ */
+function turnEndStatus(reason) {
+  const kind = reason && typeof reason === 'object' ? reason.kind : undefined
+  if (typeof kind !== 'string') return { status: 'errored', known: false, note: 'turn/end carried no reason kind' }
+  const status = STATUS_BY_TURN_END[kind]
+  if (status === undefined) return { status: 'errored', known: false, note: `unrecognized turn/end reason "${kind}"` }
+  if (kind === 'max-tokens') {
+    return { status, known: true, note: 'output-token ceiling reached; generation is truncated' }
+  }
+  if (kind === 'aborted') {
+    const cause = reason.reason?.kind ?? 'unknown'
+    return { status, known: true, note: `cancelled (${cause})` }
+  }
+  if (kind === 'interrupted') {
+    return { status, known: true, note: 'turn was closed after a crash' }
+  }
+  return { status, known: true, note: null }
+}
+
+/** Timestamps on a `tool/result` payload do not exist; the envelope carries them. */
+function toolResultOutcome(data) {
+  const block = Array.isArray(data?.message?.content) ? data.message.content[0] : undefined
+  if (data?.error !== undefined || block?.isError === true) return 'error'
+  return 'ok'
+}
+
+/** Read the usage carrier from a settlement, preferring the durable one. */
+function settlementUsage(data, decoded) {
+  const durable = data?.usage
+  if (durable && typeof durable === 'object' && Number.isFinite(durable.outputTokens)) {
+    return { usage: durable, source: 'assistant-settlement' }
+  }
+  for (let index = decoded.chunks.length - 1; index >= 0; index -= 1) {
+    const usage = usageFromChunk(decoded.chunks[index].chunk)
+    if (usage !== null) return { usage, source: 'in-stream-usage-chunk' }
+  }
+  return { usage: null, source: null }
+}
+
+/**
+ * Turn one durable session event into zero or more normalized events.
+ *
+ * The returned values are the adapter's stable vocabulary; a caller that has to
+ * branch on a raw DSH event type is a caller that should be reading
+ * `NORMALIZED_KIND` instead.
+ */
+function normalizeDurableEvent(event) {
+  if (event === null || typeof event !== 'object' || typeof event.type !== 'string') {
+    return { kind: NORMALIZED_KIND.IGNORED, reason: 'not a session event' }
+  }
+  const data = event.data ?? {}
+  const common = { seq: event.seq, timeMs: event.time }
+  switch (event.type) {
+    case 'turn/start':
+      return { kind: NORMALIZED_KIND.TURN_START, ...common, turn: data.turn }
+    case 'turn/end': {
+      const mapped = turnEndStatus(data.reason)
+      return {
+        kind: NORMALIZED_KIND.TURN_END,
+        ...common,
+        turn: data.turn,
+        status: mapped.status,
+        reasonKind: data.reason?.kind ?? null,
+        statusKnown: mapped.known,
+        note: mapped.note,
+        rawReason: data.reason ?? null,
+      }
+    }
+    case 'step/start':
+      return { kind: NORMALIZED_KIND.STEP_START, ...common, turn: data.turn, step: data.step }
+    case 'step/end':
+      return { kind: NORMALIZED_KIND.STEP_END, ...common, turn: data.turn, step: data.step }
+    case 'assistant/message':
+    case 'assistant/attempt': {
+      const decoded = decodeStreamRecords(data.stream)
+      const { usage, source } = settlementUsage(data, decoded)
+      const issues = decoded.issues.map(issue => ({ ...issue, where: 'durable-stream' }))
+      return {
+        kind: NORMALIZED_KIND.ATTEMPT_SETTLE,
+        ...common,
+        turn: data.turn,
+        step: data.step,
+        eventType: event.type,
+        ...settlementClassification(event.type, data),
+        interrupted: data.interrupted === true,
+        decoded,
+        usage,
+        usageSource: source,
+        issues,
+        quality: decoded.quality,
+      }
+    }
+    case 'llm/retry':
+      /**
+       * A scheduled durable retry (`dsh-llm-retry`): non-surface, appended
+       * after the failed step's `assistant/attempt` settled, naming the same
+       * turn/step. It is the one retry fact derivable from the durable log and
+       * the only way an `assistant/attempt` outcome becomes knowable.
+       */
+      return {
+        kind: NORMALIZED_KIND.RETRY_SCHEDULED,
+        ...common,
+        turn: data.turn,
+        step: data.step,
+        retryId: typeof data.retryId === 'string' ? data.retryId : null,
+        retry: Number.isFinite(data.retry) ? data.retry : null,
+      }
+    case 'tool/call':
+      return {
+        kind: NORMALIZED_KIND.TOOL_CALL,
+        ...common,
+        turn: data.turn,
+        step: data.step,
+        callId: typeof data.callId === 'string' ? data.callId : null,
+        name: typeof data.name === 'string' ? data.name : null,
+        /**
+         * The raw argument JSON exactly as the model produced it. It is kept for
+         * evidence and for argument-length accounting; it is **not** a token
+         * count and is never used as one.
+         */
+        argumentsRaw: typeof data.arguments === 'string' ? data.arguments : null,
+      }
+    case 'tool/result':
+      return {
+        kind: NORMALIZED_KIND.TOOL_RESULT,
+        ...common,
+        turn: data.turn,
+        step: data.step,
+        callId: Array.isArray(data.message?.content) ? data.message.content[0]?.toolCallId ?? null : null,
+        status: toolResultOutcome(data),
+        errorName: data.error?.name ?? null,
+      }
+    default:
+      return { kind: NORMALIZED_KIND.IGNORED, reason: event.type, ...common }
+  }
+}
+
+/**
+ * Normalize one client-folded transient row (`assistant/live-chunk`).
+ *
+ * The client fold is what a browser actually sees, so this is the shape the
+ * live path must consume. `time` sits on the row, not on `data`.
+ */
+function normalizeLiveChunk(entry) {
+  const row = entry?.type === 'transient' ? entry.event : entry
+  const data = row?.data
+  if (row?.type !== 'assistant/live-chunk' || !data || typeof data.attemptId !== 'string') {
+    return { kind: NORMALIZED_KIND.IGNORED, reason: 'not a live chunk' }
+  }
+  return {
+    kind: NORMALIZED_KIND.ATTEMPT_DELTA,
+    timeMs: row.time,
+    seq: row.seq,
+    attemptId: data.attemptId,
+    turn: data.turn,
+    step: data.step,
+    chunk: data.chunk,
+    phase: classifyDelta(data.chunk),
+    text: deltaText(data.chunk),
+    countsAsToken: isTokenDelta(data.chunk),
+  }
+}
+
+/**
+ * Normalize one host `agent/assistant-stream` frame.
+ *
+ * The host frame is the earliest form of the same evidence: it carries
+ * `attemptId`, `revision`, `index`, `time` and the chunk, and it is what the
+ * client fold later turns into `assistant/live-chunk`. A `start` frame is the
+ * only source of an attempt's `(turn, step)` before its first durable fact.
+ */
+function normalizeStreamFrame(frame) {
+  if (frame === null || typeof frame !== 'object' || typeof frame.attemptId !== 'string') {
+    return { kind: NORMALIZED_KIND.IGNORED, reason: 'not a stream frame' }
+  }
+  if (frame.type === 'start') {
+    return {
+      kind: NORMALIZED_KIND.ATTEMPT_START,
+      attemptId: frame.attemptId,
+      revision: frame.revision,
+      turn: frame.turn,
+      step: frame.step,
+      startedAfterSeq: frame.startedAfterSeq ?? null,
+    }
+  }
+  if (frame.type === 'chunk') {
+    return {
+      kind: NORMALIZED_KIND.ATTEMPT_DELTA,
+      timeMs: frame.time,
+      attemptId: frame.attemptId,
+      revision: frame.revision,
+      index: frame.index,
+      chunk: frame.chunk,
+      phase: classifyDelta(frame.chunk),
+      text: deltaText(frame.chunk),
+      countsAsToken: isTokenDelta(frame.chunk),
+    }
+  }
+  if (frame.type === 'end') {
+    const outcome = frame.outcome ?? {}
+    return {
+      kind: outcome.kind === 'abandoned' ? NORMALIZED_KIND.ATTEMPT_ABANDON : NORMALIZED_KIND.ATTEMPT_SETTLE,
+      attemptId: frame.attemptId,
+      revision: frame.revision,
+      index: frame.index,
+      outcomeKind: outcome.kind ?? null,
+      settlementEventType: outcome.eventType ?? null,
+      settlementSeq: Number.isFinite(outcome.seq) ? outcome.seq : null,
+      ...transientEndClassification(outcome),
+    }
+  }
+  return { kind: NORMALIZED_KIND.IGNORED, reason: `unrecognized frame type ${String(frame.type)}` }
+}
+
+/**
+ * Build one attempt record from decoded chunks plus its usage and identity.
+ *
+ * The attempt's `samples` are the generated deltas only; `chunks` keeps the
+ * whole decoded stream so that block boundaries, `usage` and `finish` remain
+ * available to a caller that needs them. Both come from the same decode, so the
+ * sample set and the boundary set can never disagree.
+ */
+function attemptFromDecoded({
+  attemptId,
+  turn,
+  step,
+  decoded,
+  usage = null,
+  usageSource = null,
+  settlementKind = SETTLEMENT_KIND.NONE,
+  surfaceCommitted = false,
+  attemptOutcome = ATTEMPT_OUTCOME.UNKNOWN,
+  startedAtMs = null,
+  settledAtMs = null,
+  settlementSeq = null,
+  settlementEventType = null,
+  interrupted = false,
+  issues = [],
+  estimate = heuristicTokenWeight,
+}) {
+  const samples = []
+  for (const entry of decoded.chunks) {
+    const sample = sampleFromChunk(entry.timeMs, entry.chunk, estimate)
+    if (sample !== null) samples.push(sample)
+  }
+  return {
+    attemptId: attemptId ?? null,
+    turn: turn ?? null,
+    step: step ?? null,
+    settlementKind,
+    surfaceCommitted,
+    attemptOutcome,
+    samples,
+    chunks: decoded.chunks,
+    decoded,
+    usage,
+    usageSource,
+    startedAtMs,
+    settledAtMs,
+    settlementSeq,
+    settlementEventType,
+    interrupted,
+    issues,
+    /** Quality of the decoded stream itself, before any provider anchoring. */
+    streamQuality: decoded.quality,
+  }
+}
+
+/** Weakest quality over an attempt's stream decode and its usage availability. */
+function attemptEvidenceQuality(attempt) {
+  const usageQuality = attempt?.usage === null || attempt?.usage === undefined
+    ? MetricQuality.UNAVAILABLE
+    : MetricQuality.EXACT
+  const streamQuality = attempt?.decoded?.quality ?? MetricQuality.UNAVAILABLE
+  return weakestQuality(streamQuality, usageQuality)
+}
+
+
+
+/**
+ * Upgrade `assistant/attempt` outcomes that a durable `llm/retry` proves.
+ *
+ * Both correlation requirements come from `dsh-llm-retry`'s own invariant
+ * checker: the retry names the same turn and step as the failed request, and
+ * it is appended *after* that attempt settled. The most recent still-unknown
+ * non-surface settlement preceding the retry inside the same step is therefore
+ * the retried attempt. Attempts the correlation cannot prove keep `unknown`.
+ *
+ * Mutates the supplied attempt records in place and is idempotent: an outcome
+ * already derived (or a retry already applied by sequence) is never rewritten.
+ *
+ * @param {readonly object[]} attempts attempt-likes carrying
+ *   `{turn, step, settlementKind, settlementSeq, attemptOutcome}`
+ * @param {readonly object[]} retries normalized `RETRY_SCHEDULED` events
+ * @returns {number} how many attempts were upgraded to `retried`
+ */
+function applyRetryOutcomes(attempts, retries) {
+  if (!Array.isArray(attempts) || !Array.isArray(retries)) return 0
+  let upgraded = 0
+  const ordered = [...retries]
+    .filter(retry => retry && Number.isFinite(retry.seq))
+    .sort((a, b) => a.seq - b.seq)
+  for (const retry of ordered) {
+    let candidate = null
+    for (const attempt of attempts) {
+      if (attempt.settlementKind !== SETTLEMENT_KIND.ATTEMPT) continue
+      if (attempt.attemptOutcome !== ATTEMPT_OUTCOME.UNKNOWN) continue
+      if (!Number.isFinite(attempt.settlementSeq) || attempt.settlementSeq >= retry.seq) continue
+      if (attempt.turn !== retry.turn || attempt.step !== retry.step) continue
+      if (candidate === null || attempt.settlementSeq > candidate.settlementSeq) candidate = attempt
+    }
+    if (candidate !== null) {
+      candidate.attemptOutcome = ATTEMPT_OUTCOME.RETRIED
+      upgraded += 1
+    }
+  }
+  return upgraded
+}
+
+;Object.assign(__exports, { SETTLEMENT_EVENT_TYPES, NORMALIZED_KIND, SETTLEMENT_KIND, ATTEMPT_OUTCOME, settlementClassification, transientEndClassification, turnEndStatus, normalizeDurableEvent, normalizeLiveChunk, normalizeStreamFrame, attemptFromDecoded, attemptEvidenceQuality, applyRetryOutcomes })
+			},
+			"src/dsh/live-path.js": function (__exports) {
+/**
+ * Live (transient) accumulation path.
+ *
+ * This is path A of the equivalence requirement: consume the transient plane
+ * exactly as a browser receives it — `agent/assistant-stream` frames or the
+ * client-folded `assistant/live-chunk` rows they become — plus the durable
+ * `turn/start`, `step/start`, `tool/call`, `tool/result` and `turn/end`
+ * boundaries, and never touch a compact `AssistantStreamRecord`.
+ *
+ * The transient plane is fragile in a specific way that the durable plane is
+ * not: it is ordered by a dense per-attempt `index`, it can be replayed, and it
+ * can be re-baselined after a reload. This accumulator therefore validates the
+ * index sequence instead of trusting arrival order, and it reports every
+ * duplicate, gap and regression rather than folding them away.
+ */
+
+const { MetricQuality } = __req("src/core/metric-quality.js")
+const { heuristicTokenWeight, sampleFromChunk } = __req("src/core/token-allocation.js")
+const { NORMALIZED_KIND, applyRetryOutcomes, normalizeDurableEvent, normalizeLiveChunk, normalizeStreamFrame, settlementClassification } = __req("src/dsh/adapter.js")
+
+/** Why a transient frame was not accepted into the attempt. */
+const FRAME_ISSUE = Object.freeze({
+  DUPLICATE: 'duplicated-transient-frame',
+  OUT_OF_ORDER: 'out-of-order-transient-frame',
+  UNKNOWN_ATTEMPT: 'frame-for-unknown-attempt',
+  MISSING_ATTEMPT_ID: 'frame-without-attempt-id',
+  ATTEMPT_REOPENED: 'attempt-stream-reopened',
+  MISSING_TIME: 'frame-without-timestamp',
+})
+
+/**
+ * Accumulate one session's live evidence.
+ *
+ * Keyed by `(sessionId, turn)` at the caller's level; within one instance the
+ * attempts are keyed by `attemptId`, because a turn may hold several attempts
+ * and a tool may be running while the next attempt starts.
+ */
+class LiveTurnAccumulator {
+  /**
+   * @param {{sessionId: string, estimate?: (text:string, phase:string, chunk:unknown)=>number}} options
+   */
+  constructor({ sessionId, estimate = heuristicTokenWeight } = {}) {
+    this.sessionId = sessionId ?? null
+    this.estimate = estimate
+    this.turnStartMs = null
+    this.turnEndMs = null
+    this.status = null
+    this.statusNote = null
+    this.turnEndPayload = null
+    this.attempts = new Map()
+    this.attemptOrder = []
+    this.tools = new Map()
+    this.toolOrder = []
+    this.steps = new Map()
+    /** Scheduled durable retries, for outcome correlation (`llm/retry`). */
+    this.retries = []
+    /** Everything the live plane could not use, with its reason. */
+    this.issues = []
+    this.ignoredEvents = 0
+    /** Attempts whose transient stream was still open when the caller read it. */
+    this.openAttemptIds = new Set()
+  }
+
+  issue(kind, detail) {
+    this.issues.push(detail === undefined ? { kind } : { kind, detail })
+  }
+
+  attempt(attemptId) {
+    let attempt = this.attempts.get(attemptId)
+    if (attempt === undefined) {
+      attempt = {
+        attemptId,
+        turn: null,
+        step: null,
+        /** Settlement type: no durable settlement observed yet. */
+        settlementKind: 'none',
+        surfaceCommitted: false,
+        /** Never fabricated: an open attempt's outcome is not known, and is *not* `abandoned`. */
+        attemptOutcome: 'unknown',
+        revision: null,
+        nextIndex: 0,
+        chunks: [],
+        samples: [],
+        usage: null,
+        usageSource: null,
+        startedAtMs: null,
+        settledAtMs: null,
+        settlementSeq: null,
+        settlementEventType: null,
+        interrupted: false,
+        issues: [],
+        /** Transient frames seen for this attempt, accepted or not. */
+        frameCount: 0,
+        acceptedFrameCount: 0,
+      }
+      this.attempts.set(attemptId, attempt)
+      this.attemptOrder.push(attemptId)
+      this.openAttemptIds.add(attemptId)
+    }
+    return attempt
+  }
+
+  /** Accept one `agent/assistant-stream` frame. */
+  acceptStreamFrame(frame) {
+    const normalized = normalizeStreamFrame(frame)
+    switch (normalized.kind) {
+      case NORMALIZED_KIND.ATTEMPT_START: {
+        const existing = this.attempts.get(normalized.attemptId)
+        if (existing !== undefined && existing.chunks.length > 0) {
+          this.issue(FRAME_ISSUE.ATTEMPT_REOPENED, { attemptId: normalized.attemptId, revision: normalized.revision })
+        }
+        const attempt = this.attempt(normalized.attemptId)
+        attempt.turn = normalized.turn ?? attempt.turn
+        attempt.step = normalized.step ?? attempt.step
+        attempt.revision = normalized.revision ?? attempt.revision
+        attempt.startedAtMs = attempt.startedAtMs ?? null
+        return
+      }
+      case NORMALIZED_KIND.ATTEMPT_DELTA: {
+        this.acceptDelta({
+          attemptId: normalized.attemptId,
+          timeMs: normalized.timeMs,
+          index: normalized.index,
+          revision: normalized.revision,
+          chunk: normalized.chunk,
+        })
+        return
+      }
+      case NORMALIZED_KIND.ATTEMPT_SETTLE:
+      case NORMALIZED_KIND.ATTEMPT_ABANDON: {
+        const attempt = this.attempt(normalized.attemptId)
+        this.openAttemptIds.delete(normalized.attemptId)
+        if (normalized.kind === NORMALIZED_KIND.ATTEMPT_ABANDON) {
+          // Transient abandonment: no durable settlement exists for this
+          // stream. This is the *only* place `abandoned` may be derived.
+          attempt.settlementKind = normalized.settlementKind ?? 'none'
+          attempt.surfaceCommitted = false
+          attempt.attemptOutcome = normalized.attemptOutcome ?? 'abandoned'
+          return
+        }
+        attempt.settlementSeq = normalized.settlementSeq
+        attempt.settlementEventType = normalized.settlementEventType
+        attempt.settlementKind = normalized.settlementKind
+        attempt.surfaceCommitted = normalized.surfaceCommitted
+        // The end frame's eventType is known but its `interrupted` marker is
+        // not; `acceptSettlementIdentity` refines this from the durable payload.
+        attempt.attemptOutcome = normalized.attemptOutcome
+        return
+      }
+      default:
+        this.issue(FRAME_ISSUE.MISSING_ATTEMPT_ID, normalized.reason ?? null)
+    }
+  }
+
+  /** Accept one client-folded `assistant/live-chunk` row. */
+  acceptLiveChunk(entry) {
+    const normalized = normalizeLiveChunk(entry)
+    if (normalized.kind === NORMALIZED_KIND.IGNORED) {
+      this.issue(FRAME_ISSUE.MISSING_ATTEMPT_ID, normalized.reason ?? null)
+      return
+    }
+    this.acceptDelta({
+      attemptId: normalized.attemptId,
+      timeMs: normalized.timeMs,
+      index: null,
+      revision: null,
+      chunk: normalized.chunk,
+      turn: normalized.turn,
+      step: normalized.step,
+      seq: normalized.seq,
+    })
+  }
+
+  /**
+   * Index-validated delta admission.
+   *
+   * `index` is the attempt's dense zero-based frame position. When it is
+   * present, the accumulator requires it to be exactly the next expected value:
+   * a repeat is a duplicated frame and a jump is a gap, and both make the
+   * observed stream incomplete. Neither may be folded away, because both change
+   * what the curve claims about time spent generating.
+   */
+  acceptDelta({ attemptId, timeMs, index, revision, chunk, turn = null, step = null, seq = null }) {
+    if (typeof attemptId !== 'string' || attemptId === '') {
+      this.issue(FRAME_ISSUE.MISSING_ATTEMPT_ID)
+      return
+    }
+    const attempt = this.attempt(attemptId)
+    if (turn !== null) attempt.turn = turn
+    if (step !== null) attempt.step = step
+    if (revision !== null && revision !== undefined) attempt.revision = revision
+    attempt.frameCount += 1
+
+    if (!Number.isFinite(timeMs)) {
+      attempt.issues.push({ kind: FRAME_ISSUE.MISSING_TIME, index })
+      this.issue(FRAME_ISSUE.MISSING_TIME, { attemptId, index })
+      return
+    }
+
+    if (Number.isFinite(index)) {
+      if (index < attempt.nextIndex) {
+        attempt.issues.push({ kind: FRAME_ISSUE.DUPLICATE, index, expected: attempt.nextIndex })
+        this.issue(FRAME_ISSUE.DUPLICATE, { attemptId, index, expected: attempt.nextIndex })
+        return
+      }
+      if (index > attempt.nextIndex) {
+        attempt.issues.push({ kind: FRAME_ISSUE.OUT_OF_ORDER, index, expected: attempt.nextIndex })
+        this.issue(FRAME_ISSUE.OUT_OF_ORDER, { attemptId, index, expected: attempt.nextIndex })
+      }
+      attempt.nextIndex = index + 1
+    }
+
+    attempt.acceptedFrameCount += 1
+    attempt.chunks.push({ timeMs, chunk, index, revision, seq })
+    const sample = sampleFromChunk(timeMs, chunk, this.estimate)
+    if (sample !== null) attempt.samples.push({ ...sample, attemptId })
+  }
+
+  /** Accept one durable session event (boundaries, tools, settlements). */
+  acceptDurableEvent(event) {
+    const normalized = normalizeDurableEvent(event)
+    switch (normalized.kind) {
+      case NORMALIZED_KIND.TURN_START:
+        // Idempotent: a replayed durable `turn/start` must not discard samples.
+        this.turnStartMs = Number.isFinite(this.turnStartMs) ? this.turnStartMs : normalized.timeMs
+        return normalized
+      case NORMALIZED_KIND.TURN_END:
+        this.turnEndMs = normalized.timeMs
+        this.status = normalized.status
+        this.statusNote = normalized.note
+        this.turnEndPayload = {
+          reasonKind: normalized.reasonKind,
+          statusKnown: normalized.statusKnown,
+          rawReason: normalized.rawReason,
+        }
+        return normalized
+      case NORMALIZED_KIND.STEP_START:
+        this.steps.set(normalized.step, { step: normalized.step, startMs: normalized.timeMs, endMs: null })
+        return normalized
+      case NORMALIZED_KIND.STEP_END: {
+        const step = this.steps.get(normalized.step) ?? { step: normalized.step, startMs: null, endMs: null }
+        step.endMs = normalized.timeMs
+        this.steps.set(normalized.step, step)
+        return normalized
+      }
+      case NORMALIZED_KIND.ATTEMPT_SETTLE: {
+        // A durable settlement carries no `attemptId`: DSH's attempt identity is
+        // process-local and never enters the durable log. Path A therefore takes
+        // a settlement's usage and status from `settlements` (see
+        // `acceptSettlementIdentity`) and treats the durable settlement event
+        // itself as a boundary only. Creating an attempt here would invent an
+        // identity the evidence does not contain.
+        return normalized
+      }
+      case NORMALIZED_KIND.RETRY_SCHEDULED:
+        this.retries.push(normalized)
+        this.correlateRetries()
+        return normalized
+      case NORMALIZED_KIND.TOOL_CALL: {
+        if (normalized.callId === null) {
+          this.issue('tool-call-without-call-id', { seq: normalized.seq })
+          return normalized
+        }
+        const record = this.tools.get(normalized.callId) ?? {
+          callId: normalized.callId,
+          name: normalized.name,
+          startMs: normalized.timeMs,
+          endMs: undefined,
+          status: 'running',
+          parentCallId: undefined,
+        }
+        record.startMs = Math.min(record.startMs, normalized.timeMs)
+        if (normalized.name !== null) record.name = normalized.name
+        this.tools.set(normalized.callId, record)
+        if (!this.toolOrder.includes(normalized.callId)) this.toolOrder.push(normalized.callId)
+        return normalized
+      }
+      case NORMALIZED_KIND.TOOL_RESULT: {
+        if (normalized.callId === null) {
+          this.issue('tool-result-without-call-id', { seq: normalized.seq })
+          return normalized
+        }
+        const record = this.tools.get(normalized.callId)
+        if (record === undefined) {
+          this.issue('unmatched-tool-result', { callId: normalized.callId, seq: normalized.seq })
+          return normalized
+        }
+        record.endMs = normalized.timeMs
+        record.status = normalized.status
+        return normalized
+      }
+      default:
+        this.ignoredEvents += 1
+        return normalized
+    }
+  }
+
+  /**
+   * Fold a durable settlement's *identity and usage* into the live attempts.
+   *
+   * A settlement arriving through the durable plane is how the client learns an
+   * attempt is over. It is not a source of deltas here: path A must not read the
+   * compact stream, or the two paths would stop being independent.
+   *
+   * The three settlement concepts are passed explicitly when the caller has
+   * them; otherwise they are re-derived from the settlement event type and the
+   * `interrupted` marker, exactly as the durable path derives them.
+   */
+  acceptSettlementIdentity({
+    attemptId,
+    turn,
+    step,
+    usage,
+    usageSource,
+    settlementKind,
+    surfaceCommitted,
+    attemptOutcome,
+    interrupted,
+    settledAtMs,
+    seq,
+    eventType,
+  }) {
+    const attempt = this.attempt(attemptId)
+    attempt.turn = turn ?? attempt.turn
+    attempt.step = step ?? attempt.step
+    attempt.settledAtMs = settledAtMs ?? attempt.settledAtMs
+    attempt.settlementSeq = seq ?? attempt.settlementSeq
+    attempt.settlementEventType = eventType ?? attempt.settlementEventType
+    attempt.interrupted = interrupted === true
+    const derived = settlementClassification(attempt.settlementEventType, { interrupted: attempt.interrupted })
+    attempt.settlementKind = settlementKind ?? derived.settlementKind
+    attempt.surfaceCommitted = surfaceCommitted ?? derived.surfaceCommitted
+    attempt.attemptOutcome = attemptOutcome ?? derived.attemptOutcome
+    if (usage !== null && usage !== undefined) {
+      attempt.usage = usage
+      attempt.usageSource = usageSource ?? attempt.usageSource
+    }
+    this.openAttemptIds.delete(attemptId)
+    // A retry may have been seen before the settlement identity linked up
+    // (batch replay processes durable events first); re-run the correlation.
+    this.correlateRetries()
+    return attempt
+  }
+
+  /**
+   * Apply scheduled durable retries to the attempts they prove. Idempotent;
+   * called again whenever a retry or a settlement identity lands.
+   */
+  correlateRetries() {
+    if (this.retries.length === 0) return 0
+    return applyRetryOutcomes(this.attemptList().filter(Boolean), this.retries)
+  }
+
+  /** Attempts in the order their first frame arrived. */
+  attemptList() {
+    return this.attemptOrder.map(attemptId => this.attempts.get(attemptId))
+  }
+
+  toolList() {
+    return this.toolOrder.map(callId => this.tools.get(callId))
+  }
+
+  /** Whether the live plane is complete enough to be called exact. */
+  liveQuality() {
+    if (this.issues.length > 0) return MetricQuality.ESTIMATED
+    if (this.attemptList().length === 0) return MetricQuality.UNAVAILABLE
+    return MetricQuality.ESTIMATED
+  }
+}
+
+/**
+ * Path A entry point: replay a recorded transient plane plus the durable
+ * boundaries, and return the normalized attempts and tools.
+ *
+ * `settlements` carries only identity and usage, never streams — see
+ * `acceptSettlementIdentity`.
+ */
+function accumulateLive({
+  sessionId,
+  frames = [],
+  liveChunks = [],
+  durableEvents = [],
+  settlements = [],
+  estimate = heuristicTokenWeight,
+}) {
+  const accumulator = new LiveTurnAccumulator({ sessionId, estimate })
+  for (const event of durableEvents) accumulator.acceptDurableEvent(event)
+  for (const frame of frames) accumulator.acceptStreamFrame(frame)
+  for (const row of liveChunks) accumulator.acceptLiveChunk(row)
+  for (const settlement of settlements) accumulator.acceptSettlementIdentity(settlement)
+  // Batch replay processes durable events before settlement identities exist;
+  // a retry seen in that order could not yet be correlated. Re-run now that
+  // every identity has been folded in.
+  accumulator.correlateRetries()
+  return accumulator
+}
+
+
+
+;Object.assign(__exports, { settlementClassification, FRAME_ISSUE, LiveTurnAccumulator, accumulateLive })
+			},
+			"src/dsh/durable-path.js": function (__exports) {
+/**
+ * Durable (settlement) reconstruction path — path B.
+ *
+ * Path B reads only what survives a reload: the durable session log. It takes
+ * turn and step boundaries, tool call/result pairs, and, for every attempt, the
+ * compact `AssistantStreamRecord[]` embedded in its settlement, which it
+ * decodes with the strict decoder. It never consults a transient frame.
+ *
+ * The point of path B is that a completed turn's card must be reconstructible
+ * from the durable log alone. If the two paths disagree on a settled turn, the
+ * live path is the one that is wrong, because only the durable log is replayable
+ * evidence.
+ */
+
+const { isTokenDelta } = __req("src/core/delta-accounting.js")
+const { heuristicTokenWeight, sampleFromChunk } = __req("src/core/token-allocation.js")
+const { applyRetryOutcomes, settlementClassification, turnEndStatus } = __req("src/dsh/adapter.js")
+const { decodeStreamRecords } = __req("src/dsh/stream-decoder.js")
+
+/**
+ * Reconstruct a turn from durable events.
+ *
+ * @param {{
+ *   sessionId: string,
+ *   turn: number,
+ *   events: readonly object[],
+ *   estimate?: Function,
+ * }} input
+ */
+function reconstructFromDurable({ sessionId, turn, events = [], estimate }) {
+  const ordered = [...events]
+    .filter(event => event && typeof event === 'object' && typeof event.type === 'string')
+    .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+
+  const result = {
+    sessionId: sessionId ?? null,
+    turn: turn ?? null,
+    turnStartMs: null,
+    turnEndMs: null,
+    status: null,
+    statusNote: null,
+    statusKnown: null,
+    endReason: null,
+    attempts: [],
+    tools: [],
+    steps: new Map(),
+    issues: [],
+    ignoredEventCount: 0,
+    /** Scheduled durable retries (`llm/retry`), for attempt-outcome correlation. */
+    retries: [],
+    /** Raw evidence retained for auditing: the settlements exactly as recorded. */
+    settlements: [],
+  }
+
+  const toolByCallId = new Map()
+  const toolOrder = []
+
+  for (const event of ordered) {
+    const data = event.data ?? {}
+    if (data.turn !== undefined && data.turn !== turn) continue
+    switch (event.type) {
+      case 'turn/start':
+        result.turnStartMs = result.turnStartMs === null ? event.time : Math.min(result.turnStartMs, event.time)
+        break
+      case 'turn/end': {
+        const mapped = turnEndStatus(data.reason)
+        result.turnEndMs = event.time
+        result.status = mapped.status
+        result.statusNote = mapped.note
+        result.statusKnown = mapped.known
+        result.endReason = data.reason ?? null
+        break
+      }
+      case 'step/start': {
+        const step = result.steps.get(data.step) ?? { step: data.step, startMs: null, endMs: null }
+        step.startMs = step.startMs === null ? event.time : Math.min(step.startMs, event.time)
+        result.steps.set(data.step, step)
+        break
+      }
+      case 'step/end': {
+        const step = result.steps.get(data.step) ?? { step: data.step, startMs: null, endMs: null }
+        step.endMs = event.time
+        result.steps.set(data.step, step)
+        break
+      }
+      case 'assistant/message':
+      case 'assistant/attempt': {
+        const decoded = decodeStreamRecords(data.stream)
+        const issues = decoded.issues.map(issue => ({ ...issue, where: 'durable-stream', seq: event.seq }))
+        result.issues.push(...issues)
+        const durableUsage = data.usage && typeof data.usage === 'object' && Number.isFinite(data.usage.outputTokens)
+          ? data.usage
+          : null
+        const inStreamUsage = durableUsage === null ? lastUsageChunk(decoded) : null
+        const attempt = {
+          attemptId: null,
+          turn: data.turn ?? turn,
+          step: data.step ?? null,
+          ...settlementClassification(event.type, data),
+          samples: [],
+          chunks: decoded.chunks,
+          decoded,
+          usage: durableUsage ?? inStreamUsage,
+          usageSource: durableUsage !== null ? 'assistant-settlement' : (inStreamUsage !== null ? 'in-stream-usage-chunk' : null),
+          startedAtMs: null,
+          settledAtMs: event.time,
+          settlementSeq: event.seq,
+          settlementEventType: event.type,
+          interrupted: data.interrupted === true,
+          issues,
+          streamQuality: decoded.quality,
+        }
+        if (estimate !== undefined) {
+          attempt.samples = samplesFromChunks(decoded.chunks, estimate)
+        } else {
+          attempt.samples = samplesFromChunks(decoded.chunks)
+        }
+        result.attempts.push(attempt)
+        result.settlements.push({
+          seq: event.seq,
+          time: event.time,
+          type: event.type,
+          turn: data.turn,
+          step: data.step,
+          usage: durableUsage,
+          interrupted: data.interrupted === true,
+          recordCount: decoded.recordCount,
+          deltaCount: decoded.deltaCount,
+          streamQuality: decoded.quality,
+        })
+        break
+      }
+      case 'llm/retry':
+        result.retries.push({
+          kind: 'retry-scheduled',
+          seq: event.seq,
+          timeMs: event.time,
+          turn: data.turn,
+          step: data.step,
+          retryId: typeof data.retryId === 'string' ? data.retryId : null,
+          retry: Number.isFinite(data.retry) ? data.retry : null,
+        })
+        break
+      case 'tool/call': {
+        if (typeof data.callId !== 'string') {
+          result.issues.push({ kind: 'tool-call-without-call-id', seq: event.seq })
+          break
+        }
+        const record = toolByCallId.get(data.callId) ?? {
+          callId: data.callId,
+          name: data.name ?? null,
+          startMs: event.time,
+          status: 'running',
+          argumentsRaw: data.arguments ?? null,
+          step: data.step ?? null,
+        }
+        record.startMs = Math.min(record.startMs, event.time)
+        if (typeof data.name === 'string') record.name = data.name
+        toolByCallId.set(data.callId, record)
+        if (!toolOrder.includes(data.callId)) toolOrder.push(data.callId)
+        break
+      }
+      case 'tool/result': {
+        const callId = Array.isArray(data.message?.content) ? data.message.content[0]?.toolCallId ?? null : null
+        if (callId === null) {
+          result.issues.push({ kind: 'tool-result-without-call-id', seq: event.seq })
+          break
+        }
+        const record = toolByCallId.get(callId)
+        if (record === undefined) {
+          result.issues.push({ kind: 'unmatched-tool-result', seq: event.seq, callId })
+          break
+        }
+        const block = data.message.content[0]
+        record.endMs = event.time
+        record.status = data.error !== undefined || block?.isError === true ? 'error' : 'ok'
+        record.errorName = data.error?.name ?? null
+        break
+      }
+      default:
+        result.ignoredEventCount += 1
+    }
+  }
+
+  result.tools = toolOrder.map(callId => toolByCallId.get(callId))
+  for (const record of result.tools) {
+    if (record.endMs === undefined) {
+      result.issues.push({ kind: 'unmatched-tool-call', callId: record.callId, name: record.name })
+    }
+  }
+
+  // Attempt order is settlement order, which is step order for a normal turn.
+  result.attempts.sort((a, b) => (a.settlementSeq ?? 0) - (b.settlementSeq ?? 0))
+  // An `assistant/attempt` outcome is `unknown` until a durable `llm/retry`
+  // proves it was retried; the correlation runs after every settlement is in
+  // place so ordering inside the log cannot hide the pairing.
+  applyRetryOutcomes(result.attempts, result.retries)
+  return result
+}
+
+function lastUsageChunk(decoded) {
+  for (let index = decoded.chunks.length - 1; index >= 0; index -= 1) {
+    const chunk = decoded.chunks[index].chunk
+    if (chunk?.type === 'usage' && chunk.usage && Number.isFinite(chunk.usage.outputTokens)) return chunk.usage
+  }
+  return null
+}
+
+function samplesFromChunks(chunks, estimate = heuristicTokenWeight) {
+  const samples = []
+  for (const entry of chunks) {
+    const sample = sampleFromChunk(entry.timeMs, entry.chunk, estimate)
+    if (sample !== null) samples.push(sample)
+  }
+  return samples
+}
+
+/**
+ * Settlement chronology for one turn, in durable order.
+ *
+ * This is the raw material of the generation-tail measurement: it pairs the
+ * last non-empty model-producing delta of an attempt with the wall-clock time
+ * at which DSH committed that attempt's settlement.
+ */
+function settlementChronology(turnRecord) {
+  return turnRecord.attempts.map(attempt => ({
+    settlementSeq: attempt.settlementSeq,
+    settlementEventType: attempt.settlementEventType,
+    settlementTimeMs: attempt.settledAtMs,
+    turn: attempt.turn,
+    step: attempt.step,
+    usage: attempt.usage,
+    interrupted: attempt.interrupted,
+    streamQuality: attempt.streamQuality,
+    lastDeltaTimeMs: lastGeneratedDeltaTime(attempt.chunks),
+    firstDeltaTimeMs: firstGeneratedDeltaTime(attempt.chunks),
+    deltaCount: attempt.decoded?.deltaCount ?? 0,
+  }))
+}
+
+function lastGeneratedDeltaTime(chunks) {
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    if (isTokenDelta(chunks[index].chunk)) return chunks[index].timeMs
+  }
+  return null
+}
+
+function firstGeneratedDeltaTime(chunks) {
+  for (const entry of chunks) {
+    if (isTokenDelta(entry.chunk)) return entry.timeMs
+  }
+  return null
+}
+
+;Object.assign(__exports, { reconstructFromDurable, settlementChronology })
+			},
+			"src/dsh/index.js": function (__exports) {
+/**
+ * DSH adapter layer.
+ *
+ * The single responsibility of this directory is to translate **verified DSH
+ * 0.1.5-rc.2 raw evidence** into this project's normalized engine events. No
+ * other layer may know about DSH field names:
+ *
+ *   src/core   pure statistics, zero `@deepseek-ai/*` imports
+ *   src/dsh    raw evidence  ->  normalized events   (this directory)
+ *   src/host   in-memory store over normalized events
+ *   src/client presentation only
+ *
+ * Evidence locations for every shape handled here are recorded in
+ * `docs/IMPLEMENTATION_LOG.md`. Where DSH's runtime and DSH's published notes
+ * disagree, the installed runtime wins and the divergence is logged.
+ */
+
+const { DSH_RAW_KIND } = __req("src/dsh/raw.js")
+const { classifyRawEntry } = __req("src/dsh/raw.js")
+const { isAssistantStreamFrame } = __req("src/dsh/raw.js")
+const { isDurableSessionEventEntry } = __req("src/dsh/raw.js")
+const { isTransientLiveChunkEntry } = __req("src/dsh/raw.js")
+const { sessionKeyOf } = __req("src/dsh/raw.js")
+
+const { DECODE_ISSUE } = __req("src/dsh/stream-decoder.js")
+const { RECORD_KIND } = __req("src/dsh/stream-decoder.js")
+const { SETTLEMENT_EVENT_TYPES } = __req("src/dsh/stream-decoder.js")
+const { decodeQuality } = __req("src/dsh/stream-decoder.js")
+const { decodeStreamRecords } = __req("src/dsh/stream-decoder.js")
+const { expandAssistantStream } = __req("src/dsh/stream-decoder.js")
+const { expandAssistantStreamRaw } = __req("src/dsh/stream-decoder.js")
+const { firstTokenTimeOf } = __req("src/dsh/stream-decoder.js")
+
+const { ATTEMPT_OUTCOME } = __req("src/dsh/adapter.js")
+const { NORMALIZED_KIND } = __req("src/dsh/adapter.js")
+const { SETTLEMENT_KIND } = __req("src/dsh/adapter.js")
+const { applyRetryOutcomes } = __req("src/dsh/adapter.js")
+const { attemptEvidenceQuality } = __req("src/dsh/adapter.js")
+const { attemptFromDecoded } = __req("src/dsh/adapter.js")
+const { normalizeDurableEvent } = __req("src/dsh/adapter.js")
+const { normalizeLiveChunk } = __req("src/dsh/adapter.js")
+const { normalizeStreamFrame } = __req("src/dsh/adapter.js")
+const { settlementClassification } = __req("src/dsh/adapter.js")
+const { transientEndClassification } = __req("src/dsh/adapter.js")
+const { turnEndStatus } = __req("src/dsh/adapter.js")
+
+const { FRAME_ISSUE } = __req("src/dsh/live-path.js")
+const { LiveTurnAccumulator } = __req("src/dsh/live-path.js")
+const { accumulateLive } = __req("src/dsh/live-path.js")
+
+const { reconstructFromDurable } = __req("src/dsh/durable-path.js")
+const { settlementChronology } = __req("src/dsh/durable-path.js")
+
+;Object.assign(__exports, { DSH_RAW_KIND, classifyRawEntry, isAssistantStreamFrame, isDurableSessionEventEntry, isTransientLiveChunkEntry, sessionKeyOf, DECODE_ISSUE, RECORD_KIND, SETTLEMENT_EVENT_TYPES, decodeQuality, decodeStreamRecords, expandAssistantStream, expandAssistantStreamRaw, firstTokenTimeOf, ATTEMPT_OUTCOME, NORMALIZED_KIND, SETTLEMENT_KIND, applyRetryOutcomes, attemptEvidenceQuality, attemptFromDecoded, normalizeDurableEvent, normalizeLiveChunk, normalizeStreamFrame, settlementClassification, transientEndClassification, turnEndStatus, FRAME_ISSUE, LiveTurnAccumulator, accumulateLive, reconstructFromDurable, settlementChronology })
+			},
+			"src/dsh/client-feed.js": function (__exports) {
+/**
+ * Browser event-window feed: `SessionEventWindow` -> normalized engine events.
+ *
+ * This is the Phase 3 seam chosen in Phase 0: the Client
+ * `ctx.sessions.binding(id).eventSource` publishes every window mutation
+ * synchronously, and one window carries **both** evidence planes — durable
+ * `SessionEvent` rows (`type: 'event'`) and client-folded transient
+ * `assistant/live-chunk` rows (`type: 'transient'`). No host telemetry channel,
+ * no session projection, no synthetic durable events, no DOM scraping.
+ *
+ * The feed is the only module that understands the window wire shape
+ * (`change.kind`, entry discriminants). Everything it emits is a normalized
+ * event in this project's vocabulary, ready for `TurnTelemetryStore` and the
+ * live UI state machine. It holds no timers, no statistics and no React.
+ *
+ * Window-change semantics (verified at
+ * `dsh-api-session-controller/lib/types/client/contract/events.d.ts:41-61`):
+ *
+ *   replace          the complete contiguous window was swapped (initial
+ *                    snapshot, reload rebaseline) — reset and replay it
+ *   append           new tail entries arrived — feed exactly those
+ *   prepend          older history was paged in — irrelevant to the live tail,
+ *                    and ingesting it after newer events would replay stale
+ *                    turns out of order, so it is deliberately ignored
+ *   settle-assistant attemptId + durable settlement entry atomically
+ *                    superseding one attempt's transient rows (or a bare
+ *                    abandonment when the entry is absent)
+ */
+
+const { NORMALIZED_KIND, normalizeDurableEvent, normalizeLiveChunk } = __req("src/dsh/adapter.js")
+
+/** Feed-level diagnostics; every entry names why evidence could not be used. */
+const FEED_ISSUE = Object.freeze({
+  MALFORMED_WINDOW: 'malformed-window',
+  UNKNOWN_CHANGE: 'unknown-window-change',
+  MISSING_CHANGE_ENTRIES: 'missing-change-entries',
+  MALFORMED_ENTRY: 'malformed-entry',
+  DUPLICATE_TRANSIENT: 'duplicate-transient-row',
+  DUPLICATE_DURABLE: 'duplicate-durable-event',
+  UNMATCHED_SETTLEMENT: 'settlement-without-attempt-id',
+})
+
+class SessionEventFeed {
+  /**
+   * @param {{
+   *   sessionId: string,
+   *   onEvent: (event: object) => void,
+   *   onIssue?: (issue: {kind: string, detail?: unknown}) => void,
+   * }} options
+   */
+  constructor({ sessionId, onEvent, onIssue = () => {} }) {
+    this.sessionId = sessionId ?? null
+    this.onEvent = onEvent
+    this.onIssue = onIssue
+    /** Whether the initial full window pass has happened. */
+    this.initialized = false
+    this.revision = -1
+    /** Durable sequence dedupe within the current window generation. */
+    this.durableSeqs = new Set()
+    /** Transient row dedupe keyed by the fold's event object identity. */
+    this.transientRows = new WeakSet()
+    /** The transient attempt that has not received a durable settlement yet. */
+    this.openAttemptId = null
+    /** Open turn number, or `null`. */
+    this.openTurn = null
+    this.issues = []
+    /** Counts of deliberately skipped window changes, for diagnostics. */
+    this.ignoredPrepends = 0
+    this.eventCount = 0
+  }
+
+  issue(kind, detail) {
+    const record = detail === undefined ? { kind } : { kind, detail }
+    this.issues.push(record)
+    this.onIssue(record)
+  }
+
+  emit(event) {
+    this.eventCount += 1
+    this.onEvent(event)
+  }
+
+  /** Consume one published window snapshot (idempotent per revision). */
+  applyWindow(window) {
+    if (window === null || typeof window !== 'object' || !Array.isArray(window.entries)) {
+      this.issue(FEED_ISSUE.MALFORMED_WINDOW)
+      return
+    }
+    const change = window.change && typeof window.change === 'object' ? window.change : { kind: 'replace' }
+
+    if (!this.initialized) {
+      this.initialized = true
+      this.revision = Number.isFinite(window.revision) ? window.revision : -1
+      this.processEntries(window.entries)
+      return
+    }
+
+    if (Number.isFinite(window.revision) && window.revision <= this.revision) return
+    if (Number.isFinite(window.revision)) this.revision = window.revision
+
+    switch (change.kind) {
+      case 'append':
+        if (!Array.isArray(change.entries)) {
+          this.issue(FEED_ISSUE.MISSING_CHANGE_ENTRIES, 'append')
+          return
+        }
+        this.processEntries(change.entries)
+        return
+      case 'prepend':
+        // Older history: outside the live tail and out of chronological order
+        // relative to what has already been consumed. Counted, never guessed at.
+        this.ignoredPrepends += 1
+        return
+      case 'replace':
+        this.rebaseline()
+        this.processEntries(window.entries)
+        return
+      case 'settle-assistant':
+        this.applySettlement(change)
+        return
+      default:
+        this.issue(FEED_ISSUE.UNKNOWN_CHANGE, change.kind)
+    }
+  }
+
+  /**
+   * A `replace` is a rebaseline (reload, reconnect, window swap). All previous
+   * dedupe state belongs to the superseded window generation; replaying the new
+   * window from scratch is what keeps the live state consistent with the rows
+   * the fold actually publishes now.
+   */
+  rebaseline() {
+    this.durableSeqs = new Set()
+    this.transientRows = new WeakSet()
+    this.openAttemptId = null
+    this.openTurn = null
+    this.emit({ kind: 'window-rebaseline', timeMs: null })
+  }
+
+  applySettlement(change) {
+    const attemptId = typeof change.attemptId === 'string' ? change.attemptId : null
+    const entry = change.entry
+    if (attemptId === null) {
+      this.issue(FEED_ISSUE.UNMATCHED_SETTLEMENT)
+      return
+    }
+    if (entry === undefined || entry === null) {
+      // The fold publishes a bare settle-assistant when the attempt ended
+      // without a durable settlement: transient abandonment, the only place
+      // `abandoned` can be derived client-side.
+      if (this.openAttemptId === attemptId) this.openAttemptId = null
+      this.emit({
+        kind: NORMALIZED_KIND.ATTEMPT_ABANDON,
+        attemptId,
+        turn: this.openTurn,
+        timeMs: null,
+        settlementKind: 'none',
+        surfaceCommitted: false,
+        attemptOutcome: 'abandoned',
+      })
+      return
+    }
+    const event = entry.event
+    if (event && typeof event === 'object' && Number.isFinite(event.seq)) this.durableSeqs.add(event.seq)
+    const normalized = normalizeDurableEvent(event)
+    if (normalized.kind !== NORMALIZED_KIND.ATTEMPT_SETTLE) {
+      this.issue(FEED_ISSUE.UNMATCHED_SETTLEMENT, normalized.kind)
+      return
+    }
+    if (this.openAttemptId === attemptId) this.openAttemptId = null
+    this.emit({ ...normalized, attemptId })
+  }
+
+  processEntries(entries) {
+    for (const entry of entries) {
+      if (entry === null || typeof entry !== 'object') {
+        this.issue(FEED_ISSUE.MALFORMED_ENTRY)
+        continue
+      }
+      if (entry.type === 'transient') {
+        this.processTransient(entry.event)
+        continue
+      }
+      if (entry.type === 'event') {
+        this.processDurable(entry.event)
+        continue
+      }
+      this.issue(FEED_ISSUE.MALFORMED_ENTRY, entry.type)
+    }
+  }
+
+  processTransient(row) {
+    if (row === null || typeof row !== 'object') {
+      this.issue(FEED_ISSUE.MALFORMED_ENTRY)
+      return
+    }
+    if (this.transientRows.has(row)) {
+      this.issue(FEED_ISSUE.DUPLICATE_TRANSIENT)
+      return
+    }
+    this.transientRows.add(row)
+    const normalized = normalizeLiveChunk(row)
+    if (normalized.kind === NORMALIZED_KIND.IGNORED) {
+      this.issue(FEED_ISSUE.MALFORMED_ENTRY, normalized.reason)
+      return
+    }
+    // Attempt identity exists only on the transient plane: a change of
+    // `attemptId` between consecutive rows is the client-side attempt
+    // boundary (the browser never sees the host `start` frame).
+    if (normalized.attemptId !== this.openAttemptId) {
+      this.openAttemptId = normalized.attemptId
+      this.emit({
+        kind: NORMALIZED_KIND.ATTEMPT_START,
+        attemptId: normalized.attemptId,
+        turn: normalized.turn,
+        step: normalized.step,
+        timeMs: normalized.timeMs,
+      })
+    }
+    this.emit({
+      kind: NORMALIZED_KIND.ATTEMPT_DELTA,
+      attemptId: normalized.attemptId,
+      turn: normalized.turn,
+      step: normalized.step,
+      timeMs: normalized.timeMs,
+      chunk: normalized.chunk,
+      phase: normalized.phase,
+      countsAsToken: normalized.countsAsToken,
+    })
+  }
+
+  processDurable(event) {
+    if (event === null || typeof event !== 'object' || !Number.isFinite(event.seq)) {
+      this.issue(FEED_ISSUE.MALFORMED_ENTRY)
+      return
+    }
+    if (this.durableSeqs.has(event.seq)) {
+      this.issue(FEED_ISSUE.DUPLICATE_DURABLE, event.seq)
+      return
+    }
+    this.durableSeqs.add(event.seq)
+    const normalized = normalizeDurableEvent(event)
+    switch (normalized.kind) {
+      case NORMALIZED_KIND.IGNORED:
+        return
+      case NORMALIZED_KIND.TURN_START:
+        this.openTurn = normalized.turn
+        this.emit(normalized)
+        return
+      case NORMALIZED_KIND.TURN_END:
+        this.openTurn = null
+        this.openAttemptId = null
+        this.emit(normalized)
+        return
+      case NORMALIZED_KIND.ATTEMPT_SETTLE:
+        // No `settle-assistant` change here (fixture-style replay, or a fold
+        // that appends the row): correlate to the open transient attempt when
+        // one exists. Attempt identity is never invented when none does.
+        this.emit({ ...normalized, attemptId: this.openAttemptId })
+        if (this.openAttemptId !== null) this.openAttemptId = null
+        return
+      default:
+        this.emit(normalized)
+    }
+  }
+}
+
+;Object.assign(__exports, { FEED_ISSUE, SessionEventFeed })
+			},
+			"src/client/live/live-state.js": function (__exports) {
+/**
+ * The explicit live-UI state machine.
+ *
+ * The eight presentation states are frozen in `docs/UI_SPEC.md` §3. The rule
+ * this module exists to enforce: a React component never *guesses* the current
+ * situation from a handful of possibly-undefined fields. Every transition is an
+ * explicit reaction to one normalized event, and every state has a written
+ * entry and exit condition.
+ *
+ *   inactive              no open turn for this session — render nothing
+ *   pending-first-token   turn/start seen, no first model-producing delta yet;
+ *                         the turn's ONE TTFT stopwatch stage
+ *   streaming-reasoning   active attempt generating reasoning deltas
+ *   streaming-output      active attempt generating text / tool-argument deltas
+ *   tool-running          at least one tool call active — no model TPS
+ *   waiting-model         turn TTFT already frozen; a new step/attempt is
+ *                         started or imminent, no delta yet — never the TTFT
+ *                         counter again
+ *   transition            brief neutral gap (settlement before tool/call, tool
+ *                         result before next step/start, retry backoff) — no
+ *                         stale TPS
+ *   settled               turn/end received — exit live mode immediately
+ *
+ * The machine tracks the *model side* plus a tool-activity counter; numeric
+ * values (TPS, elapsed, tool timer) are read from the `LiveMeter` snapshot by
+ * the presenter, never recomputed here.
+ */
+
+const LiveUiState = Object.freeze({
+  INACTIVE: 'inactive',
+  PENDING_FIRST_TOKEN: 'pending-first-token',
+  STREAMING_REASONING: 'streaming-reasoning',
+  STREAMING_OUTPUT: 'streaming-output',
+  TOOL_RUNNING: 'tool-running',
+  WAITING_MODEL: 'waiting-model',
+  TRANSITION: 'transition',
+  SETTLED: 'settled',
+})
+
+function initialLiveUi() {
+  return {
+    state: LiveUiState.INACTIVE,
+    turn: null,
+    /** Frozen by the first accepted model-producing delta of the turn. */
+    ttftFrozen: false,
+    /** Entry time of the current waiting/transition stage, for its stopwatch. */
+    sinceMs: null,
+    /** Active tool-call counter; > 0 means the tool-running stage owns the view. */
+    activeTools: 0,
+  }
+}
+
+/** Events are normalized vocabulary only — never raw DSH shapes. */
+const LIVE_UI_EVENT = Object.freeze({
+  TURN_START: 'turn-start',
+  TURN_END: 'turn-end',
+  STEP_START: 'step-start',
+  ATTEMPT_START: 'attempt-start',
+  DELTA: 'delta',
+  ATTEMPT_SETTLE: 'attempt-settle',
+  ATTEMPT_ABANDON: 'attempt-abandon',
+  RETRY: 'retry',
+  TOOL_START: 'tool-start',
+  TOOL_END: 'tool-end',
+  RESET: 'reset',
+})
+
+const { INACTIVE, PENDING_FIRST_TOKEN, STREAMING_REASONING, STREAMING_OUTPUT, TOOL_RUNNING, WAITING_MODEL, TRANSITION, SETTLED } = LiveUiState
+
+/** An event naming a different turn than the one on screen changes nothing. */
+function wrongTurn(machine, event) {
+  if (machine.state === INACTIVE) return true
+  if (event.turn === undefined || event.turn === null) return false
+  if (machine.turn === null) return false
+  return event.turn !== machine.turn
+}
+
+function settleTo(machine, event) {
+  // A settlement does not end running tools; the tool stage keeps the view
+  // until the last call settles.
+  if (machine.activeTools > 0) return machine
+  return { ...machine, state: TRANSITION, sinceMs: event.timeMs ?? machine.sinceMs }
+}
+
+/**
+ * Reduce the live UI machine by one normalized event. Pure: returns the same
+ * object when the event changes nothing, so callers can detect no-ops.
+ */
+function reduceLiveUi(machine, event) {
+  if (event === null || typeof event !== 'object') return machine
+  switch (event.type) {
+    case LIVE_UI_EVENT.RESET:
+      return initialLiveUi()
+
+    case LIVE_UI_EVENT.TURN_START: {
+      // A replayed durable turn/start for the open turn must not restart the
+      // TTFT stage or wipe the frozen marker.
+      if (machine.state !== INACTIVE && machine.state !== SETTLED && event.turn === machine.turn) return machine
+      return {
+        state: PENDING_FIRST_TOKEN,
+        turn: event.turn ?? machine.turn,
+        ttftFrozen: false,
+        sinceMs: event.timeMs ?? null,
+        activeTools: 0,
+      }
+    }
+
+    case LIVE_UI_EVENT.TURN_END: {
+      if (wrongTurn(machine, event)) return machine
+      return { ...machine, state: SETTLED, sinceMs: event.timeMs ?? machine.sinceMs, activeTools: 0 }
+    }
+
+    case LIVE_UI_EVENT.STEP_START: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED) return machine
+      if (machine.activeTools > 0) return machine
+      if (!machine.ttftFrozen) {
+        // The turn's one and only first-token stage: later step boundaries
+        // must not restart it.
+        return { ...machine, state: PENDING_FIRST_TOKEN }
+      }
+      return { ...machine, state: WAITING_MODEL, sinceMs: event.timeMs ?? null }
+    }
+
+    case LIVE_UI_EVENT.ATTEMPT_START: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED) return machine
+      if (machine.activeTools > 0) return machine
+      if (!machine.ttftFrozen) return { ...machine, state: PENDING_FIRST_TOKEN }
+      // Turn TTFT is already frozen; a later attempt can only wait.
+      return { ...machine, state: WAITING_MODEL, sinceMs: event.timeMs ?? null }
+    }
+
+    case LIVE_UI_EVENT.DELTA: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED) return machine
+      if (machine.state === INACTIVE) return machine
+      const phase = event.phase === 'reasoning' ? STREAMING_REASONING : STREAMING_OUTPUT
+      // The first accepted delta of the turn freezes the TTFT stopwatch. No
+      // later event in this turn ever returns to pending-first-token.
+      return { ...machine, state: phase, ttftFrozen: true, sinceMs: machine.sinceMs }
+    }
+
+    case LIVE_UI_EVENT.ATTEMPT_SETTLE: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED || machine.state === INACTIVE) return machine
+      return settleTo(machine, event)
+    }
+
+    case LIVE_UI_EVENT.ATTEMPT_ABANDON: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED || machine.state === INACTIVE) return machine
+      return settleTo(machine, event)
+    }
+
+    case LIVE_UI_EVENT.RETRY: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED || machine.state === INACTIVE) return machine
+      // Retry backoff is a neutral gap: no model deltas, no tool yet.
+      return settleTo(machine, event)
+    }
+
+    case LIVE_UI_EVENT.TOOL_START: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED || machine.state === INACTIVE) return machine
+      return { ...machine, activeTools: machine.activeTools + 1, state: TOOL_RUNNING }
+    }
+
+    case LIVE_UI_EVENT.TOOL_END: {
+      if (wrongTurn(machine, event) || machine.state === SETTLED || machine.state === INACTIVE) return machine
+      const remaining = Math.max(0, machine.activeTools - 1)
+      if (remaining > 0) return { ...machine, activeTools: remaining }
+      // The last tool ended. Until the next step/start arrives the UI is in
+      // the neutral gap the specification calls transition; if the turn never
+      // produced a first token the TTFT stage is still the honest view.
+      if (!machine.ttftFrozen) return { ...machine, activeTools: 0, state: PENDING_FIRST_TOKEN }
+      return { ...machine, activeTools: 0, state: TRANSITION, sinceMs: event.timeMs ?? null }
+    }
+
+    default:
+      return machine
+  }
+}
+
+;Object.assign(__exports, { LiveUiState, initialLiveUi, LIVE_UI_EVENT, reduceLiveUi })
+			},
+			"src/client/live/live-presenter.js": function (__exports) {
+/**
+ * Live presenter: machine state + LiveMeter snapshot -> render view model.
+ *
+ * Layering rule enforced here: statistics (trailing TPS, TTFT, tool-episode
+ * wall time, turn elapsed) come from the `LiveMeter` snapshot untouched; the
+ * state machine decides *what kind* of view this is; the presenter combines the
+ * two and applies the defensive guards. The React layer receives a finished
+ * view model and computes nothing.
+ *
+ * Defensive guards, each of which fails toward "show less", never toward
+ * "show a stale number":
+ *
+ *   - machine inactive/settled, or meter idle/settled  -> hidden
+ *   - streaming state without a live streaming snapshot -> transition
+ *     (a settlement or tool event the machine has not folded yet must not leak
+ *     the previous TPS)
+ *   - pending state with an already-frozen TTFT        -> waiting
+ *   - tool stage resolved from the machine OR the meter -> tool view, values
+ *     strictly from the meter snapshot
+ *
+ * Every view carries `approximate` derived from metric quality: live TPS is
+ * `estimated`, so it always renders with `≈`.
+ */
+
+const { MetricQuality, requiresApproximateMarker } = __req("src/core/quality-model.js")
+const { LiveUiState, initialLiveUi, reduceLiveUi } = __req("src/client/live/live-state.js")
+
+const HIDDEN_STATES = new Set([LiveUiState.INACTIVE, LiveUiState.SETTLED])
+
+class LivePresenter {
+  /** @param {object} [machine] initial machine state (per session instance) */
+  constructor(machine = initialLiveUi()) {
+    this.machine = machine
+  }
+
+  /** Apply one normalized event to the state machine; returns the event count. */
+  apply(event) {
+    this.machine = reduceLiveUi(this.machine, event)
+    return this.machine
+  }
+
+  /**
+   * Project the current presentation model.
+   *
+   * @param {{sessionId?: string}} unused reserved for future per-session keys
+   * @param {object|null} snapshot `LiveMeter.snapshot(nowMs)` output
+   * @param {number} nowMs presentation instant (wall clock)
+   */
+  project(snapshot, nowMs) {
+    const machine = this.machine
+    if (HIDDEN_STATES.has(machine.state)) return hidden(machine)
+    if (!snapshot || snapshot.phase === 'idle' || snapshot.phase === 'settled') return hidden(machine)
+
+    const turn = machine.turn ?? snapshot.turn ?? null
+    const elapsedMs = Number.isFinite(snapshot.turnElapsedMs) ? snapshot.turnElapsedMs : 0
+
+    // Tool stage: both the machine's activity counter and the meter's phase
+    // are accepted as evidence, so a missed event cannot show a stale TPS.
+    const tooling = machine.state === LiveUiState.TOOL_RUNNING || snapshot.phase === 'tool'
+    if (tooling) {
+      if (snapshot.phase === 'tool') {
+        return {
+          kind: 'tool',
+          state: LiveUiState.TOOL_RUNNING,
+          turn,
+          count: snapshot.runningToolCount ?? 0,
+          names: snapshot.runningToolNames ?? [],
+          toolElapsedMs: snapshot.toolElapsedMs ?? 0,
+          elapsedMs,
+        }
+      }
+      // The machine believes tools run but the meter does not: inconsistent
+      // evidence. The neutral transition view is the only honest rendering.
+      return { kind: 'transition', state: LiveUiState.TRANSITION, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+    }
+
+    switch (machine.state) {
+      case LiveUiState.PENDING_FIRST_TOKEN: {
+        if (snapshot.ttftMs === null) {
+          return { kind: 'ttft', state: machine.state, turn, counterMs: elapsedMs, elapsedMs }
+        }
+        // The meter already froze the turn TTFT; the machine lagged a delta.
+        return { kind: 'waiting', state: LiveUiState.WAITING_MODEL, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+      }
+
+      case LiveUiState.STREAMING_REASONING:
+      case LiveUiState.STREAMING_OUTPUT: {
+        const phase = machine.state === LiveUiState.STREAMING_REASONING ? 'reasoning' : 'output'
+        if (snapshot.phase === 'streaming' && Number.isFinite(snapshot.tps)) {
+          const quality = snapshot.tpsQuality ?? MetricQuality.ESTIMATED
+          return {
+            kind: 'streaming',
+            state: machine.state,
+            turn,
+            phase,
+            tps: snapshot.tps,
+            quality,
+            /** Live TPS is estimated unconditionally; `≈` is mandatory. */
+            approximate: requiresApproximateMarker(quality),
+            elapsedMs,
+          }
+        }
+        // Streaming state without streaming evidence: never render the last
+        // TPS as if it were current.
+        return { kind: 'transition', state: LiveUiState.TRANSITION, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+      }
+
+      case LiveUiState.WAITING_MODEL:
+        return { kind: 'waiting', state: machine.state, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+
+      case LiveUiState.TRANSITION:
+        return { kind: 'transition', state: machine.state, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+
+      default:
+        return hidden(machine)
+    }
+  }
+}
+
+function hidden(machine) {
+  return { kind: 'hidden', state: machine.state, turn: machine.turn }
+}
+
+function stageWait(machine, nowMs) {
+  if (!Number.isFinite(machine.sinceMs) || !Number.isFinite(nowMs)) return 0
+  return Math.max(0, nowMs - machine.sinceMs)
+}
+
+;Object.assign(__exports, { LivePresenter })
+			},
+			"src/client/live/controller.js": function (__exports) {
+/**
+ * Client presentation controller: the runtime wire between the DSH event
+ * window, the telemetry store and the per-session live UI machines.
+ *
+ * Data flow (frozen architecture):
+ *
+ *   ctx.sessions.binding(id).eventSource   (SessionEventWindow, both planes)
+ *       -> SessionEventFeed                (src/dsh: window wire -> normalized)
+ *       -> TurnTelemetryStore + LivePresenter (per session, keyed state)
+ *       -> React LiveMeter                 (throttled presentation only)
+ *
+ * Invariants this class exists to keep:
+ *
+ *   1. **Session/turn isolation.** One presenter (and therefore one UI state
+ *      machine) per session; the store is keyed by `(sessionId, turn)`. There
+ *      is no global "current turn" anywhere.
+ *   2. **One subscription per session.** `attach` is idempotent; switching
+ *      sessions back and forth can never double-subscribe an eventSource.
+ *   3. **No statistics here.** The controller routes events; TPS, TTFT, tool
+ *      wall time and elapsed come from `LiveMeter` snapshots.
+ *   4. **Bounded lifecycle.** `dispose()` unsubscribes every eventSource and
+ *      disposes the store — the HMR path.
+ */
+
+const { TurnTelemetryStore } = __req("src/host/telemetry-design.js")
+const { turnKey } = __req("src/core/types.js")
+const { NORMALIZED_KIND, applyRetryOutcomes } = __req("src/dsh/index.js")
+const { SessionEventFeed } = __req("src/dsh/client-feed.js")
+const { LivePresenter } = __req("src/client/live/live-presenter.js")
+
+/** Presentation refresh cadence: 200 ms == at most ~5 rendered updates/s. */
+const DEFAULT_REFRESH_MS = 200
+
+/**
+ * @param {{
+ *   sessions?: {binding?: (id: string) => {eventSource: object}|undefined},
+ *   refreshMs?: number,
+ *   debug?: boolean,
+ *   nowMs?: () => number,
+ * }} [options]
+ */
+function createController({
+  sessions,
+  refreshMs = DEFAULT_REFRESH_MS,
+  debug = false,
+  nowMs = () => Date.now(),
+} = {}) {
+  const store = new TurnTelemetryStore()
+  /** @type {Map<string, object>} sessionId -> session state */
+  const sessionsMap = new Map()
+  const listeners = new Set()
+  let disposed = false
+
+  const log = debug
+    ? (...args) => { try { console.debug('[dsh-turn-performance-meter]', ...args) } catch { /* never break telemetry for a log */ } }
+    : () => {}
+
+  function emit() {
+    if (disposed) return
+    for (const listener of [...listeners]) {
+      try { listener() } catch { /* a broken listener must not stop ingestion */ }
+    }
+  }
+
+  /** Resolve the turn record an event belongs to; `null` when none exists. */
+  function lookupRecord(state, turn) {
+    if (Number.isFinite(turn)) return store.turns.get(turnKey(state.sessionId, turn)) ?? null
+    return state.currentRecord
+  }
+
+  function applyEvent(state, event) {
+    const sessionId = state.sessionId
+    switch (event.kind) {
+      case 'window-rebaseline': {
+        // A `replace` swapped the window (reload/reconnect). Local live state
+        // belongs to the superseded window; replay begins from a clean machine
+        // rather than fabricating continuity.
+        log('stream gap/rebaseline', sessionId)
+        state.presenter.apply({ type: 'reset' })
+        state.currentRecord = null
+        state.openAttemptId = null
+        return
+      }
+
+      case NORMALIZED_KIND.TURN_START: {
+        state.currentRecord = store.beginTurn({ sessionId, turn: event.turn, timeMs: event.timeMs })
+        state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs })
+        log('turn open', sessionId, event.turn)
+        return
+      }
+
+      case NORMALIZED_KIND.STEP_START: {
+        state.presenter.apply({ type: 'step-start', turn: event.turn, step: event.step, timeMs: event.timeMs })
+        return
+      }
+
+      case NORMALIZED_KIND.STEP_END:
+        return
+
+      case NORMALIZED_KIND.ATTEMPT_START: {
+        const record = lookupRecord(state, event.turn)
+        if (record !== null) {
+          store.beginAttempt(record, { attemptId: event.attemptId, step: event.step, startedAtMs: event.timeMs })
+        }
+        state.openAttemptId = event.attemptId
+        state.presenter.apply({
+          type: 'attempt-start',
+          attemptId: event.attemptId,
+          turn: record !== null ? record.turn : event.turn,
+          timeMs: event.timeMs,
+        })
+        log('attempt start', sessionId, event.attemptId)
+        return
+      }
+
+      case NORMALIZED_KIND.ATTEMPT_DELTA: {
+        const record = lookupRecord(state, event.turn)
+        if (record === null) {
+          // No turn boundary has been observed (a window that no longer
+          // contains this turn's `turn/start`). Fabricating a start time would
+          // corrupt TTFT, so the delta is reported and dropped instead.
+          state.droppedDeltas = (state.droppedDeltas ?? 0) + 1
+          return
+        }
+        let attempt = record.attemptIndex.get(event.attemptId)
+        if (attempt === undefined) {
+          // The feed always emits `attempt-start` before an attempt's first
+          // delta; this is the defensive path for a mid-turn attach.
+          attempt = store.beginAttempt(record, {
+            attemptId: event.attemptId,
+            step: event.step ?? null,
+            startedAtMs: event.timeMs,
+          })
+        }
+        const sample = store.acceptChunk(record, attempt, { timeMs: event.timeMs, chunk: event.chunk })
+        if (sample === null) return
+        // Only model-producing deltas drive the state machine; the machine's
+        // first accepted delta is what freezes the turn TTFT stage.
+        state.presenter.apply({
+          type: 'delta',
+          attemptId: event.attemptId,
+          turn: record.turn,
+          phase: sample.phase,
+          timeMs: sample.timeMs,
+        })
+        return
+      }
+
+      case NORMALIZED_KIND.ATTEMPT_SETTLE: {
+        const record = lookupRecord(state, event.turn)
+        const attemptId = event.attemptId ?? state.openAttemptId
+        if (record !== null && attemptId !== null && attemptId !== undefined) {
+          const attempt = record.attemptIndex.get(attemptId)
+          if (attempt !== undefined) {
+            store.settleAttempt(attempt, {
+              settledAtMs: event.timeMs,
+              settlementKind: event.settlementKind,
+              surfaceCommitted: event.surfaceCommitted,
+              attemptOutcome: event.attemptOutcome,
+              usage: event.usage ?? null,
+              usageSource: event.usageSource ?? null,
+              settlementSeq: event.seq,
+            })
+          }
+        }
+        if (state.openAttemptId === attemptId) state.openAttemptId = null
+        state.presenter.apply({
+          type: 'attempt-settle',
+          attemptId,
+          turn: record !== null ? record.turn : event.turn,
+          timeMs: event.timeMs,
+        })
+        log('attempt settle', sessionId, attemptId, event.settlementKind, event.attemptOutcome)
+        return
+      }
+
+      case NORMALIZED_KIND.ATTEMPT_ABANDON: {
+        const record = lookupRecord(state, event.turn)
+        const attemptId = event.attemptId ?? state.openAttemptId
+        if (record !== null && attemptId !== null && attemptId !== undefined) {
+          const attempt = record.attemptIndex.get(attemptId)
+          if (attempt !== undefined) {
+            store.settleAttempt(attempt, {
+              settledAtMs: event.timeMs ?? null,
+              settlementKind: event.settlementKind ?? 'none',
+              surfaceCommitted: false,
+              attemptOutcome: event.attemptOutcome ?? 'abandoned',
+            })
+          }
+        }
+        if (state.openAttemptId === attemptId) state.openAttemptId = null
+        state.presenter.apply({
+          type: 'attempt-abandon',
+          attemptId,
+          turn: record !== null ? record.turn : event.turn,
+          timeMs: event.timeMs ?? null,
+        })
+        log('attempt abandoned', sessionId, attemptId)
+        return
+      }
+
+      case NORMALIZED_KIND.RETRY_SCHEDULED: {
+        const record = lookupRecord(state, event.turn)
+        if (record !== null) applyRetryOutcomes(record.attempts, [event])
+        state.presenter.apply({
+          type: 'retry',
+          turn: record !== null ? record.turn : event.turn,
+          timeMs: event.timeMs,
+        })
+        log('retry scheduled', sessionId, event.turn, event.step)
+        return
+      }
+
+      case NORMALIZED_KIND.TOOL_CALL: {
+        const record = lookupRecord(state, event.turn)
+        if (record === null) return
+        store.toolStarted(record, { callId: event.callId, name: event.name, timeMs: event.timeMs })
+        state.presenter.apply({ type: 'tool-start', turn: record.turn, timeMs: event.timeMs, name: event.name })
+        log('tool start', sessionId, event.name)
+        return
+      }
+
+      case NORMALIZED_KIND.TOOL_RESULT: {
+        const record = lookupRecord(state, event.turn)
+        if (record === null) return
+        const call = store.toolSettled(record, {
+          callId: event.callId,
+          timeMs: event.timeMs,
+          status: event.status,
+        })
+        if (call === null) {
+          state.unmatchedToolResults = (state.unmatchedToolResults ?? 0) + 1
+          return
+        }
+        state.presenter.apply({ type: 'tool-end', turn: record.turn, timeMs: event.timeMs })
+        log('tool end', sessionId, call.name, event.status)
+        return
+      }
+
+      case NORMALIZED_KIND.TURN_END: {
+        const record = lookupRecord(state, event.turn)
+        if (record === null) return
+        const settled = store.endTurn(record, { timeMs: event.timeMs, status: event.status, statusNote: event.note })
+        state.currentRecord = null
+        state.openAttemptId = null
+        state.presenter.apply({ type: 'turn-end', turn: event.turn, timeMs: event.timeMs, status: event.status })
+        log('turn close', sessionId, event.turn, event.status)
+        if (Array.isArray(settled?.consistencyIssues) && settled.consistencyIssues.length > 0) {
+          log('quality downgrade', ...settled.consistencyIssues)
+        }
+        return
+      }
+
+      case NORMALIZED_KIND.IGNORED:
+        state.ignoredEvents = (state.ignoredEvents ?? 0) + 1
+        return
+
+      default:
+        state.unknownEvents = (state.unknownEvents ?? 0) + 1
+    }
+  }
+
+  return {
+    refreshMs,
+    store,
+
+    /**
+     * Subscribe one session's eventSource exactly once. Returns `true` when a
+     * subscription now exists for this session (fresh or already attached).
+     */
+    attach(sessionId) {
+      if (disposed || typeof sessionId !== 'string' || sessionId === '') return false
+      if (sessionsMap.has(sessionId)) return true
+      const binding = typeof sessions?.binding === 'function' ? sessions.binding(sessionId) : undefined
+      if (binding === undefined || binding === null || binding.eventSource === undefined || binding.eventSource === null) {
+        log('binding unavailable', sessionId)
+        return false
+      }
+      const source = binding.eventSource
+      const state = {
+        sessionId,
+        presenter: new LivePresenter(),
+        feed: null,
+        unsub: null,
+        currentRecord: null,
+        openAttemptId: null,
+        ignoredEvents: 0,
+        droppedDeltas: 0,
+        unmatchedToolResults: 0,
+        unknownEvents: 0,
+      }
+      state.feed = new SessionEventFeed({
+        sessionId,
+        onEvent: event => {
+          applyEvent(state, event)
+          // Every handled event invalidates presentation. The listener is the
+          // scheduler's coalescing notify, so this stays cheap even at one
+          // call per streamed delta (no render happens here — the scheduler
+          // throttles, and the visible ticker already covers updates).
+          emit()
+        },
+        onIssue: issue => {
+          state.feedIssues = state.feedIssues ?? []
+          if (state.feedIssues.length < 100) state.feedIssues.push(issue)
+          log('feed issue', sessionId, issue.kind, issue.detail)
+        },
+      })
+      const read = () => {
+        try {
+          state.feed.applyWindow(source.getSnapshot())
+        } catch (error) {
+          log('event window read failed', sessionId, error)
+        }
+      }
+      // Subscribe first, then the initial full pass: a mutation racing the
+      // attach is delivered by the subscription and the revision guard makes
+      // the overlapping read idempotent.
+      state.unsub = source.subscribe(read)
+      read()
+      sessionsMap.set(sessionId, state)
+      log('session attach', sessionId)
+      return true
+    },
+
+    /** Detach presentation interest; the subscription itself stays (see docs). */
+    detach(sessionId) {
+      log('session detach', sessionId)
+    },
+
+    subscribe(listener) {
+      if (typeof listener !== 'function') return () => {}
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+
+    /** The current presentation model for one session (hidden when unknown). */
+    project(sessionId, atMs = nowMs()) {
+      if (disposed || typeof sessionId !== 'string' || !sessionsMap.has(sessionId)) {
+        return { kind: 'hidden', state: 'inactive', turn: null }
+      }
+      const snapshot = store.liveSnapshot(sessionId, atMs)
+      return sessionsMap.get(sessionId).presenter.project(snapshot, atMs)
+    },
+
+    /** Diagnostics for tests and debug tooling. */
+    diagnostics(sessionId) {
+      const state = sessionsMap.get(sessionId)
+      if (state === undefined) return null
+      return {
+        feedIssues: state.feedIssues ?? [],
+        ignoredEvents: state.ignoredEvents ?? 0,
+        droppedDeltas: state.droppedDeltas ?? 0,
+        unmatchedToolResults: state.unmatchedToolResults ?? 0,
+        unknownEvents: state.unknownEvents ?? 0,
+      }
+    },
+
+    /** Attached session ids, for lifecycle assertions. */
+    attachedSessions() {
+      return [...sessionsMap.keys()]
+    },
+
+    /** Tear down every subscription and all stored state (HMR / unload). */
+    dispose() {
+      if (disposed) return
+      disposed = true
+      for (const state of sessionsMap.values()) {
+        try { state.unsub?.() } catch { /* best effort */ }
+      }
+      sessionsMap.clear()
+      listeners.clear()
+      store.dispose()
+      log('controller disposed')
+    },
+  }
+}
+
+;Object.assign(__exports, { DEFAULT_REFRESH_MS, createController })
+			},
+			"src/client/live/refresh.js": function (__exports) {
+/**
+ * Presentation refresh scheduler.
+ *
+ * The ingestion path is high-frequency (hundreds to thousands of deltas per
+ * attempt — the recorded t5 fixture alone has 1315 transient frames), while
+ * React must render at a bounded cadence. The contract:
+ *
+ *   - while the meter is visible, exactly ONE interval renders, at
+ *     `intervalMs` (default 200 ms -> at most ~5 FPS of number updates);
+ *   - while the meter is hidden, an event schedules at most one coalesced
+ *     zero-delay render, so a turn start becomes visible immediately without
+ *     per-event rendering;
+ *   - `stop()`/`dispose()` clear every timer — unmount, HMR remount and
+ *     session switches must never leave an interval behind;
+ *   - at no point are there more than two live timers (one interval, one
+ *     pending leading render).
+ *
+ * Deltas are never dropped on the data side: the scheduler throttles
+ * *presentation only*. The timer implementations are injectable so tests can
+ * assert the structural properties without wall-clock benchmarks.
+ */
+
+/**
+ * @param {{
+ *   intervalMs?: number,
+ *   onRender: () => void,
+ *   setTimeoutImpl?: typeof setTimeout,
+ *   clearTimeoutImpl?: typeof clearTimeout,
+ *   setIntervalImpl?: typeof setInterval,
+ *   clearIntervalImpl?: typeof clearInterval,
+ * }} options
+ */
+function createPresentationScheduler({
+  intervalMs = 200,
+  onRender,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+}) {
+  if (typeof onRender !== 'function') throw new TypeError('scheduler requires an onRender callback')
+  if (!(intervalMs > 0) || !Number.isFinite(intervalMs)) throw new TypeError('intervalMs must be a finite number > 0')
+
+  let intervalId = null
+  let leadId = null
+  let disposed = false
+
+  function flushLead() {
+    leadId = null
+    if (!disposed) onRender()
+  }
+
+  return {
+    intervalMs,
+
+    /** Whether the periodic presentation ticker is running. */
+    get ticking() {
+      return intervalId !== null
+    },
+
+    /** Whether `dispose()` has permanently disabled this scheduler. */
+    get disposed() {
+      return disposed
+    },
+
+    /** Count of live timers this scheduler owns (0..2), for structural tests. */
+    get timerCount() {
+      return (intervalId === null ? 0 : 1) + (leadId === null ? 0 : 1)
+    },
+
+    /**
+     * Data-side notification. While the ticker runs it already covers the
+     * update; while hidden, one coalesced zero-delay render is scheduled.
+     */
+    notify() {
+      if (disposed || intervalId !== null) return
+      if (leadId === null) leadId = setTimeoutImpl(flushLead, 0)
+    },
+
+    /** Begin the bounded periodic refresh (called while the view is visible). */
+    start() {
+      if (disposed || intervalId !== null) return
+      intervalId = setIntervalImpl(onRender, intervalMs)
+    },
+
+    /** Stop the ticker (called when the view hides or the component unmounts). */
+    stop() {
+      if (intervalId !== null) {
+        clearIntervalImpl(intervalId)
+        intervalId = null
+      }
+      if (leadId !== null) {
+        clearTimeoutImpl(leadId)
+        leadId = null
+      }
+    },
+
+    /** Final cleanup: no timer may survive this call. */
+    dispose() {
+      disposed = true
+      this.stop()
+    },
+  }
+}
+
+;Object.assign(__exports, { createPresentationScheduler })
+			},
+			"src/client/format.js": function (__exports) {
+/**
+ * Display formatting.
+ *
+ * Two rules govern everything here:
+ *
+ *   1. Absent evidence renders as an em dash. A missing measurement must never
+ *      be shown as `0`, because that would claim a measured zero.
+ *   2. Quality is *not* baked into the string. Whether a value deserves a `≈`
+ *      prefix or a quality indicator is decided by the renderer from the
+ *      metric's declared quality, so the exactness claim has exactly one home.
+ */
+
+const DASH = '—'
+
+function formatSeconds(ms, digits = 1) {
+  if (!Number.isFinite(ms)) return DASH
+  return `${(ms / 1000).toFixed(digits)}s`
+}
+
+/** Running TTFT counter form: `2.80 s`. */
+function formatCountdown(ms, digits = 2) {
+  if (!Number.isFinite(ms)) return DASH
+  return `${(ms / 1000).toFixed(digits)} s`
+}
+
+/**
+ * TPS display. Three-significant-figure behaviour without exponent notation at
+ * the low end, where token rates are most often read.
+ */
+function formatTps(value) {
+  if (!Number.isFinite(value)) return DASH
+  if (value >= 100) return Math.round(value).toString()
+  if (value >= 10) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
+function formatTokens(value) {
+  if (!Number.isFinite(value)) return DASH
+  return Math.round(value).toLocaleString('en-US')
+}
+
+/** Compact elapsed form used on secondary lines: `133.6s`, `2m42s`. */
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return DASH
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const totalSeconds = Math.round(ms / 1000)
+  return `${Math.floor(totalSeconds / 60)}m${String(totalSeconds % 60).padStart(2, '0')}s`
+}
+
+
+
+;Object.assign(__exports, { DASH, formatSeconds, formatCountdown, formatTps, formatTokens, formatDuration })
+			},
+			"src/client/live/live-format.js": function (__exports) {
+/**
+ * Live-view formatting.
+ *
+ * Formatting rules with a correctness dimension:
+ *
+ *   - a live TPS value always carries `≈`: its quality is `estimated`
+ *     unconditionally (METRICS_SPEC §11.5), so a bare number would imply a
+ *     provider-exactness that does not exist;
+ *   - absent evidence renders as the shared em dash, never as `0`;
+ *   - tool names truncate with an ellipsis instead of stretching the pill;
+ *   - a multi-tool label always distinguishes itself from a single tool.
+ */
+
+const { formatCountdown, formatDuration, formatSeconds, formatTps, DASH } = __req("src/client/format.js")
+
+/**
+ * Approximate TPS rendering: `≈338`, `≈38.4`, `—` for absent evidence.
+ * Exact values would render bare, but live values are never exact.
+ */
+function formatApproxTps(value, approximate = true) {
+  if (!Number.isFinite(value)) return DASH
+  return approximate ? `≈${formatTps(value)}` : formatTps(value)
+}
+
+/** Turn elapsed / stage elapsed: `17.3s`, `2m22s` (shared duration rules). */
+function formatElapsed(ms) {
+  return formatDuration(ms)
+}
+
+/** TTFT stopwatch and waiting stopwatch: `2.80 s`. */
+function formatStopwatch(ms, digits = 2) {
+  return formatCountdown(ms, digits)
+}
+
+/** Long tool names are truncated so the pill never overflows. */
+function truncateToolName(name, max = 20) {
+  if (typeof name !== 'string' || name.length === 0) return DASH
+  if (name.length <= max) return name
+  return `${name.slice(0, max - 1)}…`
+}
+
+/**
+ * Compact tool label:
+ *
+ *   1 tool   `pwsh`            (long names truncate)
+ *   2+ tools `pwsh +1`         (first name plus how many others)
+ *   unknown  `×2`
+ *
+ * The count suffix is locale-independent on purpose: digits stay tabular and
+ * the single/multi distinction survives every locale.
+ */
+function formatToolLabel(names, count) {
+  const list = Array.isArray(names) ? names.filter(name => typeof name === 'string' && name.length > 0) : []
+  const total = Number.isFinite(count) && count > 0 ? count : list.length
+  if (total <= 0) return DASH
+  if (total === 1) return truncateToolName(list[0] ?? DASH)
+  const first = list.length > 0 ? `${truncateToolName(list[0])} ` : ''
+  return `${first}+${total - 1}`
+}
+
+
+
+;Object.assign(__exports, { DASH, formatTps, formatApproxTps, formatElapsed, formatStopwatch, truncateToolName, formatToolLabel })
+			},
+			"src/client/live/live-css.js": function (__exports) {
+/**
+ * Scoped stylesheet for the live meter.
+ *
+ * Delivered as a module string rather than a `.css` file because the DSH
+ * browser module table loads a single classic script: there is no CSS import
+ * mechanism inside a factory bundle, and a runtime-injected `<style>` is the
+ * shipped pattern (the module system claims `style[data-plugin]` tags for HMR
+ * bookkeeping — `dsh-client-modules/lib/client.js` `claimStyles`).
+ *
+ * Rules:
+ *   - every selector is scoped under `.dsh-tpm-root`; no element/global
+ *     selectors, no body/typography pollution;
+ *   - colours come from host `--dsw-*` alias tokens so both themes follow the
+ *     active DSH theme; fallbacks cover token absence;
+ *   - the output accent is the one plugin-defined value, scoped to the root
+ *     with a light default and the dark override keyed on
+ *     `body[data-ds-dark-theme]`, the same selector the shipped theme CSS uses;
+ *   - tabular digits for every number; no fixed viewport width (no
+ *     `44.25rem`-style hard widths), so narrow docks wrap instead of
+ *     overflowing horizontally;
+ *   - `prefers-reduced-motion` disables the only transition.
+ */
+
+const LIVE_STYLE_ID = 'dsh-tpm-live-style'
+
+const LIVE_CSS = `
+.dsh-tpm-root {
+  --dsh-tpm-accent: #d9480f;
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+body[data-ds-dark-theme] .dsh-tpm-root {
+  --dsh-tpm-accent: #ff922b;
+}
+.dsh-tpm-pill {
+  box-sizing: border-box;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 14px;
+  border-radius: 12px;
+  border: .5px solid var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
+  background: var(--dsw-specific-tip, rgba(127, 130, 135, .10));
+  color: var(--dsw-alias-label-primary, #3c3c3d);
+  font-size: 13px;
+  line-height: 20px;
+  transition: opacity 160ms ease;
+}
+.dsh-tpm-lead {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.dsh-tpm-label {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #7f8287);
+}
+.dsh-tpm-tps {
+  color: var(--dsh-tpm-accent);
+  font-size: 16px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .01em;
+}
+.dsh-tpm-unit {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-secondary, #7f8287);
+  margin-left: -4px;
+}
+.dsh-tpm-stage {
+  color: var(--dsw-alias-label-secondary, #7f8287);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.dsh-tpm-sep {
+  width: .5px;
+  align-self: stretch;
+  min-height: 16px;
+  background: var(--dsw-alias-border-l1, rgba(127, 130, 135, .35));
+  opacity: .8;
+}
+.dsh-tpm-elapsed {
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.dsh-tpm-tool {
+  color: var(--dsw-alias-label-primary, #3c3c3d);
+  font-size: 13px;
+  font-weight: 550;
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-tpm-muted {
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+@media (prefers-reduced-motion: reduce) {
+  .dsh-tpm-pill { transition: none; }
+}
+`
+
+;Object.assign(__exports, { LIVE_STYLE_ID, LIVE_CSS })
+			},
+			"src/client/live/LiveMeter.js": function (__exports) {
+/**
+ * Live meter React component (browser only — this module imports `react`, so
+ * Node tests must not import it directly; `test/client-bundle.test.js` loads
+ * it through the built bundle with a stubbed module table).
+ *
+ * Rendering contract:
+ *
+ *   - the component receives a finished view model from `LivePresenter` and
+ *     formats strings; it never parses events, never computes TPS/TTFT/tool
+ *     time, and never touches raw `SessionEvent` shapes;
+ *   - exactly one presentation ticker per mounted meter (200 ms default),
+ *     started while visible and cleared whenever it is not — unmount, HMR
+ *     remount and session switches all destroy it;
+ *   - high-frequency numbers are plain text: NO `aria-live` region, so a
+ *     screen reader is never read a new TPS five times a second. The root
+ *     carries a per-state `aria-label` and `data-state` instead;
+ *   - the style tag is reference-counted: at most one `#dsh-tpm-live-style`
+ *     exists at any time, and the last unmount removes it (HMR-clean).
+ */
+
+const { createElement: h, useEffect, useReducer, useRef, useState } = __ext("react")
+const { createPresentationScheduler } = __req("src/client/live/refresh.js")
+const { formatApproxTps, formatElapsed, formatStopwatch, formatToolLabel } = __req("src/client/live/live-format.js")
+const { LIVE_CSS, LIVE_STYLE_ID } = __req("src/client/live/live-css.js")
+
+/** Reference count for the shared style tag. */
+let styleUsers = 0
+
+/**
+ * Debug counters (always cheap increments; read only via the debug handle).
+ * They exist because the browser is the only place where the full chain
+ * controller-notify -> scheduler -> setView -> DOM can be observed together.
+ */
+const diagnostics = {
+  schedulerCreated: 0,
+  notifyCalls: 0,
+  renderCalls: 0,
+  refreshCalls: 0,
+  currentScheduler: null,
+}
+
+function meterDiagnostics() {
+  return diagnostics
+}
+
+function acquireStyle() {
+  let element = document.getElementById(LIVE_STYLE_ID)
+  if (element === null) {
+    element = document.createElement('style')
+    element.id = LIVE_STYLE_ID
+    element.setAttribute('data-plugin', 'dsh-turn-performance-meter')
+    element.textContent = LIVE_CSS
+    document.head.appendChild(element)
+  }
+  styleUsers += 1
+  return () => {
+    styleUsers = Math.max(0, styleUsers - 1)
+    if (styleUsers === 0) {
+      const owned = document.getElementById(LIVE_STYLE_ID)
+      if (owned !== null) owned.remove()
+    }
+  }
+}
+
+/** Accessibility name per presentation state — transitions, not digits. */
+function stateLabelKey(view) {
+  switch (view.kind) {
+    case 'ttft': return 'ttft'
+    case 'streaming': return view.phase === 'reasoning' ? 'thinking' : 'output'
+    case 'tool': return 'tool'
+    case 'waiting': return 'waiting'
+    case 'transition': return 'transition'
+    default: return 'meterLabel'
+  }
+}
+
+function pill(view, label) {
+  const ariaLabel = `${label} · ${formatElapsed(view.elapsedMs ?? 0)}`
+  return h('div', { className: 'dsh-tpm-root', 'data-state': view.state, 'data-turn': view.turn ?? '', 'aria-label': ariaLabel },
+    h('div', { className: 'dsh-tpm-pill' }, pillContent(view, label)))
+}
+
+function pillContent(view, label) {
+  switch (view.kind) {
+    case 'ttft':
+      return [
+        h('span', { key: 'c', className: 'dsh-tpm-lead' }, formatStopwatch(view.counterMs ?? 0)),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
+      ]
+
+    case 'streaming':
+      return [
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
+        h('span', { key: 't', className: 'dsh-tpm-tps' }, formatApproxTps(view.tps, view.approximate)),
+        h('span', { key: 'u', className: 'dsh-tpm-unit' }, 'tokens/s'),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    case 'tool':
+      return [
+        h('span', { key: 'n', className: 'dsh-tpm-tool' }, formatToolLabel(view.names, view.count)),
+        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatElapsed(view.toolElapsedMs ?? 0)}`),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    case 'waiting':
+      return [
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
+        h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatStopwatch(view.waitMs ?? 0)}`),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    case 'transition':
+      return [
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, `${label}…`),
+        h('span', { key: 's', className: 'dsh-tpm-sep' }),
+        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+      ]
+
+    default:
+      return null
+  }
+}
+
+/**
+ * Build the slot component. The controller and translate function close over
+ * the registration site (`src/client/main.js`), so the component itself stays
+ * a pure function of `(props, controller state)`.
+ *
+ * @param {{controller: object, t: (key: string) => string, debug?: boolean}} options
+ */
+function makeMeterSlot({ controller, t, debug = false }) {
+  const label = typeof t === 'function' ? t : (key => key)
+
+  return function TurnPerformanceMeter(props) {
+    const sessionId = typeof props?.sessionId === 'string' && props.sessionId !== '' ? props.sessionId : null
+    const [, bump] = useReducer(count => count + 1, 0)
+
+    // Debug-only: report the seat's actual prop shape once per session value,
+    // so a missing `sessionId` standard prop shows up as itself rather than as
+    // a silently hidden meter. No per-delta logging exists anywhere.
+    const seenSession = useRef(null)
+    if (debug && seenSession.current !== sessionId) {
+      seenSession.current = sessionId
+      try {
+        console.debug('[dsh-tpm] slot prop shape', Object.keys(props ?? {}), 'sessionId =', sessionId)
+      } catch { /* diagnostics must never break render */ }
+    }
+
+    /**
+     * The projected view is *state*, refreshed only by the presentation
+     * scheduler (and once per mount/session change) — never during render.
+     * The conversation dock re-renders its occupants on every chat update
+     * (streaming chunks arrive far faster than the refresh interval); if each
+     * of those renders re-projected `Date.now()`, the DOM would update at the
+     * chat's cadence and bypass the 100–250 ms presentation throttle. Keeping
+     * the last projected view in state means parent re-renders reuse identical
+     * values, and the ticker remains the only writer of visible numbers.
+     */
+    const [view, setView] = useState(() => (
+      sessionId === null
+        ? { kind: 'hidden', state: 'inactive', turn: null }
+        : controller.project(sessionId, Date.now())
+    ))
+
+    const sessionIdRef = useRef(sessionId)
+    sessionIdRef.current = sessionId
+    const refreshView = () => {
+      diagnostics.refreshCalls += 1
+      const id = sessionIdRef.current
+      setView(id === null
+        ? { kind: 'hidden', state: 'inactive', turn: null }
+        : controller.project(id, Date.now()))
+    }
+
+    const schedulerRef = useRef(null)
+    if (schedulerRef.current === null) {
+      diagnostics.schedulerCreated += 1
+      schedulerRef.current = createPresentationScheduler({
+        intervalMs: controller.refreshMs,
+        onRender: () => {
+          diagnostics.renderCalls += 1
+          refreshView()
+          bump()
+        },
+      })
+      diagnostics.currentScheduler = schedulerRef.current
+    }
+    const scheduler = schedulerRef.current
+
+    useEffect(() => acquireStyle(), [])
+
+    // One eventSource subscription per session (attach is idempotent); the
+    // unsubscribe runs on session switch and on unmount/HMR. The view is
+    // re-projected here so a session switch never shows the old session's
+    // numbers while waiting for the next ticker tick.
+    useEffect(() => {
+      if (sessionId === null) {
+        refreshView()
+        return undefined
+      }
+      const attached = controller.attach(sessionId)
+      if (debug) {
+        try { console.debug('[dsh-tpm] attach', sessionId, '=>', attached) } catch { /* diagnostics */ }
+      }
+      refreshView()
+      return controller.subscribe(() => {
+        diagnostics.notifyCalls += 1
+        scheduler.notify()
+      })
+    }, [sessionId, controller, scheduler, debug])
+
+    // The single presentation ticker: on only while visible, destroyed on
+    // hide and on unmount. Data-side ingestion is never throttled.
+    const visible = view.kind !== 'hidden'
+    diagnostics.renderCalls += 0 // render itself is counted separately from ticker renders
+    useEffect(() => {
+      if (!visible) {
+        scheduler.stop()
+        return undefined
+      }
+      scheduler.start()
+      return () => scheduler.stop()
+    }, [visible, scheduler])
+
+    if (!visible) return null
+    return pill(view, label(stateLabelKey(view)))
+  }
+}
+
+;Object.assign(__exports, { meterDiagnostics, makeMeterSlot })
+			},
+			"src/client/live/locale.js": function (__exports) {
+/**
+ * Locale dictionary and translate wrapper.
+ *
+ * Visible production strings go through the DSH Client locale service
+ * (`ctx.locale.register(ns, {en, zh})` + `ctx.locale.bind(ns)`, verified at
+ * `dsh-client-locale/lib/types/client/index.d.ts:198-215`). The wrapper keeps
+ * an in-module English fallback so a locale-service failure degrades to a
+ * readable label instead of to raw keys.
+ *
+ * Tool names and numeric units stay locale-independent: `tokens/s` and the
+ * `pwsh +1` count suffix are identical in both locales, which is also what the
+ * reference screenshots show.
+ */
+
+const LOCALE_NS = 'turnPerformanceMeter'
+
+const LOCALE_DICTS = Object.freeze({
+  en: Object.freeze({
+    meterLabel: 'Live turn performance',
+    ttft: 'first response timer',
+    thinking: 'thinking',
+    output: 'output',
+    waiting: 'waiting for model',
+    transition: 'processing',
+    tool: 'tool',
+    tpsUnit: 'tokens/s',
+  }),
+  zh: Object.freeze({
+    meterLabel: '实时性能',
+    ttft: '首响应计时',
+    thinking: '思考',
+    output: '输出',
+    waiting: '等待模型',
+    transition: '处理中',
+    tool: '工具',
+    tpsUnit: 'tokens/s',
+  }),
+})
+
+/**
+ * Wrap the locale-bound translate function with an English fallback.
+ *
+ * `bind(ns)` returns a function looked up against the active language at call
+ * time, so locale switches are picked up on the next render. If the service is
+ * absent, throws, or returns the key itself, the built-in `en` entry (or the
+ * key) is used — never `undefined` in visible UI.
+ *
+ * @param {unknown} rawT the `ctx.locale.bind(LOCALE_NS)` result, or null
+ * @returns {(key: string) => string}
+ */
+function wrapTranslate(rawT) {
+  return (key) => {
+    if (typeof rawT === 'function') {
+      try {
+        const value = rawT(key)
+        if (typeof value === 'string' && value.length > 0 && value !== key) return value
+      } catch { /* fall through to the built-in dictionary */ }
+    }
+    return LOCALE_DICTS.en[key] ?? key
+  }
+}
+
+;Object.assign(__exports, { LOCALE_NS, LOCALE_DICTS, wrapTranslate })
+			},
+			"src/client/main.js": function (__exports) {
+/**
+ * Browser plugin entry (the bundle's module exports).
+ *
+ * Wiring, in order:
+ *   1. register the `turnPerformanceMeter` locale namespace (en + zh);
+ *   2. create the presentation controller over `ctx.sessions`;
+ *   3. dispose both on fiber teardown (HMR-safe);
+ *   4. inject an independent `turn-performance-meter` entry into
+ *      `conversation.composer.dock` — additive, `order: -10` places it
+ *      directly beside the composer while the native `stats` occupant
+ *      (order 0) stays untouched.
+ *
+ * Service keys (`slots`, `sessions`, `locale`) are the Cordis service names;
+ * the package names they arrive from are declared in `package.json`
+ * `dsh.client.inject`. React itself comes from the browser module table seed —
+ * never from a runtime dependency.
+ */
+
+const { createController } = __req("src/client/live/controller.js")
+const { makeMeterSlot, meterDiagnostics } = __req("src/client/live/LiveMeter.js")
+const { LOCALE_DICTS, LOCALE_NS, wrapTranslate } = __req("src/client/live/locale.js")
+
+const inject = ['slots', 'sessions', 'locale']
+
+/**
+ * Diagnostic switch (default OFF). When the browser local-storage key
+ * `dsh-turn-performance-meter.debug` is `1`, the controller logs lifecycle
+ * events (session attach, turn open/close, attempt/tool boundaries, quality
+ * downgrades, rebaselines) through `console.debug` and publishes a read-only
+ * diagnostics handle on `window.__dshTurnPerformanceMeter`. Per-delta logging
+ * never happens, in either mode.
+ */
+function debugEnabled() {
+  try {
+    return typeof window !== 'undefined'
+      && window.localStorage?.getItem('dsh-turn-performance-meter.debug') === '1'
+  } catch {
+    return false
+  }
+}
+
+function apply(ctx) {
+  const debug = debugEnabled()
+
+  let disposeLocale = () => {}
+  try {
+    const result = ctx.locale?.register?.(LOCALE_NS, LOCALE_DICTS)
+    if (typeof result === 'function') disposeLocale = result
+  } catch { /* a missing locale service must not block the meter */ }
+
+  let rawTranslate = null
+  try {
+    rawTranslate = typeof ctx.locale?.bind === 'function' ? ctx.locale.bind(LOCALE_NS) : null
+  } catch { /* fall back to the built-in dictionary */ }
+  const t = wrapTranslate(rawTranslate)
+
+  const controller = createController({ sessions: ctx.sessions, debug })
+
+  /**
+   * Cordis effect semantics (verified live): `ctx.effect(fn)` runs `fn`
+   * immediately as setup and calls the **returned** function at fiber
+   * teardown — the same shape as the shipped `ctx.effect(() =>
+   * ctx.webServer.register(...))` call sites. Registering the disposal body
+   * directly would dispose the controller at startup, which is exactly the
+   * failure this comment exists to prevent.
+   */
+  ctx.effect(() => {
+    if (debug) {
+      try {
+        window.__dshTurnPerformanceMeter = {
+          controller,
+          diagnostics: (sessionId) => controller.diagnostics(sessionId),
+          attachedSessions: () => controller.attachedSessions(),
+        }
+      } catch { /* diagnostics must never break telemetry */ }
+    }
+    return () => {
+      controller.dispose()
+      if (debug) {
+        try { delete window.__dshTurnPerformanceMeter } catch { /* ignore */ }
+      }
+      try { disposeLocale() } catch { /* best effort */ }
+    }
+  })
+
+  if (debug) {
+    try {
+      window.__dshTurnPerformanceMeter.meter = () => {
+        const diag = meterDiagnostics()
+        const scheduler = diag.currentScheduler
+        return {
+          schedulerCreated: diag.schedulerCreated,
+          notifyCalls: diag.notifyCalls,
+          renderCalls: diag.renderCalls,
+          refreshCalls: diag.refreshCalls,
+          scheduler: scheduler === null ? null : {
+            ticking: scheduler.ticking,
+            disposed: scheduler.disposed,
+            timerCount: scheduler.timerCount,
+            intervalMs: scheduler.intervalMs,
+          },
+        }
+      }
+    } catch { /* diagnostics must never break telemetry */ }
+  }
+
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+    name: 'conversation.composer.dock',
+    id: 'turn-performance-meter',
+    order: -10,
+  }, makeMeterSlot({ controller, t, debug })))
+}
+
+;Object.assign(__exports, { inject, apply })
+			}
+		}
+		return __req("src/client/main.js")
+	},
+})
