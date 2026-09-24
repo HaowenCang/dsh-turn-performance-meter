@@ -7,8 +7,8 @@ Use this file as the running engineering record. Do not replace evidence with va
 - Date: 2026-04-25 (local session)
 - DSH version: `0.1.5-rc.2` (`@deepseek-ai/dsh`, `dsh --version` → `0.1.5-rc.2`, exit 0)
 - Node version: see `node --version` recorded in the Phase 0 command transcript
-- Profile: `web` at `C:\Users\20659\.dsh\profiles\web`
-- DSH checkout inspected: `C:\Users\20659\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh`
+- Profile: `web` at `<user-home>\.dsh\profiles\web`
+- DSH checkout inspected: `<user-home>\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh`
   (installed packages under `...\dsh\node_modules\@deepseek-ai\*`, each with `lib/*.js` + `lib/types/**/*.d.ts`)
 - Project path: `E:\Projects\DSHarness\dsh-turn-performance-meter`
 
@@ -28,11 +28,11 @@ Use this file as the running engineering record. Do not replace evidence with va
 Exit 0, 109 packages. Relevant rows:
 
 ```text
-dsh-profile-web C:\Users\20659\.dsh\profiles\web (PRIVATE)
-├── @dsh-external/dsh-super-injector@link:E:/Projects/DSHarness/Plugins/dsh-routing-suite/injector-release
+dsh-profile-web <user-home>\.dsh\profiles\web (PRIVATE)
+├── @dsh-external/dsh-super-injector@link:<local-checkout>/injector-release
 ├─┬ @linxin666/dsh-web-all@0.3.24          (community bundle: 20+ client UI plugins)
 ├─┬ dsh-cost-meter@1.7.33
-├── dsh-vibe-usage-sync@link:E:/Projects/DSHarness/dsh-vibe-usage-sync
+├── dsh-vibe-usage-sync@link:<local-checkout>/dsh-vibe-usage-sync
 ├─┬ dsh-watcher@0.4.1
 └─┬ ... (dsh-document-selection-ask, dsh-mail-notify)
 ```
@@ -50,8 +50,8 @@ The command emits a partial document and then fails. Recorded honestly:
 - stderr, before the composed document:
 
 ```text
-dsh: [C:\Users\20659\.dsh\profiles\web\cordis.patch.yml] patch: entry "vision-tool" not found
-dsh: [C:\Users\20659\.dsh\profiles\web\cordis.patch.yml] patch: entry "opencode-go-session-header" not found
+dsh: [<user-home>\.dsh\profiles\web\cordis.patch.yml] patch: entry "vision-tool" not found
+dsh: [<user-home>\.dsh\profiles\web\cordis.patch.yml] patch: entry "opencode-go-session-header" not found
 ```
 
 - The process aborts after the dump (observed `exit: -1` through the PowerShell wrapper). The two patch entries declare
@@ -1114,13 +1114,18 @@ New/changed test files this phase: `live-state`, `live-presenter`, `live-format`
 The phase started with **no git repository** (recorded in §3.1). A local repository was initialized at phase end
 (`git init -b main`) and the complete project tree — the Phase 0–2 baseline plus every Phase 3 change — was committed
 as the initial commit `feat: complete phase 3 live performance meter` (115 files) after a sensitive-information scan
-of `fixtures/`, `dev/`, `docs/` and the source tree (pass — no credentials, tokens, private endpoints or secrets in
-the committable tree; the only credential-shaped strings are the literal example placeholder `Bearer token` inside
-recorded prompt context, a file-content SHA1 digest of `~/.dsh/AGENTS.md`, session/message UUIDs and MCP tool names —
-all benign evidence). Deliberately excluded by `.gitignore`: `dev/screenshots/`, `dev/scratch/`,
-`dev/verify-*.txt` (test dumps), `node_modules/`. GitHub synchronization is
-blocked solely because no confirmed remote exists (`git remote -v` is empty); no remote URL was invented and no
-repository was created. The working tree beyond this phase's files contains no unrelated pre-existing changes
+of `fixtures/`, `dev/`, `docs/` and the source tree. That scan checked for credentials, tokens, private endpoints and
+secrets in the committable tree and found none: the only credential-shaped strings are the literal example placeholder
+`Bearer token` inside a recorded tool schema, a file-content SHA1 digest of the workspace instruction file, session and
+message UUIDs, and MCP tool names — all benign. The scan did **not**, however, treat inlined prompt context as a privacy
+surface, and the fixtures did carry two such disclosures (the maintainer's personal workspace instruction file verbatim,
+and a local injector runtime-context block) plus machine-specific absolute paths. Those were found by the public-release
+audit and removed by `scripts/sanitize-fixtures.mjs` before the repository was published; the redaction rules and the
+verification that structural evidence survived are documented in `fixtures/README.md`. Deliberately excluded by
+`.gitignore`: `dev/screenshots/`, `dev/scratch/`,
+`dev/verify-*.txt` (test dumps), `node_modules/`. GitHub synchronization was
+blocked at that point solely because no confirmed remote existed (`git remote -v` is empty); no remote URL was invented
+and no repository was created. The working tree beyond this phase's files contained no unrelated pre-existing changes
 (there was nothing else — the directory was not under version control; the only untracked leftovers are the ignored
 test dump `dev/verify-phase2.txt`, the ignored screenshot folder and `dev/scratch/fixture-b1.txt`).
 

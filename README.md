@@ -227,3 +227,9 @@ Do not start from visual polish. The order is: local API reconnaissance → tele
 The executable task list and acceptance gates are in `docs/TASKS.md`. The prompt to start DeepSeek V4.1 Flash is in `docs/START_PROMPT.md`.
 
 可执行任务列表与验收门槛见 `docs/TASKS.md`；启动 DeepSeek V4.1 Flash 的提示词见 `docs/START_PROMPT.md`。
+
+## 8. License / 许可证
+
+This project is licensed under the MIT License. See [LICENSE](./LICENSE).
+
+本项目采用 MIT 许可证，详见 [LICENSE](./LICENSE)。

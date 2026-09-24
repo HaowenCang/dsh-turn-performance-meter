@@ -7,3 +7,7 @@ verify-out.txt
 dev/verify-*.txt
 dev/screenshots/
 dev/scratch/
+
+# Pre-sanitization fixture originals: the provenance record of what public-release
+# redaction removed. Kept locally, never published — see fixtures/README.md.
+fixtures/raw/

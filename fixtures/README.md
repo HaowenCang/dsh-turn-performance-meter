@@ -5,10 +5,12 @@ real turn captured from the local DSH `0.1.5-rc.2` host by
 `dev/fixture-recorder`; every file under `derived/` is a deterministic mutation
 of one of those and declares its provenance.
 
-Nothing here is hand-written. A fixture is never edited to make a test pass — if
-a test needs a shape the recordings do not contain, the shape is produced by
+Nothing here is hand-written, and no fixture is ever edited to make a test pass —
+if a test needs a shape the recordings do not contain, the shape is produced by
 `dev/mutate-fixtures.mjs` (a reproducible transformation) or by a local patch
-inside the test, and the recording stays untouched.
+inside the test. The one transformation ever applied to recorded bytes is the
+public-release redaction described under [Sanitization](#sanitization), which is
+deterministic, length-preserving, separately scripted and independently verified.
 
 ## Recorded scenarios
 
@@ -53,7 +55,57 @@ touched field.
 
 `durable` holds verbatim `SessionEvent` envelopes and `transient` holds verbatim
 `AssistantStreamFrame` values; both are copied by
-`dev/harvest-fixtures.mjs` without transformation.
+`dev/harvest-fixtures.mjs` without transformation. The single exception is the
+redaction pass documented below, which rewrites redacted regions in place.
+
+## Sanitization
+
+These recordings are real turns, and a recorded request carries the whole prompt
+context the host sent. That context included two things that must not be
+published: the maintainer's personal workspace instruction file, inlined
+verbatim by the host, and the local injector's runtime-context block (which named
+private projects, private remotes and local provisioning rules). Machine-specific
+absolute paths were captured the same way.
+
+`scripts/sanitize-fixtures.mjs` removes exactly those regions and nothing else.
+Redaction is:
+
+- **length-preserving.** Each replaced region keeps exactly the original
+  JavaScript string length, so the recorded token magnitude, delta boundaries,
+  timings and usage arithmetic are unchanged. Only the text payload of a
+  redacted region differs.
+- **structure-preserving.** Redaction operates only on JSON *string values*. No
+  object key, event type, sequence number, `revision`, `attemptId`, `callId`,
+  `turn`, `step`, `time`, `wallClockMs`, `dt` array, block boundary or `usage`
+  counter is touched, and no entry is added, removed or reordered.
+- **marked.** Every redacted region is filled with a visible `«redacted»` marker
+  sequence, so a reader can tell recorded text from removed text.
+- **deterministic and idempotent.** Re-running the script is a no-op, and
+  `--check` reports whether the published set is already a fixed point.
+
+Two terms remain in the published fixtures because they are part of the recorded
+public DSH surface rather than personal data: the tool-schema entry
+`wechat_notify` and the injector section identifier `dsh-super-injector`. No
+credential, cookie, token, email address or private path is present.
+
+The pre-sanitization originals are deliberately kept out of version control in
+`fixtures/raw/` (ignored). They are the provenance record of what was removed and
+the input the verification below compares against; they are not published, and a
+fresh clone does not have them. To audit the redaction with the originals
+present:
+
+```bash
+node scripts/sanitize-fixtures.mjs --check   # published set must be a fixed point
+node scripts/verify-sanitization.mjs         # no personal content; structure + all string lengths preserved
+```
+
+`verify-sanitization.mjs` compares every published fixture against its original
+and asserts that the event count and order, all structural fields, and the length
+of every string value are identical, so a redaction cannot have silently altered
+the evidence it sits inside.
+
+A newly captured fixture is a new raw recording: sanitize it before committing it
+(`node scripts/sanitize-fixtures.mjs`), then re-run the verification.
 
 ## Offline use
 
