@@ -4,19 +4,34 @@ A turn-level performance meter for DeepSeek Harness (DSH) agent workflows. It is
 
 面向 DeepSeek Harness（DSH）Agent 工作流的 turn 级性能统计插件。它适用于一个 turn 内存在多次模型调用、工具调用、重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计卡片。完成态卡片按整个 turn 聚合。
 
-> Status: Phase 5 complete. The turn-level engine, the DSH adapter with both semantic preflight audits, the production
-> Live Client integration, the **completed turn summary card** and the **hover/focus TPS curve** are in place. The live
-> meter and the completed card run inside the real DSH web client against `ctx.sessions.binding().eventSource`, verified
-> by 365 offline tests and by instrumented real-browser sessions (light, dark, narrow, and a measured 200/50/10 ms
+> Status: Phase 6 complete. The turn-level engine, the DSH adapter with both semantic preflight audits, the production
+> Live Client integration, the **completed turn summary card** and the **hover/focus TPS curve** are in place, and the
+> curve's attempt semantics were hardened against an independent audit of the Phase 5 commit. The live meter and the
+> completed card run inside the real DSH web client against `ctx.sessions.binding().eventSource`, verified by 454
+> offline tests and by instrumented real-browser sessions (light, dark, narrow, and a measured 200/50/10 ms
 > presentation-cadence A/B). Both views are a projection of settled or live evidence and never re-derive a metric in
 > React. The meter sits in `conversation.input.dock`, above the composer; the native statistics keep their own seat
 > below it.
 >
-> 状态：Phase 5 已完成。指标口径、DSH adapter（含两项前置语义审计）、生产级实时 Client 集成、**完成态统计卡片**与
-> **悬停/聚焦 TPS 曲线**均已落地：实时组件与完成态卡片都在真实 DSH Web 客户端中基于
-> `ctx.sessions.binding().eventSource` 运行，由 365 个离线测试与带页面内埋点的真实浏览器会话（light / dark /
-> narrow，以及 200/50/10 ms 刷新节奏 A/B 实测）共同验证。两个视图都只是既有证据的投影，React 层不重新计算任何指标。
-> 插件挂载在 `conversation.input.dock`（输入框上方）；原生统计保留其输入框下方的原位置。
+> Phase 6 corrected two blocking defects and two smaller ones, all found by reading the Phase 5 code rather than by
+> running it: the completed rolling TPS window had been rolled across attempt boundaries (the compressed x-axis is
+> continuous, the measurement window is not); one interval per phase could not express a phase occurring in several
+> disjoint episodes and drew a zero line through the stretches where it was absent; `curve.quality` was derived from
+> `usageComplete` instead of the temporal-shape axis; and core `LiveMeter`/`TurnTelemetryStore` carried a dead
+> `refreshMs` option that implied the core scheduled the screen. Each correction ships with a test the old
+> implementation fails, and three turns were recorded (`t6` tool-only, `t7` failing command, `t8` no-retry).
+>
+> 状态：Phase 6 已完成。指标口径、DSH adapter（含两项前置语义审计）、生产级实时 Client 集成、**完成态统计卡片**与
+> **悬停/聚焦 TPS 曲线**均已落地；曲线的 attempt 语义已按 Phase 5 commit 的独立代码审计完成加固。实时组件与完成态
+> 卡片都在真实 DSH Web 客户端中基于 `ctx.sessions.binding().eventSource` 运行，由 454 个离线测试与带页面内埋点的
+> 真实浏览器会话（light / dark / narrow，以及 200/50/10 ms 刷新节奏 A/B 实测）共同验证。两个视图都只是既有证据的
+> 投影，React 层不重新计算任何指标。插件挂载在 `conversation.input.dock`（输入框上方）；原生统计保留其输入框下方的原位置。
+>
+> Phase 6 修复了两个阻断缺陷与两个次要问题，全部来自阅读 Phase 5 代码而非运行结果：完成态滑动 TPS 窗口曾被跨 attempt
+> 拼接（压缩横轴连续，测量窗口不连续）；每个 phase 仅一个区间无法表达离散 episode，会在 phase 缺席的区段画出零线；
+> `curve.quality` 曾由 `usageComplete` 推导而非时间形状轴；core 的 `LiveMeter` / `TurnTelemetryStore` 残留了一个无效的
+> `refreshMs` 选项，暗示 core 负责屏幕刷新。每项修复都附带一个旧实现必然失败的测试，并新增三段真实录制（`t6` 纯工具、
+> `t7` 命令失败、`t8` 无重试）。
 
 ## 1. Frozen product requirements / 已冻结需求
 
@@ -96,7 +111,17 @@ Levels per axis: `exact` · `calibrated` · `reconstructed` · `partial` · `est
 
 See `docs/METRICS_SPEC.md` §11 for the complete contract, and §13 for the durable/transient evidence rules.
 
+The curve's own quality is the **temporal-shape axis and nothing else** (§8.4), and the curve is built from one rolling
+window **per model attempt**: the compressed x-axis joins attempts so tools consume no width, but the one-second
+measurement window never crosses an attempt boundary, and each phase's evidence is a list of episodes so a phase
+present in two disjoint stretches is drawn as two paths with a gap between them rather than one line through the
+stretch where it was absent.
+
 完整口径见 `docs/METRICS_SPEC.md` §11；durable/transient 两类证据的规则见 §13。
+
+曲线质量仅由**时间形状轴**决定（§8.4）；曲线的滑动窗口**按 attempt 独立计算**：压缩横轴将各 attempt 首尾相接（工具时间为零宽度），
+但 1 秒测量窗口绝不跨 attempt 边界；每个 phase 的证据是 episode 列表，因此分为两段的 phase 会画成两条路径并在其间留出空隙，
+而不会用一条线穿过它缺席的区段。
 
 ## 4. Repository map / 项目结构
 
@@ -122,7 +147,7 @@ dsh-turn-performance-meter/
 ├─ fixtures/            recorded DSH turn evidence (offline; no DSH required)
 │  ├─ README.md
 │  ├─ index.json
-│  ├─ dsh-turns/        five real recorded turns, durable + transient planes verbatim
+│  ├─ dsh-turns/        eight real recorded turns, durable + transient planes verbatim
 │  └─ derived/          four declared synthetic mutations of those recordings
 ├─ src/
 │  ├─ core/             pure metric engine — zero @deepseek-ai/* imports
@@ -132,8 +157,8 @@ dsh-turn-performance-meter/
 │     ├─ live/          state machine, presenter, scheduler, controller, MeterRoot,
 │     │                 React pill, locale, CSS
 │     └─ completed/     completed-card view tree + React binding + card CSS
-├─ test/                31 test files (core / dsh / live / completed / bundle)
-└─ scripts/             verify-structure, bundle-client, build-client
+├─ test/                39 test files (core / dsh / live / completed / bundle)
+└─ scripts/             verify-structure, bundle-client, build-client, sanitize-fixtures
 
 dev/                    dev-only tooling, not part of the bundle
 ├─ fixture-recorder/    injected host recorder: session/event + agent/assistant-stream

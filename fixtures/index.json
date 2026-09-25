@@ -34,6 +34,27 @@
       "scenario": "One turn, one attempt on the deepseek-official adapter: a 1038-fragment reasoning stream followed by a 269-fragment text stream, with authoritative reasoningTokens.",
       "durableEventCount": 21,
       "transientFrameCount": 1315
+    },
+    {
+      "fixture": "t6-tool-only-deepseek-official",
+      "sessionId": "fixture-muh3cccb-4",
+      "scenario": "One turn, four attempts, three pwsh calls, on the deepseek-official adapter. Every attempt after the first emitted reasoning and a tool call and no surface text, so the turn's generated output is tool-call argument and reasoning only; the last attempt settled with no tool call and no message.",
+      "durableEventCount": 38,
+      "transientFrameCount": 440
+    },
+    {
+      "fixture": "t7-failing-pwsh-deepseek-official",
+      "sessionId": "fixture-muh3e9dj-5",
+      "scenario": "One turn, two attempts. Attempt 1 called pwsh with a parameter that does not exist; DSH still recorded the call as successful and delivered the PowerShell error text as the tool result. Attempt 2 answered with ordinary text.",
+      "durableEventCount": 25,
+      "transientFrameCount": 99
+    },
+    {
+      "fixture": "t8-reasoning-no-retry-deepseek-official",
+      "sessionId": "fixture-muh38jd1-3",
+      "scenario": "One turn, one attempt on the deepseek-official adapter with reasoningEffort high. The route was asked for a step-by-step answer specifically to see whether a provider retry would be scheduled; the recording contains no llm/retry event, so this fixture is negative evidence about retry frequency on this route rather than an example of one.",
+      "durableEventCount": 21,
+      "transientFrameCount": 67
     }
   ]
 }

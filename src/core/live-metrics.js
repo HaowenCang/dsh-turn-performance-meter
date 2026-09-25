@@ -33,12 +33,18 @@ export const LivePhase = Object.freeze({
 
 export class LiveMeter {
   /**
-   * @param {{windowMs?:number, refreshMs?:number}} [options]
+   * @param {{windowMs?:number}} [options]
    */
   constructor(options = {}) {
+    /**
+     * The measured interval. Named `windowMs` because it is a definition of the
+     * rate, not a schedule: this class owns no timer and never will. A `refreshMs`
+     * option used to sit beside it and was removed in Phase 6 — it described a
+     * presentation cadence the meter never drove, and the only cadence in the
+     * project is `src/client/live/cadence.js`. Keeping a second, dead copy of that
+     * number here invited a future reader to change the wrong one.
+     */
     this.windowMs = options.windowMs ?? 1000
-    /** UI refresh target; the caller owns the timer, this only reports it. */
-    this.refreshMs = options.refreshMs ?? 200
     this.meter = new SlidingWindowMeter(this.windowMs)
     this.reset()
   }

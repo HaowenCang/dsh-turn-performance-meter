@@ -18,20 +18,67 @@
 import { LiveMeter, LivePhase } from '../core/live-metrics.js'
 import { sampleFromChunk, heuristicTokenWeight } from '../core/token-allocation.js'
 import { compressAttempts } from '../core/time-axis.js'
-import { rollingTpsSeries, peakTps, downsampleSeries, phaseSpans } from '../core/curve.js'
+import {
+  DEFAULT_SAMPLE_EVERY_MS as CURVE_SAMPLE_EVERY_MS,
+  DEFAULT_WINDOW_MS as CURVE_WINDOW_MS,
+  downsampleSeries,
+  peakTps,
+  perAttemptSeries,
+  phaseRuns,
+} from '../core/curve.js'
 import { aggregateTurn } from '../core/aggregate-turn.js'
+import { QualityLevel, clampToAxis, QUALITY_AXIS } from '../core/quality-model.js'
 import { turnKey } from '../core/types.js'
 
 /** How many settled turns are retained per session, newest first. */
 export const DEFAULT_HISTORY_LIMIT = 4
 
+/**
+ * Quality of the completed curve.
+ *
+ * A curve is a **temporal shape** claim, so it is governed by the temporal-shape
+ * axis and by nothing else. The previous revision derived it from
+ * `usageComplete`, which answers a different question: a turn whose provider
+ * reported an exact token total but whose delta timestamps were incomplete was
+ * labelled `calibrated`, and `calibrated` is a claim about the *shape* that the
+ * evidence does not support. Meanwhile a turn with complete, durable, anchored
+ * timing and only partially reported usage was labelled `estimated`, which
+ * understates what is known.
+ *
+ * The token and split axes still govern the numbers printed beside the chart, so
+ * they travel with the curve in `curve.qualityAxes` rather than being folded into
+ * this one label.
+ *
+ * The ceiling is structural: `temporalShape` can never exceed `reconstructed`,
+ * because DSH attaches no token count to a delta and every vertex is therefore a
+ * shape weight. That is why the peak keeps its `≈` at every quality level.
+ *
+ * The argument may be a settled aggregate (which nests the axes under `quality`)
+ * or a bare axes object; both are accepted so that a caller holding only the axes
+ * cannot accidentally get `unavailable` back.
+ */
+export function curveQuality(aggregate) {
+  const axes = aggregate?.quality ?? aggregate
+  const level = axes?.temporalShapeQuality
+  if (level === undefined) return QualityLevel.UNAVAILABLE
+  return clampToAxis(QUALITY_AXIS.TEMPORAL_SHAPE, level)
+}
+
 export class TurnTelemetryStore {
   /**
-   * @param {{estimateTokens?:Function, historyLimit?:number, windowMs?:number, refreshMs?:number}} [options]
+   * @param {{estimateTokens?:Function, historyLimit?:number, windowMs?:number}} [options]
    */
   constructor(options = {}) {
     this.estimateTokens = options.estimateTokens ?? heuristicTokenWeight
     this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT
+    /**
+     * The trailing window a rate is measured over. It is a *metric* contract, not
+     * a refresh rate: nothing in `src/core` or `src/host` schedules presentation,
+     * and the only presentation cadence in the project lives in
+     * `src/client/live/cadence.js`. A `refreshMs` option was removed here in
+     * Phase 6 because it implied otherwise while driving no timer at all.
+     */
+    this.windowMs = options.windowMs ?? CURVE_WINDOW_MS
     /** @type {Map<string, object>} keyed by `sessionId::turn` */
     this.turns = new Map()
     /** @type {Map<string, LiveMeter>} one live meter per session, so sessions cannot share a window. */
@@ -45,7 +92,7 @@ export class TurnTelemetryStore {
   live(sessionId) {
     let meter = this.liveBySession.get(sessionId)
     if (meter === undefined) {
-      meter = new LiveMeter({ windowMs: this.windowMs ?? 1000, refreshMs: this.refreshMs ?? 200 })
+      meter = new LiveMeter({ windowMs: this.windowMs })
       this.liveBySession.set(sessionId, meter)
     }
     return meter
@@ -113,6 +160,13 @@ export class TurnTelemetryStore {
    * ignored by `sampleFromChunk`; a `usage` chunk additionally updates the
    * attempt's authoritative usage without becoming a sample.
    *
+   * The sample is stamped with the attempt it belongs to **before** it reaches the
+   * live meter. The meter's window is bound to one attempt and rejects a sample
+   * naming another one, and that guard is only reachable if the identity travels
+   * with the sample: a late frame for an attempt the turn has already moved past
+   * therefore cannot enter the newer attempt's rolling rate, even though the closed
+   * attempt still keeps it for the completed curve.
+   *
    * @returns {object|null} the accepted sample, or `null`
    */
   acceptChunk(record, attempt, { timeMs, chunk }) {
@@ -123,9 +177,10 @@ export class TurnTelemetryStore {
     const sample = sampleFromChunk(timeMs, chunk, this.estimateTokens)
     if (sample === null) return null
     record.firstTokenMs ??= timeMs
-    attempt.samples.push(sample)
-    this.live(record.sessionId).acceptSample(sample)
-    return sample
+    const stamped = { ...sample, attemptId: attempt.attemptId ?? null }
+    attempt.samples.push(stamped)
+    this.live(record.sessionId).acceptSample(stamped)
+    return stamped
   }
 
   /** Attach authoritative usage from a durable settlement. */
@@ -247,35 +302,63 @@ export class TurnTelemetryStore {
     // The curve is built from the same compressed clock the live meter used, so
     // a point read off it means the same thing the pill showed at that instant.
     const compressed = compressAttempts(record.attempts)
-    const reasoningSeries = rollingTpsSeries(compressed.samples, {
-      phase: 'reasoning',
-      durationMs: compressed.durationMs,
-    })
-    const outputSeries = rollingTpsSeries(compressed.samples, {
-      phase: 'output',
-      durationMs: compressed.durationMs,
+
+    /**
+     * The rolling series is built **per attempt**, then relabelled onto the
+     * compressed coordinate. This ordering is the specification.
+     *
+     * The compressed clock concatenates attempts so a tool gap has no width, but
+     * a trailing one-second window is a property of one model call. Rolling one
+     * window across the concatenated list made the opening vertices of attempt B
+     * count attempt A's trailing tokens — the two numbers are drawn a single pixel
+     * apart and describe different calls, which is precisely the case a reader
+     * cannot detect by looking at the chart. `perAttemptSeries` measures each
+     * attempt on its own clock; `test/curve-attempt-boundary.test.js` carries the
+     * counterexample that the previous implementation fails.
+     */
+    const series = [
+      { key: 'reasoning', tone: 'neutral', phase: 'reasoning' },
+      { key: 'output', tone: 'accent', phase: 'output' },
+    ].map(({ key, tone, phase }) => {
+      const runs = perAttemptSeries(compressed.segments, compressed.samples, {
+        phase,
+        windowMs: CURVE_WINDOW_MS,
+        sampleEveryMs: CURVE_SAMPLE_EVERY_MS,
+        /** The last attempt may draw its decay as far as the axis it was given. */
+        durationMs: compressed.durationMs,
+      })
+      return {
+        key,
+        tone,
+        phase,
+        present: runs.some(run => run.points.length >= 2),
+        runs: runs.map(run => ({
+          ...run,
+          points: downsampleSeries(run.points),
+          peak: peakTps(run.points),
+        })),
+      }
     })
 
     /**
      * `peakTps` is measured on the **full** series, before downsampling. The
-     * order of the two expressions below is the specification, not an accident:
-     * the rendered point count is a drawing budget, and a drawing budget must
-     * never move a reported statistic. `downsampleSeries` independently
-     * guarantees that the point bearing this maximum survives into the rendered
-     * series, so the drawn curve and the printed peak agree.
+     * order of the two expressions in `curve` below is the specification, not an
+     * accident: the rendered point count is a drawing budget, and a drawing
+     * budget must never move a reported statistic. `downsampleSeries`
+     * independently guarantees that the point bearing this maximum survives into
+     * the rendered series, so the drawn curve and the printed peak agree.
      *
-     * `sampleEveryMs`/`windowMs` are recorded so the curve's own grid and
-     * measurement window travel with the data. They are unrelated to the live
-     * presentation cadence (`src/client/live/cadence.js`).
+     * The peak is the maximum over every per-attempt series. It is never a sum
+     * and never an average across attempts: the turn's peak rate is the fastest
+     * any single call ran, not a quantity assembled from two calls.
      *
-     * `phaseSpans` records, per phase, the interval over which that phase has
-     * actual evidence: from its first token-producing sample to its last one
-     * plus the rolling window (the window is how long those tokens keep
-     * contributing to the rate). Outside that interval the series reads zero
-     * because the phase **is not producing**, not because its throughput
-     * collapsed, and a renderer must not draw the two the same way. The values
-     * themselves are untouched — this is availability metadata, not a different
-     * series.
+     * `phaseRuns` records, per phase, the intervals over which that phase has
+     * actual evidence: from each episode's first token-producing sample to its
+     * last one plus the rolling window, clamped to its own attempt. Outside those
+     * intervals the series reads zero because the phase **is not producing**, not
+     * because its throughput collapsed, and a renderer must not draw the two the
+     * same way. A turn with two reasoning episodes gets two runs, so no drawable
+     * path is ever asked to bridge an output-only stretch.
      */
     return {
       ...aggregate,
@@ -283,14 +366,30 @@ export class TurnTelemetryStore {
       curve: {
         durationMs: compressed.durationMs,
         segments: compressed.segments,
-        reasoning: downsampleSeries(reasoningSeries),
-        output: downsampleSeries(outputSeries),
-        peakTps: peakTps(reasoningSeries, outputSeries),
-        phaseSpans: phaseSpans(compressed.samples, compressed.durationMs, 1000),
-        /** Curve points are shape estimates; their phase integrals are anchored to usage. */
-        quality: aggregate.usageComplete ? 'calibrated' : 'estimated',
-        sampleEveryMs: 250,
-        windowMs: 1000,
+        series,
+        phaseRuns: phaseRuns(compressed.samples, compressed.segments, CURVE_WINDOW_MS, compressed.durationMs),
+        peakTps: peakTps(...series.flatMap(entry => entry.runs.map(run => run.points))),
+        /**
+         * Flat concatenations of the per-attempt series, retained for callers that
+         * want one array of vertices. They carry `attemptId` on every point; a
+         * renderer must segment on it rather than joining the array into one path.
+         */
+        reasoning: series[0].runs.flatMap(run => run.points),
+        output: series[1].runs.flatMap(run => run.points),
+        /**
+         * Curve quality follows the **temporal shape** axis, not the token axis.
+         * A curve is a shape claim, so an exactly known token total with
+         * incomplete timestamps is an estimated shape, and `usageComplete` alone
+         * cannot express that. See `curveQuality` below.
+         */
+        quality: curveQuality(aggregate),
+        qualityAxes: {
+          tokenTotalQuality: aggregate.quality.tokenTotalQuality,
+          phaseSplitQuality: aggregate.quality.phaseSplitQuality,
+          temporalShapeQuality: aggregate.quality.temporalShapeQuality,
+        },
+        sampleEveryMs: CURVE_SAMPLE_EVERY_MS,
+        windowMs: CURVE_WINDOW_MS,
       },
     }
   }

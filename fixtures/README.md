@@ -21,6 +21,40 @@ deterministic, length-preserving, separately scripted and independently verified
 | `t3-interrupted-mid-reasoning` | `command-goat` / `deepseek/deepseek-v4.1-flash` | 1 | — | A real user interruption 9 s into reasoning: `interrupted:true`, `turn/end.reason = aborted(user)`, no usage |
 | `t4-reasoning-tool-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | 2 | `pwsh` | The route that **does** report `reasoningTokens`, so the exact phase split is exercised |
 | `t5-reasoning-text-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | 1 | — | A 1307-delta stream (1038 reasoning fragments then 269 text fragments) with authoritative `reasoningTokens`, so the curve has real intra-stream spacing |
+| `t6-tool-only-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | 4 | `pwsh` ×3 | A **tool-only** turn: every attempt emitted reasoning plus a tool-call argument and no assistant text at all, so the turn's whole generated output is argument and reasoning. Also carries an attempt that settled with no tool call and no message |
+| `t7-failing-pwsh-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | 2 | `pwsh` | A **failing shell command inside a successful tool call**: DSH recorded the call as `ok` and delivered the PowerShell error text as the tool result, so the command's outcome and the call's status are visibly separate — and the turn still completed |
+| `t8-reasoning-no-retry-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | 1 | — | A reasoning turn on the official route with `reasoningEffort: high`, recorded specifically to look for a provider retry. It contains **no** `llm/retry`, so it is negative evidence about retry frequency on this route rather than an example of one |
+
+### Recording a new scenario
+
+`dev/capture-scenario.ps1` holds the recipes: `A1`–`D2` produced `t1`–`t5`, and
+`E1`/`E2`/`E3` produced `t6`–`t8`. Two needed a second take, and the reason is
+part of the evidence:
+
+- `E1` (tool-only) first produced a turn whose final attempt emitted five tokens
+  of closing text — a *tool-then-text* turn rather than the tool-only shape. The
+  recipe now forbids any assistant message explicitly.
+- `E2` (tool error) first produced a call whose **command** failed. DSH records
+  that as a successful call whose output happens to contain `stderr`, which is
+  not a tool error at all. The recipe now names a pwsh parameter that does not
+  exist, and the recorded result *still* reads `ok` — so the fixture documents
+  the weaker shape honestly instead of claiming the stronger one.
+
+Both first takes were rejected and deleted; the adopted launches are kept under `dev/recordings/` as `E1b.json`,
+`E2b.json` and `E3.json`.
+
+One detail in those receipts is worth naming because it looks like a contradiction and is not one: the receipt's
+`provider`/`model` fields show the agent's options **at creation time**, before `sessionController.selectModel` applies
+the requested route, so `E1b`/`E2b`/`E3` report `command-goat` even though all three ran on `deepseek-official`. The
+route actually used is recorded in the fixture itself — each carries a durable `model/selection` event naming
+`deepseek-official`/`deepseek-v4-pro`, and each settlement reports `reasoningTokens`, which only that route supplies.
+
+The fixtures recorded in Phase 6 have no original under `fixtures/raw/` (which is
+gitignored and holds only the pre-sanitization Phase 2 set), so
+`scripts/verify-sanitization.mjs` reports them as "structure not cross-checked"
+and verifies them by the rules it can still apply: every published fixture must
+carry redaction markers and no forbidden term. Re-recording them with the
+originals present would add the stricter length-and-structure comparison.
 
 ## Synthetic derivatives
 
@@ -102,7 +136,9 @@ node scripts/verify-sanitization.mjs         # no personal content; structure + 
 `verify-sanitization.mjs` compares every published fixture against its original
 and asserts that the event count and order, all structural fields, and the length
 of every string value are identical, so a redaction cannot have silently altered
-the evidence it sits inside.
+the evidence it sits inside. A published fixture whose original is absent — any
+recording made after the Phase 2 batch — is reported as not cross-checked and is
+still subject to the marker and forbidden-term checks.
 
 A newly captured fixture is a new raw recording: sanitize it before committing it
 (`node scripts/sanitize-fixtures.mjs`), then re-run the verification.

@@ -32,7 +32,12 @@ import { reconstructFromDurable, settlementChronology } from '../../src/dsh/dura
 import { settlementClassification, turnEndStatus } from '../../src/dsh/adapter.js'
 import { attributePhaseDurations } from '../../src/core/phase-duration.js'
 import { compressAttempts } from '../../src/core/time-axis.js'
-import { rollingTpsSeries, peakTps } from '../../src/core/curve.js'
+import {
+  DEFAULT_SAMPLE_EVERY_MS,
+  DEFAULT_WINDOW_MS,
+  perAttemptSeries,
+  peakTps,
+} from '../../src/core/curve.js'
 
 /** Local TPS difference allowed between paths, in tokens/s. */
 export const TPS_TOLERANCE = 1e-9
@@ -252,11 +257,25 @@ function textOf(chunk) {
   return ''
 }
 
-/** Compressed chart coordinates plus both rolling series and their peak. */
+/**
+ * Compressed chart coordinates plus both per-attempt rolling series and their peak.
+ *
+ * The series is built the way the shipped curve builds it — **one window per
+ * attempt** — rather than by rolling a single window over the concatenated
+ * samples. A harness that reproduced the old bridged arithmetic would keep
+ * agreeing with itself while disagreeing with the product, which is exactly the
+ * failure this helper was rewritten to stop hiding.
+ */
 export function chartView(attempts) {
   const compressed = compressAttempts(attempts)
-  const reasoning = rollingTpsSeries(compressed.samples, { phase: 'reasoning', durationMs: compressed.durationMs })
-  const output = rollingTpsSeries(compressed.samples, { phase: 'output', durationMs: compressed.durationMs })
+  const seriesOf = phase => perAttemptSeries(compressed.segments, compressed.samples, {
+    phase,
+    windowMs: DEFAULT_WINDOW_MS,
+    sampleEveryMs: DEFAULT_SAMPLE_EVERY_MS,
+    durationMs: compressed.durationMs,
+  })
+  const reasoningRuns = seriesOf('reasoning')
+  const outputRuns = seriesOf('output')
   return {
     durationMs: compressed.durationMs,
     segments: compressed.segments,
@@ -271,9 +290,15 @@ export function chartView(attempts) {
      * separately and only these coordinates are compared positionally.
      */
     segmentOffsets: compressed.segments.map(segment => `${segment.startMs}-${segment.endMs}`),
-    reasoning,
-    output,
-    peakTps: peakTps(reasoning, output),
+    /** Per attempt, in turn order, so a boundary disagreement is visible. */
+    reasoning: reasoningRuns.flatMap(run => run.points),
+    output: outputRuns.flatMap(run => run.points),
+    reasoningRuns,
+    outputRuns,
+    peakTps: peakTps(
+      ...reasoningRuns.map(run => run.points),
+      ...outputRuns.map(run => run.points),
+    ),
   }
 }
 

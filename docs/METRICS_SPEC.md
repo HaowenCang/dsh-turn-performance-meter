@@ -208,7 +208,30 @@ The curve is therefore a model-throughput diagnostic, not an end-to-end turn tim
 
 ### 8.2 Y-axis and window
 
-Use the same conceptual one-second trailing TPS window as the live meter, sampled for rendering every ~250 ms on the compressed active clock. Implement rendering density independently from the underlying sample collection so the SVG remains bounded for long turns.
+Use the same conceptual one-second trailing TPS window as the live meter, sampled for rendering every 250 ms. Implement rendering density independently from the underlying sample collection so the SVG remains bounded for long turns.
+
+**The window is measured per attempt, and the compressed axis is a coordinate only (frozen in Phase 6).** Concatenating attempts onto one x-axis removes the width of tools, inter-attempt waits and next-call TTFT. It does **not** concatenate the measurement window: a trailing one-second rate is a property of one model call, so each attempt's series is computed on that attempt's own local clock and only then relabelled to the shared coordinate by its segment's `startMs`.
+
+Two attempts that share a compressed coordinate therefore share no window. The rejected revision rolled one window across the concatenated sample list, so the opening vertices of each attempt counted the previous attempt's trailing tokens: with attempt A measuring 100 tokens/s at its end and a tool then separating it from attempt B measuring 10, B's opening vertex read 110 and the turn peak was inflated by tokens that belonged to a finished call. `test/curve-attempt-boundary.test.js` reproduces the rejected pipeline verbatim and fails it.
+
+Three consequences are normative:
+
+1. **Compressed coordinate ≠ statistical window.** The axis is continuous across an attempt boundary; the window is not.
+2. **The opening vertex is measured at the attempt's own zero.** An attempt's local zero *is* its first delta, so a plain half-open window `(0 - 1000, 0]` would be empty and the curve would open on a fabricated `0 tokens/s`. The left edge is clamped at local zero for that one vertex; every later vertex is the plain window `(t - 1000, t]`.
+3. **Each attempt draws only its own coordinates.** An attempt's one-window decay tail is clamped at the coordinate the following attempt owns. The final attempt keeps its tail, because nothing follows it to compete for the axis. Evidence intervals (`phaseRuns`) are bounded identically, so the availability metadata and the drawable vertices cannot disagree.
+
+### 8.2.1 Phase episodes, and why one interval per phase is not enough
+
+A phase can be present in several disjoint **episodes** inside one turn and even inside one attempt: `Reasoning A → Output A → Tool → Reasoning B` puts two reasoning episodes on one curve. A single interval per phase — first sample to last sample plus a window — spans the output-only stretch between them, and a renderer drawing that interval emits a flat zero line exactly where reasoning was absent. That is the same misstatement as drawing a zero through a finished phase, moved to a new location.
+
+The evidence structure is therefore a list of runs, one per episode:
+
+- a run starts at its episode's first token-producing sample;
+- it ends one rolling window after that episode's last token-producing sample, clamped to the coordinates its own attempt owns;
+- two same-phase episodes of one attempt merge when the second begins at or before the first one's tail — the window between them never reached zero, so there is no absent stretch to preserve;
+- a longer silence splits them, and a change of attempt splits them unconditionally.
+
+The renderer receives one path per run and never joins two runs. A reader sees a gap, which is what happened. Attempt boundaries default to **no marker**: the break in the path is the whole signal, and `attemptId` is retained on every run for diagnostics rather than drawing.
 
 ### 8.3 Calibration
 
@@ -221,9 +244,25 @@ If an attempt reports `outputTokens` and `reasoningTokens`, reasoning and non-re
 
 If `reasoningTokens` is absent, do not claim the reasoning/output split is exact. The whole-attempt integral is still anchored to the authoritative `outputTokens` by one common factor, so the curve shape remains usable; `phaseSplitQuality` in that case is `estimated`, and the two phase series must be presented as one approximate division of an exact total rather than as two measured curves.
 
+### 8.4 Curve quality is the temporal-shape axis (frozen in Phase 6)
+
+`curve.quality` is `aggregate.quality.temporalShapeQuality`, clamped to that axis's ceiling. It is **not** derived from `usageComplete`, which answers a different question and disagrees with the shape axis in both directions:
+
+| Evidence | `usageComplete` alone would say | `temporalShapeQuality` says |
+|---|---|---|
+| exact token total, durable anchored timing, complete timestamps | `calibrated` | `reconstructed` |
+| exact token total, no durable settlement for an attempt | `calibrated` | `estimated` |
+| exact token total, incomplete timestamps | `calibrated` | `estimated` |
+| partial usage, durable anchored timing | `estimated` | `estimated` (or `unavailable`) |
+| no samples at all | `estimated` | `unavailable` |
+
+The token and split axes are not discarded — they govern the numbers printed beside the chart and travel with the curve in `curve.qualityAxes`. What they may not do is decide the chart's own quality.
+
 ## 9. Peak TPS
 
-`peakTps` is the maximum rendered rolling-window value among both reasoning and output series after final calibration, using the same window and sampling cadence documented above. Label it as peak of the displayed/calibrated series, not as a provider-certified instantaneous maximum. Because the window is a shape estimate, the peak inherits `temporalShapeQuality` and never exceeds `reconstructed`.
+`peakTps` is the maximum value of the **full** per-attempt rolling series across the reasoning and output phases, computed before any downsampling. It is the maximum over those series, never their sum and never their average: the turn's peak rate is the fastest any single call ran, not a quantity assembled from two calls.
+
+Label it as the peak of the shape-estimated series, not as a provider-certified instantaneous maximum. Because every vertex is a shape weight, the peak inherits `temporalShapeQuality` and never exceeds `reconstructed`; it therefore renders with `≈` at every quality level.
 
 ## 10. Total elapsed time
 

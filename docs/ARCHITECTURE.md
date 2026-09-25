@@ -140,6 +140,21 @@ A tool may be parallel with another tool. State presentation can still say `tool
 
 Every `AssistantStreamFrame.start` / accepted new attempt resets the 1-second live meter. A later model call must not inherit tokens from a preceding call separated by a tool or retry.
 
+### The same rule applies to the completed curve (frozen in Phase 6)
+
+The completed curve uses the compressed clock, which joins attempts end-to-start so tools consume no width. That joining is a **coordinate** operation; it is not a statement about the measurement window. Each attempt's completed series is therefore computed on its own local clock by `perAttemptSeries` and only then relabelled to the shared coordinate.
+
+The two clocks a compressed sample carries are named explicitly for exactly this reason:
+
+| Field | Meaning | Used by |
+|---|---|---|
+| `activeTimeMs` | turn-compressed coordinate, continuous across attempts | the x-axis, and `phaseRuns`' intervals |
+| `attemptTimeMs` | attempt-local instant, zero at that attempt's first delta | the trailing-window measurement |
+
+Publishing only the first of the two is what allowed the rejected revision to roll a turn-global window while believing it was local. Anything that measures a rate reads `attemptTimeMs`; anything that draws a position reads `activeTimeMs`.
+
+One consequence is worth stating separately: an attempt's one-window decay tail is clamped at the coordinate the **following** attempt owns, because past that point the coordinate belongs to a different call. The final attempt keeps its tail. The clamp is published on the segment as `hasSuccessor` + `nextStartMs` — a single nullable number cannot distinguish "the next attempt starts here" from "this attempt ends at the axis end", and the two cases require different behaviour.
+
 ## 7. Timing domains
 
 The project deliberately has several clocks; do not collapse them.
@@ -173,6 +188,8 @@ A model =====B model ===C model ======
 Thus tool execution and second-call pre-first-token wait consume zero chart width, while a real stall *inside* an active model stream remains visible as a local TPS reduction.
 
 Formally, the chart is equivalent to an active model-generation coordinate, but implementation is safer as explicit attempt concatenation than subtracting arbitrary wall intervals from one global clock.
+
+The domain boundary is easy to get wrong in one direction only, and the wrong direction is the expensive one: the clock is continuous across an attempt boundary, so it is tempting to treat the rolling series as continuous too. It is not. See "The same rule applies to the completed curve" above for the two clocks and the decay clamp.
 
 ## 8. Retry, interruption and failure semantics
 

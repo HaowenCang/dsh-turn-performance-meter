@@ -115,10 +115,20 @@ export function tokenTotalQuality({
 /**
  * Quality of the reasoning/output split.
  *
- * A split is only `exact` when every contributing attempt that carries the
- * total also carries an authoritative `reasoningTokens`. When the totals are
- * exact but the split is not, the honest answer is `estimated`: the shape prior
- * still divides the anchored total, and that division was never measured.
+ * A split is only `exact` when every contributing attempt that carries the total
+ * also carries an authoritative `reasoningTokens`. When the totals are exact but
+ * the split is not, the honest answer is `estimated`: the shape prior still divides
+ * the anchored total, and that division was never measured.
+ *
+ * When *some* contributors reported the counter and some did not, this axis answers
+ * `estimated` rather than the token-total axis's `partial`. That asymmetry is
+ * deliberate and is the two axes disagreeing on purpose: `tokenTotalQuality` is a
+ * sum, so the sum of the attempts that reported is a real, publishable quantity
+ * that is merely incomplete; the split is a *division*, and a division over a
+ * population where one member has no counter cannot be published as partly
+ * measured. It stays `estimated` — the shape prior still divides an anchored
+ * total — which is the conservative answer and the one `docs/METRICS_SPEC.md`
+ * §8.3 records.
  *
  * `reasoningStreamConflict` is the consistency guard: a provider that reports
  * `reasoningTokens === 0` while the stream carries non-empty reasoning deltas

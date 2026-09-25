@@ -1487,9 +1487,143 @@ native statistics still rendering, no console error attributable to the plugin.
 rules — an early scaffold superseded by `live-css.js`. Nothing imported it; it was deleted rather than left as a
 second source for the same class names.
 
-### Phase 6–8
+### Phase 6 — Curve semantic hardening and runtime robustness
 
-- Robustness:
+Phase 6 began with two blocking defects found by an independent code audit of the Phase 5 commit. Both were
+statistical, both were invisible in the Phase 5 screenshots, and both are now carried by a test that the rejected
+implementation fails.
+
+#### 1. Blocking A — the completed rolling window crossed the attempt boundary
+
+`compressAttempts` joins attempts end-to-start so tools consume no chart width, and `settle()` then handed the whole
+concatenated sample list to one call of `rollingTpsSeries`. That function filters on `activeTimeMs` and `phase` and
+never reads `attemptId`, so one trailing one-second window spanned two model calls.
+
+The live meter had always reset at every new attempt, so the completed curve and the live pill disagreed about the
+same definition — and the disagreement was largest exactly where a reader cannot see it, at the coordinate where two
+attempts meet.
+
+| | rejected pipeline | corrected construction |
+|---|---|---|
+| attempt A (100 tokens at local 0 and 500) | `0:100 250:100 500:200` | `0:100 250:100 500:200` |
+| attempt B (10 tokens at local 0 and 500, after a 60 s tool) | `500:210 750:210 1000:120 …` | `500:10 750:10 1000:20` |
+| turn peak | 210 (assembled from two calls) | 200 (attempt A's own maximum) |
+
+`test/curve-attempt-boundary.test.js` runs the rejected algorithm verbatim over the same record and asserts those
+numbers, so the counterexample is executable rather than described. The construction that replaced it:
+
+- `compressAttempts` publishes **two clocks per sample**: `activeTimeMs` (the turn-compressed coordinate the axis is
+  drawn against) and `attemptTimeMs` (the attempt-local instant the window is measured on). Publishing only the first
+  is what allowed the mistake; for the first attempt the two coincide, which is why the defect survived Phase 5.
+- `perAttemptSeries` builds one series per attempt episode. It also had to be split by **episode** rather than by
+  attempt: an attempt's own series spans its whole width, and a phase that is absent for part of it would have been
+  drawn as a zero line — the same error in a new place.
+- Each run's decay tail is clamped at the coordinate the following attempt owns. A single nullable `nextStartMs`
+  cannot express that, because "the next attempt starts here" and "this attempt ends at the axis end" both read as the
+  same number when the next attempt happens to start at the end of the sample span; `hasSuccessor` was added so the
+  final attempt keeps the tail that shows its last tokens expiring, while every other attempt stops at the boundary.
+- The opening vertex is measured at the attempt's own zero. A plain half-open window `(0 - 1000, 0]` contains nothing,
+  so the curve would have opened on a fabricated trough on the one vertex that carries the call's first tokens.
+
+#### 2. Blocking B — one phase interval could not express a discrete episode
+
+`phaseSpans` returned one interval per phase, from the first sample to the last sample plus a window. A real turn
+routinely contains `Reasoning A → Output A → Tool → Reasoning B`, and that single interval spans the output-only
+stretch between the two reasoning episodes; a renderer drawing it emits a flat zero line exactly where reasoning was
+absent.
+
+`phaseRuns` replaces it with a list of episodes, one per run:
+
+- a run starts at its episode's first token-producing sample and ends one window after its last one, clamped to its
+  own attempt's coordinates;
+- two same-phase episodes of one attempt merge when the second begins at or before the first one's tail — the window
+  never reached zero, so there is no absent stretch to preserve; a longer silence splits them, and a change of attempt
+  splits them unconditionally;
+- the merge extends the tail and never shortens it, so an episode whose later sample sits *inside* an earlier one's
+  window cannot retract the interval and drop the stretch between them.
+
+`phaseSpans` survives as an outer-bounds convenience derived from `phaseRuns`, marked deprecated for rendering: it is
+correct as a summary and wrong as a drawing instruction, and the tests assert both halves of that.
+
+`curveViewModel` now builds one path per run and `curve-tree` emits one `<path>` element per drawable run. Two runs
+are two elements rather than one element with two subpaths, because the separation is the statement. No attempt
+boundary marker is drawn; the break itself is the signal.
+
+#### 3. Correction C — curve quality ignored the temporal-shape axis
+
+`curve.quality` was `aggregate.usageComplete ? 'calibrated' : 'estimated'`. That is a token-axis answer to a
+shape-axis question, and the two disagree in both directions: an exact token total with no durable settlement was
+called `calibrated`, and durable anchored timing with partial usage was called merely `estimated`.
+
+It is now `quality.temporalShapeQuality`, clamped to that axis's ceiling. The token and split axes travel with the
+curve in `curve.qualityAxes` for the numbers printed beside the chart, and a fixture sweep asserts the relationship
+on every recorded turn through both the live and the durable path.
+
+While fixing this, `aggregateTurn` was found to be omitting `sampleCount` from its `qualityAxes` call, which made
+`temporalShapeQuality` answer `unavailable` for **every** turn — so the strongest achievable curve quality had been
+silently capped. Fixed and asserted.
+
+#### 4. Correction D — the dead core `refreshMs` contract
+
+`LiveMeter` accepted `options.refreshMs` and stored it; `TurnTelemetryStore.live()` passed `this.refreshMs ?? 200`;
+`TurnTelemetryStore`'s own JSDoc advertised the option. None of it drove a timer — presentation cadence lives in
+`src/client/live/cadence.js` — so the core read as though it scheduled the screen, and a future reader changing "the
+refresh rate" would have changed nothing.
+
+Both options were removed, and `test/cadence-contract.test.js` holds the separation at source level, because a dead
+option cannot be caught behaviourally: `src/core/` and `src/host/` must contain no `refreshMs`, no timer call and no
+reference to the presentation cadence, with comments and string literals stripped so the modules may still explain in
+prose why their 1000 ms window and 250 ms sampling cadence are *not* UI cadence.
+
+#### 5. One live-path defect found while testing out-of-order frames
+
+`acceptChunk` passed its sample to the live meter without an `attemptId`. The meter's rolling window is bound to one
+attempt and rejects a sample naming another one, but that guard was unreachable, so a late frame for an attempt the
+turn had already moved past could enter the newer attempt's live rate. The sample is now stamped with its attempt
+before it reaches the meter; the completed curve still keeps the late delta against the attempt that produced it,
+which is the correct and different answer.
+
+#### 6. New recordings
+
+Three scenarios were recorded with the dev-only fixture recorder and harvested with `dev/harvest-fixtures.mjs`:
+
+| fixture | route | what it is |
+|---|---|---|
+| `t6-tool-only-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | four attempts, three pwsh calls, **no assistant text at all** |
+| `t7-failing-pwsh-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | a failing shell command that DSH recorded as a **successful** call |
+| `t8-reasoning-no-retry-deepseek-official` | `deepseek-official` / `deepseek-v4-pro` | a reasoning turn recorded to look for a provider retry; it contains none |
+
+Two of them needed a second take and the first takes are kept: `E1`'s first attempt still emitted five tokens of
+closing text (a tool-then-text turn, not the tool-only shape), and `E2`'s first attempt failed the *command* rather
+than the *call*, which DSH records as a success. The harvest script was also changed to **merge** the fixture index
+instead of replacing it — a selective harvest had been silently erasing the record of every unselected fixture.
+
+#### 7. What Phase 6 did not obtain
+
+- **No recorded provider retry.** `t4`, `t5` and `t8` were recorded on the official route specifically to produce one;
+  none scheduled an `llm/retry`. The retry path is covered synthetically before and after a tool, and
+  `test/runtime-robustness.test.js` asserts that no recording contains a retry — so a future recording that does
+  contain one fails the test rather than passing unnoticed.
+- **No recorded mid-tool-argument interruption.** `t3` records the mid-reasoning case; the mid-tool-argument shape is
+  covered synthetically.
+- **No recorded tool-error envelope.** DSH does not appear to produce one for a failing shell command, as `t7` shows.
+  The error-envelope path is covered synthetically.
+- **No pixel capture of the completed card in Phase 6.** The served bundle was verified in the live page after a
+  reload, but producing a *settled* turn in an observing browser would have required driving the very session running
+  this work, and a second page in an isolated browser context is refused by the host with `dsh web authentication
+  required`. See `TEST_PLAN.md` §3.
+
+#### 8. Injector incident
+
+`dev_reload_package` against this plugin hung and returned no result. The injector's logs place the cause: the
+self-reload watcher fired two seconds after `client.js` was rewritten and recorded `watch-precheck-blocked`, so a
+reload raced a bundle write in the same directory. Rather than retrying blindly, the served client bundle was fetched
+from the running host and inspected directly — the stronger check for a client bundle — and confirms
+`DEFAULT_PRESENTATION_REFRESH_MS = 50`, `curveQuality`, `phaseRuns`, `drawnToMs`, `data-run` and the absence of
+`this.refreshMs`. The page was then reloaded and the live pill rendered with a clean console.
+
+### Phase 7–8
+
 - E2E:
 - Release:
 
@@ -1505,9 +1639,11 @@ Keep this current. Every approximation that can affect displayed numbers belongs
    the per-phase rates and token counts *are* published in that case, as the anchored division of the authoritative
    total by the observed shape, and they carry `≈` because that division was never measured. A phase with no evidence
    at all still renders `—`.
-3. The live 1-second window for a turn already streaming before a page reload cannot be reconstructed from the reconnect
-   baseline (the baseline carries the compact detached stream, not a pre-reload wall-clock window). Provisionally
-   `unavailable`; to be confirmed in Phase 6.
+3. The live 1-second window for a turn already streaming before a page reload **cannot** be reconstructed from the
+   reconnect baseline, and Phase 6 confirmed and froze that answer rather than closing it. The baseline carries the
+   compact detached stream, not a pre-reload wall-clock window, so the honest degraded state is a neutral pill stage
+   with no rate at all — never a rate assembled from a gap. A durably settled attempt inside the same turn *is*
+   restored, with its original delta timestamps. Asserted in `test/completed-lifecycle.test.js`.
 4. An attempt that emitted generated deltas but never received authoritative usage makes the exact turn total `partial`.
    The partial sum over the attempts that *did* report usage is exposed as `observedGeneratedTokens` instead, and the UI
    renders it as approximate.
@@ -1518,15 +1654,25 @@ Keep this current. Every approximation that can affect displayed numbers belongs
 7. The Phase 2 fixtures record the transient plane **host-side** (`agent/assistant-stream`), which is the same evidence
    the browser receives but before the client fold. The two forms are asserted equivalent; the browser transport itself
    is unverified until Phase 7.
-8. The fixture set contains no tool-only turn, no provider-error retry and no tool-error turn. `d4` covers an unmatched
-   call and the unit tests cover error status, but a recorded instance of each is still owed to Phase 6.
-9. `dev/fixture-recorder` is a dev-only package that stays **unloaded** from the local `web` profile; only its
-   `disabled: true` patch tombstone remains, so a bundle-layer patch cannot re-assemble it. It registers no tools, no
-   listeners outside its two observational subscriptions, and no `dsh.client` entry; it is not part of the plugin
-   bundle. Verified inert in Phase 4 §4.1 (control route 404, no junction, no loader entry).
+8. The fixture set **now contains** a tool-only turn (`t6`). It still contains no provider-error retry and no tool-error
+   turn: three recordings were made on the official route specifically to obtain a retry and none scheduled one, and a
+   failing shell command turns out to be recorded by DSH as a *successful* call (`t7`). Both shapes are covered
+   synthetically, and `test/runtime-robustness.test.js` asserts that no recording contains an `llm/retry`, so a future
+   recording that does will fail the test rather than pass unnoticed.
+9. `dev/fixture-recorder` is a dev-only package. It is **not** part of the plugin bundle and registers no tools, no
+   `dsh.client` entry and no listeners outside its two observational subscriptions. It was injected into the local
+   `web` profile during Phase 6 to record `t6`–`t8`, which is how the Phase 2 fixture set was produced as well; the
+   profile patch carries a `disabled: true` tombstone so a bundle-layer patch cannot re-assemble it.
 10. Phase 3 added `dsh-turn-performance-meter` to the profile as a `link:` dependency (bundle layer entry present)
     *and* registered it through `dsh-super-injector` for same-session activation. The loader's dual-instance
     reconciliation is expected to keep exactly one active entry across a restart; if it ever reports a conflict,
     uninstall the injected entry — the profile layer is the official, persistent path.
 11. Live TPS can read `≈0.00 tokens/s` while a model genuinely stalls inside an attempt (empty trailing window). This
     is the metric spec working as written; a different display policy would be a product decision, not a fix.
+12. The completed card's curve is a **shape** rendering of durable evidence, not a replay of the live session. The live
+    pane and the completed curve agree at every attempt-local instant that was actually observed live (asserted in
+    `test/curve-attempt-boundary.test.js`), but the curve is rebuilt from stored samples and can be finer than what the
+    50 ms presentation cadence happened to display.
+13. A run of one vertex is not drawable, so an attempt that produced a single measured instant inside a phase
+    contributes a peak but no line. This is deliberate: one point is a measurement, not a line. It means a card can
+    report a turn peak whose vertex is not visible on the chart.

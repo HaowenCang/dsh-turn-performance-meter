@@ -66,7 +66,54 @@ Phase 4 additions (all in `npm run verify`):
   `9.999 → 10.0` rounding boundary, locale grouping for token magnitudes, `≈` as a prefix (never `~`), the card's
   one-decimal second scale, and integer-only tool labels.
 
-Phase 5 additions (all in `npm run verify`; the browser A/B and the screenshot set are separate evidence):
+Phase 6 additions (all in `npm run verify`; the browser pass is reported separately, see §3):
+
+- `test/curve-attempt-boundary.test.js` — **the counterexample file.** It reproduces the rejected Phase 5 pipeline
+  verbatim (one window rolled across the concatenated sample list, with the verified half-open window so the
+  comparison isolates the boundary defect rather than a window convention) and asserts the rates it produces: 210 at
+  the shared coordinate, 120 one window into the next call, where the corrected construction reports 200 and 20. It
+  then asserts the corrected per-attempt series, a retry that resets the window, a retry whose abandoned prefix
+  produced a single delta and therefore shares the coordinate, the 250 ms grid, the decay-tail clamp, and — the
+  strongest invariant in the file — that the reconstructed curve agrees with `LiveMeter` at every attempt-local
+  instant the live meter was read at;
+- `test/curve-regression-matrix.test.js` — one named scenario per frozen curve semantic: window reset at a boundary,
+  a previous attempt's tokens unable to enter the next window (with an independent per-attempt upper bound), tool time
+  at zero width *and* a window reset, retry reset, peaks not inflating each other, multiple reasoning runs, multiple
+  output runs, same-phase merge/split at exactly one window, runs never merging across an attempt, one subpath per run
+  with exactly one crossing of the boundary in the coordinate list, no vertex drawn through an absent interval, the
+  turn peak over the full per-attempt series before downsampling, downsample budget independence, an internal stall
+  keeping its width, and the plain single-attempt shape unchanged;
+- `test/curve-quality.test.js` — `curve.quality === quality.temporalShapeQuality` and the two axes disagreeing in both
+  directions (an exact token total with no durable settlement is `estimated`, not `calibrated`; partial usage with
+  durable anchored timing keeps its shape quality); a turn with no generated delta publishing `unavailable`; the
+  ceiling clamped so an over-strong claim cannot leak through; and a sweep over **every recorded fixture** through both
+  the live and the durable path;
+- `test/cadence-contract.test.js` — a **source-level** contract, because a dead option cannot be caught behaviourally:
+  `src/core/` and `src/host/` contain no `refreshMs`, no `setInterval`/`setTimeout`/`requestAnimationFrame` and no
+  reference to the presentation cadence, with comments and string literals stripped so prose may still explain why;
+  the 50 ms interval is declared exactly once, in `src/client/live/cadence.js`; the scheduler and controller both take
+  it from there; `LiveMeter` has no `refreshMs` property even when one is passed; and the 1000 ms window plus the
+  250 ms curve cadence are core metric constants;
+- `test/runtime-robustness.test.js` — the runtime shapes: sequential tools, concurrent tools (`workMs > wallMs`, live
+  timer on the union), the compact tool label from 1 to 10 calls, a tool-only turn, the **recorded** tool-only turn
+  asserted to carry no assistant text at all, an empty-output turn reporting `null` rather than `0`, an abandoned
+  attempt keeping its prefix while the timing claim degrades, a retry before a tool and a retry after one, a provider
+  error as a status with the failed attempt still measured, a failed tool not failing the turn (plus the recorded
+  weaker shape where DSH recorded a failing command as a successful call), incomplete usage, a missing
+  `reasoningTokens`, a timestamp-less delta refused rather than defaulted, a duplicate row object deduplicated, a late
+  frame for a superseded attempt landing in the completed curve but never in the live window, an orphan delta counted
+  and dropped, a whole-corpus sweep under both readings, and the absence of `llm/retry` from every recording stated as
+  a test rather than as a claim;
+- `test/completed-lifecycle.test.js` (added cases) — reload mid-turn: an open turn is never rebuilt as a completed
+  card and the pill degrades to a neutral stage with no rate; a durably settled attempt is restored with its original
+  delta timestamps and its usage, so TTFT is derivable again; and a rebaseline into a window that no longer contains
+  the turn at all renders nothing rather than a guess;
+- `test/curve.test.js`, `test/curve-view-model.test.js`, `test/telemetry-store.test.js`, `test/time-axis.test.js`,
+  `test/helpers/equivalence.js` — updated to the new structures: `phaseRuns` episodes with the merge/split rule and
+  attempt-boundary split, the tail bound, `attemptTimeMs` alongside `activeTimeMs`, `hasSuccessor` on the segment,
+  per-run paths in the view model, the legacy single-array snapshot still drawing, and the equivalence harness
+  building per-attempt series so it cannot agree with itself while disagreeing with the product.
+
 
 - `test/cadence.test.js` — one cadence constant and no second default in `refresh.js`, `controller.js` or `main.js`;
   200 / 50 / 10 ms all constructible; an override resolves to a usable interval or falls back, never to a broken
@@ -90,6 +137,30 @@ Phase 5 additions (all in `npm run verify`; the browser A/B and the screenshot s
   assistive technology with one textual description, the peak marker in percentages, focusability tied to the presence
   of a curve, the `:focus-visible` ring replacing rather than removing the outline, reduced motion, no timer in the
   card at any mode, and both locales.
+
+Phase 5 additions (all in `npm run verify`; the browser A/B and the screenshot set are separate evidence):
+
+- `test/cadence.test.js` — one cadence constant and no second default in `refresh.js`, `controller.js` or `main.js`;
+  200 / 50 / 10 ms all constructible; an override resolves to a usable interval or falls back, never to a broken
+  timer; the override is reachable only while the diagnostic switch is on; 1 315 notifications under each cadence
+  produce one timer and one render per tick, and `dispose` leaves none;
+- `test/live-refresh.test.js` — the scheduler's structural contract at **every measured cadence**, not at one
+  hard-coded 200 ms;
+- `test/completed-lifecycle.test.js` (added case) — every live presentation instant is a distinct view object, which
+  is what makes a single `setView` per tick sufficient and the removed `useReducer` bump provably redundant;
+- `test/curve.test.js` (added cases) — the stride counterexample that defeats the previous downsample, anchors at
+  every budget, no invented peak, earliest-index tie-breaking and determinism, non-decreasing x for an unordered
+  input, refusal of an unsatisfiable budget, the phase-evidence boundaries (including "absent phase, absent span"),
+  and a bounded render for a ten-minute turn;
+- `test/curve-view-model.test.js` — the settled curve → geometry seam: `null` when there is no curve, a round axis
+  ceiling derived from the full-series peak, per-phase evidence clipping with no invented zero line, an absent phase
+  kept in the legend but not drawn, an approximate peak placed on the leading series, finite and ordered coordinates,
+  a zero-length turn, purity, and the point bound;
+- `test/completed-interaction.test.js` — the whole hover/focus machine, the two stacked layers, `aria-hidden` on
+  exactly the hidden one, the two kept columns at their original grid tracks, the SVG hidden from assistive
+  technology with one textual description, the peak marker in percentages, focusability tied to the presence of a
+  curve, the `:focus-visible` ring replacing rather than removing the outline, reduced motion, no timer in the card at
+  any mode, and both locales.
 
 ## 2. Required metric fixtures
 
@@ -136,7 +207,18 @@ Stream clearly contains reasoning deltas but provider usage exposes only `output
 
 ### I. Tool error
 
+A tool call whose result carries an error envelope, or `isError: true`. Verify the **call** is marked failed, the
+**turn** is unaffected, and the model's recovery after the failure is measured normally. The recorded `t7` fixture
+covers the weaker real shape: a shell command that failed while DSH recorded the call itself as successful, because
+its error text arrived as ordinary tool output.
+
 Tool starts and returns error. Verify duration is counted as tool latency, result text is excluded from model output, turn status follows DSH's eventual turn outcome.
+
+### K. Tool-only turn
+
+The model emits a tool call and ends without any assistant text. Verify the generated total still counts the tool-call
+argument, output TPS is computed if output-phase evidence exists, the completed card is still produced, and the curve
+draws only the phases that actually occurred. Covered by the recorded `t6` fixture, which carries four such attempts.
 
 ### J. Cross-session isolation
 
@@ -188,6 +270,25 @@ Phase 4 status for the completed rows, reported honestly:
 - hover/focus curve — Phase 5; Phase 4 deliberately renders no chart and no interactive element, which is asserted;
 - narrow layout / light-dark screenshots of the card — same limitation as above; the CSS contract (fluid four-column
   grid, `repeat(2, 1fr)` wrap, host `--dsw-*` tokens) is covered by test rather than by pixels.
+
+Phase 6 status for the same rows, reported honestly:
+
+- **served bundle verified in the live page.** The page was reloaded against the rebuilt plugin and the browser
+  fetched `/plugins/??dsh-turn-performance-meter/client.js` (200, 326 997 bytes) and confirmed the Phase 6 code is in
+  it: `attemptTokens`, `drawnToMs`, `phaseRuns`, `localMs`, `qualityAxes`, `curveQuality`, `data-run`,
+  `DEFAULT_PRESENTATION_REFRESH_MS = 50`, and **no** `this.refreshMs` anywhere. The live pill rendered on that page
+  (`dsh-tpm*` classes present) and the console carried no plugin error — only unrelated pre-existing
+  `/api/pet/*` 404s from another installed plugin;
+- **the completed card and the multi-run curve were not re-captured as pixels in this round.** Producing one requires
+  a settled turn in a browser that is observing it; the available authenticated page is the session running this work,
+  and a second page opened in an isolated browser context is refused by the host with
+  `dsh web authentication required`. The card's element tree, its data path, the multi-run SVG structure, the
+  tool-only card and the reload-mid-turn behaviour are therefore covered by the test suite rather than by a screenshot,
+  and that gap is stated rather than papered over;
+- `dev_reload_package` against this plugin **hung** and returned no result. The served bundle was verified directly
+  instead, which is the stronger check for a client bundle. The injector's own logs show why the reload is fragile
+  here: the self-reload watcher fired two seconds after `client.js` was rewritten and recorded
+  `watch-precheck-blocked`, so a reload raced with a bundle write in the same directory.
 
 ## 4. Performance tests
 

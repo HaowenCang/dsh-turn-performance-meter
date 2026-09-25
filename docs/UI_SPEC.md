@@ -184,8 +184,9 @@ Recommended composition follows the reference:
 
 The chart occupies the card's **left half** — the curve panel spans the first two of the four grid tracks, so
 Generated Tokens and TTFT keep their exact positions, labels, values and dividers across the switch. The plot is a
-hand-built SVG `path` per series in a fixed `0 0 100 48` viewBox with `preserveAspectRatio="none"` and a
-non-scaling stroke; the point count is bounded by `DEFAULT_MAX_POINTS`. No charting dependency and no canvas.
+hand-built SVG with **one `path` element per drawable run** in a fixed `0 0 100 48` viewBox with
+`preserveAspectRatio="none"` and a non-scaling stroke; the point count is bounded by `DEFAULT_MAX_POINTS`. No charting
+dependency and no canvas.
 
 Implemented in Phase 5:
 
@@ -193,9 +194,18 @@ Implemented in Phase 5:
   a phase with no drawable evidence keeps its legend entry and is marked `data-absent`;
 - the peak readout sits at the top right of the panel and always carries `≈`;
 - the axis ceiling is a 1/2/2.5/5 x 10^k round-up of the **full-series** peak, labelled at the plot's right edge;
-- each series is drawn only over its own evidence span, so a finished phase is not drawn as a flat zero line;
+- each series is drawn only over its own evidence episodes, so a finished phase is not drawn as a flat zero line;
 - the peak marker is an HTML element positioned in percentages, not an SVG `circle`, because a circle inside a
   non-uniformly stretched viewBox would render as an ellipse.
+
+Corrected in Phase 6, with no visual redesign:
+
+- **one path per run, never one path per series.** A phase may be present in more than one episode, and each episode's
+  path element carries `data-series`, `data-run` and `data-attempt`. Two runs are two elements rather than one element
+  with two subpaths, because the separation is the statement; the break itself is the whole signal, so no vertical
+  attempt-boundary marker is added.
+- **`curve.quality` is the temporal-shape axis** (`docs/METRICS_SPEC.md` §8.4). The peak's `≈` is unaffected: a curve
+  vertex is a shape weight, so the marker is approximate at every quality level.
 
 The transition is a 220 ms opacity crossfade on two stacked grid layers. `prefers-reduced-motion` removes the fade
 without removing the switch. Because the layers are stacked in one grid cell, the card's height is the taller of the
@@ -209,13 +219,18 @@ two views at every width and host font size — measured identical in both views
 - reasoning uses a subdued neutral line; output uses one accent color;
 - tool execution consumes zero x-axis width;
 - next model invocation starts immediately where previous attempt's chart segment ends;
+- **attempt boundaries break the path rather than joining it.** An attempt's one-window decay is clamped at the
+  coordinate the next attempt owns, and the two attempts are separate runs; a single line across the boundary would
+  interpolate between two calls' measurements. No marker is drawn — the break is the whole signal, and `attemptId`
+  stays on every run for diagnostics;
 - optional attempt/tool boundary markers are disabled by default;
 - one horizontal guide/scale label is sufficient; avoid a dense chart grid;
-- peak label is computed from the **full** rolling-window series, before downsampling, and is rendered with `≈`;
+- peak label is computed from the **full** per-attempt rolling series, before downsampling, and is rendered with `≈`;
 - preserve intra-model stream stalls because those are relevant to throughput stability;
-- a phase is drawn only over the interval where it has evidence (`curve.phaseSpans`); outside that interval the
-  series reads zero because the phase is absent, not because its throughput collapsed, so no zero plateau is drawn
-  and the legend marks the series absent instead.
+- a phase is drawn only over the intervals where it has evidence (`curve.phaseRuns[...]`, one entry per episode);
+  outside those intervals the series reads zero because the phase is absent, not because its throughput collapsed, so
+  no zero plateau is drawn and the legend marks the series absent instead. A phase present in two episodes yields two
+  paths with a visible gap rather than one interval spanning the stretch between them.
 
 ## 7. Responsive behavior
 

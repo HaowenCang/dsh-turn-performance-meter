@@ -140,18 +140,49 @@ Acceptance gate: a fixture containing a 60 s tool call produces virtually the sa
 
 ## Phase 6 — Robustness
 
-- [ ] Multiple tool calls, including parallel calls.
-- [ ] Tool-only/empty-output edge conditions.
-- [ ] Reasoning-only prefix then tool call.
-- [ ] Visible output + tool-call arguments in same attempt.
-- [ ] Very large write/edit payload.
-- [ ] User interruption mid-reasoning and mid-tool-argument generation.
-- [ ] Provider error and retry.
-- [ ] Missing `reasoningTokens`.
-- [ ] Missing usage for an abandoned attempt.
-- [ ] Reconnect/reload while turn is active if DSH supports baseline reconstruction.
-- [ ] Switching sessions does not leak another session's current TPS/card.
-- [ ] Disposal/HMR leaves no timers/subscriptions behind.
+Phase 6 opened with two blocking corrections from the Phase 5 independent code audit. They are prerequisites for the
+robustness rows below rather than part of them: with a rounded curve the robustness evidence would have been evidence
+about the wrong formula.
+
+- [x] **Blocking A** — the completed rolling TPS window is measured per attempt and never concatenated across an
+      attempt boundary, even though the compressed x-axis is continuous. `perAttemptSeries` measures each attempt on
+      its own clock; `compressAttempts` publishes both clocks (`activeTimeMs`, `attemptTimeMs`) so a caller cannot
+      mistake one for the other; the counterexample file reproduces the rejected pipeline and fails it.
+- [x] **Blocking B** — phase evidence is a list of episodes rather than one interval per phase, and the SVG emits one
+      path per episode. A single interval spanning an output-only stretch drew a flat zero line through a region where
+      the phase was simply absent.
+- [x] **Correction C** — `curve.quality` is `quality.temporalShapeQuality`, not `usageComplete`.
+- [x] **Correction D** — the dead `refreshMs` option was removed from core `LiveMeter` and `TurnTelemetryStore`, and a
+      source-level test now holds the separation: presentation cadence exists only in `src/client/live/cadence.js`.
+
+- [x] Multiple tool calls, including parallel calls — sequential (`t1`, `t2`, `t6`) and synthetic concurrent sets with
+      `workMs > wallMs`, an episode-bounded live timer, and a compact label bounded from 1 to 10 calls.
+- [x] Tool-only/empty-output edge conditions — `t6` is a recorded tool-only turn (four attempts, no assistant text);
+      the empty-output turn is synthetic, because a turn with no model delta produces no transient frames to record, and
+      it reports `null` rather than `0` for every value the provider did not supply.
+- [x] Reasoning-only prefix then tool call — `t1`, `t2`, `t6`.
+- [x] Visible output + tool-call arguments in same attempt — `t2`, `t6`, `t7`.
+- [x] Very large write/edit payload — `t2`.
+- [x] User interruption mid-reasoning and mid-tool-argument generation — `t3` records the mid-reasoning case; the
+      mid-tool-argument case is covered synthetically (an `abandoned` attempt with a partial prefix), because the
+      recorded cancellation landed in reasoning.
+- [x] Provider error and retry — the retry path is covered synthetically before **and** after a tool, including a retry
+      whose abandoned prefix produced a single delta and therefore shares a compressed coordinate. A **recorded** retry
+      was not obtained: `t4`, `t5` and `t8` were recorded on the official route specifically to look for one and none
+      scheduled an `llm/retry`. `test/runtime-robustness.test.js` asserts that absence, so a future recording carrying
+      one fails the test and the gap becomes visible instead of staying in a report.
+- [x] Missing `reasoningTokens` — `d1`, `t1`, `t2`, plus the whole-corpus sweep.
+- [x] Missing usage for an abandoned attempt — synthetic, and `t3` covers the recorded no-usage settlement.
+- [x] Reconnect/reload while turn is active if DSH supports baseline reconstruction — a `replace` window is a
+      rebaseline; the open turn is never rebuilt as a card, a durably settled attempt is restored with its original
+      delta timestamps, and a window that no longer holds the turn renders nothing.
+- [x] Switching sessions does not leak another session's current TPS/card — unchanged from Phase 3/4, re-asserted.
+- [x] Disposal/HMR leaves no timers/subscriptions behind — unchanged from Phase 3/4, re-asserted.
+
+Phase 6 also fixed one live-path defect found while writing the out-of-order test: `acceptChunk` passed a sample to
+the live meter without its `attemptId`, so the meter's own attempt-identity guard was unreachable and a late frame for
+a superseded attempt could enter the newer attempt's rolling rate. The sample is now stamped before it reaches the
+meter.
 
 Acceptance gate: no NaN/Infinity, no stale cross-session state, no falsely exact metric.
 

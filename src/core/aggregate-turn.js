@@ -292,6 +292,11 @@ export function aggregateTurn(input = {}) {
     durable: input.durable === true,
     timestampsComplete: input.timestampsComplete !== false,
     anchored: reduced.length > 0 && reduced.every(a => a.totalAnchored === true),
+    /**
+     * The count the temporal axis is measured from. Without it `temporalShapeQuality`
+     * answers `unavailable` — there is no shape to describe — so omitting it here
+     * silently capped the strongest achievable curve quality at `estimated`.
+     */
     sampleCount: reduced.reduce((sum, a) => sum + a.sampleCount, 0),
   })
 

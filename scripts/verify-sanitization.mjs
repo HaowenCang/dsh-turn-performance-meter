@@ -143,11 +143,24 @@ for (const sub of SUBS) {
 }
 
 console.log('\n=== B. file set + structural evidence preservation ===')
-const missing = [...published].filter(n => !rawNames.has(n))
+/**
+ * A published fixture is checked against its raw original when one is present.
+ * `fixtures/raw/` is gitignored, so a fresh clone has none and this section can
+ * only report that; when it does have them, the file sets must correspond exactly.
+ * A fixture whose original is absent is still verified by section A — it must
+ * carry markers and no forbidden term — so a newly recorded fixture cannot pass
+ * unnoticed merely because its original was never kept.
+ */
+const comparable = [...published].filter(n => rawNames.has(n))
+const missing = [...comparable].filter(n => !published.has(n))
 const extra = [...rawNames].filter(n => !published.has(n))
 if (missing.length) { failures += 1; console.log(`  MISSING published fixtures vs raw: ${missing.join(', ')}`) }
 if (extra.length) { failures += 1; console.log(`  EXTRA fixtures vs raw: ${extra.join(', ')}`) }
-if (!missing.length && !extra.length) console.log(`  file set identical: ${published.size} fixtures`)
+if (!missing.length && !extra.length) console.log(`  file set identical: ${comparable.length} fixtures`)
+const withoutOriginal = [...published].filter(n => !rawNames.has(n))
+if (withoutOriginal.length) {
+  console.log(`  no raw original kept for: ${withoutOriginal.join(', ')} (structure not cross-checked)`)
+}
 
 for (const sub of SUBS) {
   const dir = join('fixtures', sub)

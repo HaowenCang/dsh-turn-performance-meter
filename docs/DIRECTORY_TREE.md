@@ -29,12 +29,15 @@ dsh-turn-performance-meter/
 ├── fixtures/                         Recorded DSH turn evidence (offline; no DSH needed)
 │   ├── README.md                     Scenario table, file shape, regeneration steps
 │   ├── index.json                    Generated index of the recorded set
-│   ├── dsh-turns/                    Five real turns: durable + transient planes verbatim
+│   ├── dsh-turns/                    Eight real turns: durable + transient planes verbatim
 │   │   ├── t1-reasoning-tool-reasoning.json
 │   │   ├── t2-pwsh-write-edit.json
 │   │   ├── t3-interrupted-mid-reasoning.json
 │   │   ├── t4-reasoning-tool-deepseek-official.json
-│   │   └── t5-reasoning-text-deepseek-official.json
+│   │   ├── t5-reasoning-text-deepseek-official.json
+│   │   ├── t6-tool-only-deepseek-official.json
+│   │   ├── t7-failing-pwsh-deepseek-official.json
+│   │   └── t8-reasoning-no-retry-deepseek-official.json
 │   └── derived/                      Four declared synthetic mutations
 │       ├── d1-no-reasoning-tokens.json
 │       ├── d2-partial-usage.json
@@ -52,8 +55,8 @@ dsh-turn-performance-meter/
 │   │   ├── sliding-window.js         Trailing-1s meter with attempt epochs
 │   │   ├── live-metrics.js           LiveMeter: rolling window, TTFT, tool phase
 │   │   ├── tool-timing.js            Sum and union tool durations
-│   │   ├── time-axis.js              Compressed model-attempt chart clock
-│   │   ├── curve.js                  Rolling completed curve, peak, downsampling
+│   │   ├── time-axis.js              Compressed model-attempt chart clock (two clocks per sample)
+│   │   ├── curve.js                  Per-attempt rolling series, phase runs, peak, downsampling
 │   │   ├── aggregate-turn.js         Turn-level weighted final metrics + quality axes
 │   │   └── turn-state.js             Pure lifecycle state machine + turn/end mapping
 │   │
@@ -88,8 +91,8 @@ dsh-turn-performance-meter/
 │       ├── completed/                Completed card + the Phase 5 curve view
 │       │   ├── completed-tree.js     React-free card shell: two stacked views, footer, aria
 │       │   ├── metric-cell.js        One metric column, shared by both views
-│       │   ├── curve-view-model.js   The ONLY curve seam: spans, axis, path data, peak marker
-│       │   ├── curve-tree.js         React-free SVG element tree for the curve panel
+│       │   ├── curve-view-model.js   The ONLY curve seam: phase runs, axis, per-run path, peak marker
+│       │   ├── curve-tree.js         React-free SVG element tree, one <path> per run
 │       │   ├── view-mode.js          Hover/focus interaction state machine (pure)
 │       │   ├── CompletedMeter.js     React binding over the card (browser-only)
 │       │   └── completed-css.js      scoped card stylesheet (4-column grid, 2-column wrap)
@@ -127,12 +130,18 @@ dsh-turn-performance-meter/
 │   ├── completed-tree.test.js         Card element tree, aria, footer, per-layer no-chart contract
 │   ├── completed-lifecycle.test.js    Live/completed switching, durable reload, static card
 │   ├── completed-interaction.test.js  Hover/focus/blur machine, aria-hidden, focus ring, empty curve
-│   ├── curve-view-model.test.js       Evidence spans, axis ceiling, peak marker, bounded geometry
+│   ├── curve-view-model.test.js       Evidence runs, axis ceiling, peak marker, bounded geometry
+│   ├── curve-attempt-boundary.test.js Phase 6: the cross-attempt counterexample + live equivalence
+│   ├── curve-regression-matrix.test.js Phase 6: one named scenario per frozen curve semantic
+│   ├── curve-quality.test.js          Phase 6: curve quality is the temporal-shape axis
+│   ├── cadence-contract.test.js       Phase 6: source-level core/client timing separation
+│   ├── runtime-robustness.test.js     Phase 6: tools, retries, errors, reload, duplicate frames
 │   └── completed-format.test.js       Formatter edge cases (no NaN/Infinity/-0 in UI)
 │
 └── scripts/
     └── verify-structure.mjs
     └── bundle-client.mjs / build-client.mjs
+    └── sanitize-fixtures.mjs / verify-sanitization.mjs
 
 dev/screenshots/                      git-ignored evidence captures (phase3/, phase4/, phase5/)
 ```
@@ -141,9 +150,13 @@ Expected evolution during implementation:
 
 ```text
 src/client/    — landed in Phase 5 as src/client/completed/{curve-view-model,curve-tree,view-mode}.js
-test/          — landed in Phase 5 as curve-view-model.test.js and completed-interaction.test.js
+test/          — landed in Phase 5 as curve-view-model.test.js and completed-interaction.test.js;
+                 Phase 6 added curve-attempt-boundary, curve-regression-matrix, curve-quality,
+                 cadence-contract and runtime-robustness
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
-                 JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10)
+                 JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
+                 Phase 6 verified the *served* client bundle in the live page instead of taking
+                 pixels, and TEST_PLAN.md §3 states that gap explicitly.
 ```
 
 Do not create parallel copies of the same metric formula in host and client. Pure formulas remain in `src/core` and are reused wherever the final build pipeline permits. `scripts/verify-structure.mjs` fails when a `src/core` module has no matching test.

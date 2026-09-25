@@ -1,0 +1,8 @@
+﻿{
+    "ok":  true,
+    "sessionId":  "fixture-muh38jd1-3",
+    "agentPreset":  "standard",
+    "provider":  "command-goat",
+    "model":  "deepseek/deepseek-v4.1-flash",
+    "interruptArmed":  false
+}

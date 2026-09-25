@@ -5,6 +5,8 @@ import {
   MIN_MAX_POINTS,
   downsampleSeries,
   peakTps,
+  perAttemptSeries,
+  phaseRuns,
   phaseSpans,
   rollingTpsSeries,
 } from '../src/core/curve.js'
@@ -217,30 +219,146 @@ test('a budget that cannot hold the mandatory anchors is refused rather than sil
   assert.doesNotThrow(() => downsampleSeries(series, MIN_MAX_POINTS))
 })
 
-test('a phase span marks where a series means something, not where it happens to read zero', () => {
+/**
+ * One compressed segment, with the two fields `phaseRuns` reads: where the attempt
+ * ends and whether a later call owns the coordinates after it. `hasSuccessor:
+ * false` is what lets the final attempt draw its one-window decay, so it is stated
+ * explicitly rather than inferred from `nextStartMs`, which equals `endMs` in both
+ * cases.
+ */
+function segment(attemptId, startMs, endMs, { hasSuccessor = false } = {}) {
+  return { attemptId, startMs, endMs, localEndMs: endMs - startMs, nextStartMs: endMs, hasSuccessor }
+}
+
+test('a phase run marks where a series means something, not where it happens to read zero', () => {
+  const segments = [segment('a', 0, 12_000)]
   const samples = [
-    { activeTimeMs: 0, phase: 'reasoning', tokens: 5 },
-    { activeTimeMs: 3000, phase: 'reasoning', tokens: 5 },
-    { activeTimeMs: 9000, phase: 'output', tokens: 5 },
-    { activeTimeMs: 12_000, phase: 'output', tokens: 5 },
+    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
+    { activeTimeMs: 3000, phase: 'reasoning', attemptId: 'a' },
+    { activeTimeMs: 9000, phase: 'output', attemptId: 'a' },
+    { activeTimeMs: 12_000, phase: 'output', attemptId: 'a' },
   ]
-  const spans = phaseSpans(samples, 15_000, 1000)
-  assert.deepEqual(spans.reasoning, { startMs: 0, endMs: 4000 },
-    'reasoning is evidenced up to one window after its last token')
-  assert.deepEqual(spans.output, { startMs: 9000, endMs: 13_000 })
+  const runs = phaseRuns(samples, segments, 1000)
+
   /**
-   * The interval between them — 4 s to 9 s — is where an output-only zero for
-   * reasoning would be a lie: reasoning had ended, it had not collapsed.
+   * Two reasoning samples three seconds apart do not share a window, so they are
+   * two episodes rather than one interval covering the silence between them. Each
+   * episode still carries its own one-window tail, and this attempt is the last, so
+   * the tail is not capped by a following call.
    */
-  assert.ok(spans.reasoning.endMs < spans.output.startMs)
+  assert.deepEqual(runs.reasoning.map(r => [r.startMs, r.endMs]), [[0, 1000], [3000, 4000]],
+    'each reasoning sample is evidenced for one window, and the silence splits them')
+  assert.deepEqual(runs.output.map(r => [r.startMs, r.endMs]), [[9000, 10_000], [12_000, 13_000]])
+  /**
+   * The region between reasoning's last evidence (4 s) and output's first (8 s) is
+   * where an output-only zero for reasoning would be a lie: reasoning had ended, it
+   * had not collapsed.
+   */
+  assert.ok(runs.reasoning.at(-1).endMs < runs.output[0].startMs)
 })
 
-test('a phase with no samples has no span, and the tail is clamped to the duration', () => {
-  const spans = phaseSpans([{ activeTimeMs: 500, phase: 'output', tokens: 1 }], 1000, 1000)
-  assert.equal(spans.reasoning, null, 'absent phase, absent span — never a zero line')
-  assert.deepEqual(spans.output, { startMs: 500, endMs: 1000 }, 'the window tail cannot exceed the turn')
-  assert.deepEqual(phaseSpans([], 0, 1000), { reasoning: null, output: null })
-  assert.deepEqual(phaseSpans(null, Number.NaN, 1000), { reasoning: null, output: null })
+test('phase runs are one interval per episode, so an absent stretch is never bridged', () => {
+  /**
+   * `Reasoning A -> Output A -> Reasoning B`: the previous single-span shape ran
+   * from the first reasoning sample to the last one plus a window, covering the
+   * output-only stretch in between. Drawing that shape emits a flat zero line
+   * exactly where reasoning was absent.
+   */
+  const segments = [segment('a', 0, 13_000)]
+  const samples = [
+    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
+    { activeTimeMs: 1000, phase: 'reasoning', attemptId: 'a' },
+    { activeTimeMs: 2000, phase: 'output', attemptId: 'a' },
+    { activeTimeMs: 8000, phase: 'output', attemptId: 'a' },
+    { activeTimeMs: 12_000, phase: 'reasoning', attemptId: 'a' },
+    { activeTimeMs: 13_000, phase: 'reasoning', attemptId: 'a' },
+  ]
+  const runs = phaseRuns(samples, segments, 1000)
+  assert.equal(runs.reasoning.length, 2, 'two episodes, two runs')
+  assert.deepEqual(runs.reasoning.map(r => [r.startMs, r.endMs]), [[0, 2000], [12_000, 14_000]])
+  assert.ok(runs.reasoning[0].endMs < runs.reasoning[1].startMs)
+  assert.equal(runs.output.length, 2, 'the output inside the gap is its own episode too')
+
+  /**
+   * The rejected single-span view can only report the outer bounds, and that
+   * interval covers the output-only stretch where reasoning had no evidence at all.
+   */
+  const outer = phaseSpans(samples, segments, 1000)
+  assert.deepEqual(outer.reasoning, { startMs: 0, endMs: 14_000 })
+  assert.ok(outer.reasoning.startMs < runs.output[0].startMs
+    && outer.reasoning.endMs > runs.output.at(-1).endMs,
+  'the single span covers the region where reasoning is absent')
+})
+
+test('same-phase episodes merge when the window never closed, and split when it did', () => {
+  const segments = [segment('a', 0, 20_000)]
+  /** A 1000 ms window: a gap of exactly one window leaves no absent stretch. */
+  const touching = [
+    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
+    { activeTimeMs: 1000, phase: 'reasoning', attemptId: 'a' },
+  ]
+  assert.equal(phaseRuns(touching, segments, 1000).reasoning.length, 1,
+    'the second episode begins where the first one\'s tail ends, so they are one run')
+
+  const split = [
+    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
+    { activeTimeMs: 1001, phase: 'reasoning', attemptId: 'a' },
+  ]
+  assert.equal(phaseRuns(split, segments, 1000).reasoning.length, 2,
+    'one millisecond past the tail is a real absence and must split')
+})
+
+test('phase runs never merge across an attempt boundary, however small the gap', () => {
+  const samples = [
+    { activeTimeMs: 0, phase: 'output', attemptId: 'a' },
+    { activeTimeMs: 100, phase: 'output', attemptId: 'b' },
+  ]
+  /** Two attempts on adjacent coordinates: the tails would overlap if merged. */
+  const runs = phaseRuns(samples, [
+    segment('a', 0, 100, { hasSuccessor: true }),
+    segment('b', 100, 200),
+  ], 1000)
+  assert.equal(runs.output.length, 2, 'a change of attemptId splits unconditionally')
+  assert.deepEqual(runs.output.map(r => r.attemptId), ['a', 'b'])
+  assert.deepEqual(runs.output.map(r => [r.startMs, r.endMs]), [[0, 100], [100, 1100]],
+    'the first attempt is cut at the boundary; the last one keeps its own tail')
+})
+
+test('a run tail belongs to the attempt that produced it', () => {
+  const segments = [
+    segment('a', 0, 500, { hasSuccessor: true }),
+    segment('b', 500, 1000),
+  ]
+  const samples = [
+    { activeTimeMs: 0, phase: 'output', attemptId: 'a' },
+    { activeTimeMs: 500, phase: 'output', attemptId: 'b' },
+  ]
+  const runs = phaseRuns(samples, segments, 1000)
+  assert.deepEqual(runs.output.map(r => [r.startMs, r.endMs]), [[0, 500], [500, 1500]],
+    'the first attempt\'s one-second tail is cut at its own end rather than drawn over the next call')
+  assert.equal(runs.output[0].endMs, segments[0].endMs,
+    'it stops exactly where the attempt that follows begins')
+})
+
+test('a phase with no samples has no runs', () => {
+  const segments = [{ attemptId: 'a', startMs: 0, endMs: 1000 }]
+  const runs = phaseRuns([{ activeTimeMs: 500, phase: 'output', attemptId: 'a' }], segments, 1000)
+  assert.deepEqual(runs.reasoning, [], 'absent phase, no run — never a zero line')
+  assert.equal(runs.output.length, 1)
+  assert.deepEqual(phaseRuns([], [], 1000), { reasoning: [], output: [] })
+  assert.deepEqual(phaseRuns(null, null, 1000), { reasoning: [], output: [] })
+})
+
+test('a late sample cannot open a second run for an attempt that already has one', () => {
+  /** Deliberately out of order: the run structure follows segments, not arrival. */
+  const samples = [
+    { activeTimeMs: 900, phase: 'output', attemptId: 'a' },
+    { activeTimeMs: 100, phase: 'output', attemptId: 'a' },
+  ]
+  const runs = phaseRuns(samples, [{ attemptId: 'a', startMs: 0, endMs: 1000 }], 1000)
+  assert.equal(runs.output.length, 1)
+  assert.equal(runs.output[0].startMs, 100)
+  assert.equal(runs.output[0].sampleCount, 2)
 })
 
 test('the rendered series stays bounded for a real turn shape', () => {

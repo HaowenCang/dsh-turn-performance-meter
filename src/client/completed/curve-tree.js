@@ -71,7 +71,17 @@ function legendTree(createElement, curveView, translate) {
 }
 
 /**
- * Plot area: one path per present series, the axis ceiling, and the peak marker.
+ * Plot area: one path element per drawable **run**, the axis ceiling, and the
+ * peak marker.
+ *
+ * A phase may appear in more than one episode, so the renderer receives a list of
+ * runs per series and emits one `<path>` for each. Two runs are two elements, never
+ * one element with two subpaths, because the separation is the statement: the
+ * curve genuinely stopped and started again, and the reader must see a gap rather
+ * than a line drawn through a stretch where nothing was generated. No vertical
+ * attempt-boundary marker is added — the break itself is the whole signal, and a
+ * divider per attempt would decorate the chart with information the reader did not
+ * ask for.
  *
  * `viewBox="0 0 100 48"` with `preserveAspectRatio="none"` and a non-scaling
  * stroke keeps the y scale at one unit per unit at any container width, which is
@@ -87,14 +97,22 @@ function legendTree(createElement, curveView, translate) {
 function plotTree(createElement, curveView, translate) {
   const paths = []
   for (const series of curveView.series) {
-    if (series.present !== true || typeof series.path !== 'string') continue
-    paths.push(createElement('path', {
-      key: series.key,
-      className: 'dsh-tpm-series',
-      'data-series': series.key,
-      d: series.path,
-      vectorEffect: 'non-scaling-stroke',
-    }))
+    for (const [index, run] of series.runs.entries()) {
+      if (run.present !== true || typeof run.path !== 'string') continue
+      paths.push(createElement('path', {
+        /**
+         * `attemptId` is retained on the element so a future diagnostic can point
+         * at one call, but it is not rendered as anything.
+         */
+        key: `${series.key}:${run.attemptId ?? 'unknown'}:${index}`,
+        className: 'dsh-tpm-series',
+        'data-series': series.key,
+        'data-run': String(index),
+        'data-attempt': run.attemptId === null ? '' : String(run.attemptId),
+        d: run.path,
+        vectorEffect: 'non-scaling-stroke',
+      }))
+    }
   }
 
   const svg = createElement('svg', {

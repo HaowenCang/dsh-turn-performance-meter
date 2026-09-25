@@ -5,15 +5,22 @@
  * it may bend:
  *
  *     settled snapshot (already decoded, aggregated, calibrated, compressed,
- *                       windowed and downsampled)
+ *                       windowed, run-split and downsampled)
  *         -> curveViewModel(settled)          <- this module
  *         -> SVG element tree                 (`curve-tree.js`)
  *
  * The React layer therefore never decodes an event, aggregates a turn, compresses
- * an attempt axis, rolls a TPS window or downsamples a raw delta — it renders
- * numbers and path strings that were decided here. That matters because those
- * five operations are the statistics; a component that recomputed any of them
- * would be a second, silently divergent definition of TPS.
+ * an attempt axis, rolls a TPS window, splits a phase into episodes or downsamples
+ * a raw delta — it renders numbers and path strings that were decided here. That
+ * matters because those six operations are the statistics; a component that
+ * recomputed any of them would be a second, silently divergent definition of TPS.
+ *
+ * **One series, several paths.** A phase may be present in more than one
+ * *episode*: `Reasoning A -> Output A -> Tool -> Reasoning B` puts two reasoning
+ * runs on one curve, and `source.curve.series[].runs` carries them separately. This
+ * module turns each run into its own `M...L...` path and never joins two runs,
+ * because the join is a fabricated straight line through a stretch where the phase
+ * produced nothing. The reader sees a gap, which is what happened.
  *
  * Geometry is expressed in a fixed logical viewBox (`0 0 100 48`) that the SVG
  * stretches to its container with `preserveAspectRatio="none"` and
@@ -69,51 +76,142 @@ function yOf(tps, axisMax) {
   return CURVE_PLOT_HEIGHT - PLOT_INSET - ratio * usable
 }
 
-/** Coordinates and a path string for one series' drawable stretch. */
-function buildSeries(points, span, durationMs, axisMax) {
-  /**
-   * Three states, and they mean different things:
-   *
-   *   - `undefined` — the snapshot carries no span metadata at all (an older
-   *     curve object). Nothing is filtered;
-   *   - `null` — the phase has no evidence in this turn. Nothing is drawn;
-   *   - an object — only that interval is drawn.
-   *
-   * Collapsing the first two would make a legacy snapshot lose both curves.
-   */
-  if (span === null) return { present: false, points: 0, path: null, coordinates: [], peak: null }
-
-  const drawn = []
-  for (const point of Array.isArray(points) ? points : []) {
-    if (!Number.isFinite(point?.timeMs) || !Number.isFinite(point?.tps)) continue
-    /**
-     * Only the stretch where this phase has evidence is drawn. Outside it the
-     * series reads zero because the phase is absent, and drawing that as a flat
-     * zero line would present "reasoning has ended" as "reasoning throughput
-     * collapsed" (see `phaseSpans` in `src/core/curve.js`).
-     */
-    if (span !== undefined && (point.timeMs < span.startMs || point.timeMs > span.endMs)) continue
-    const x = xOf(point.timeMs, durationMs)
-    if (x === null) continue
-    drawn.push({ x, y: yOf(point.tps, axisMax), tps: point.tps, timeMs: point.timeMs })
-  }
-
-  if (drawn.length < 2) {
-    return { present: false, points: drawn.length, path: null, coordinates: drawn, peak: null }
-  }
-
-  const path = drawn
-    .map((point, index) => `${index === 0 ? 'M' : 'L'}${round(point.x)} ${round(point.y)}`)
-    .join(' ')
-
-  let peak = drawn[0]
-  for (const point of drawn) if (point.tps > peak.tps) peak = point
-  return { present: true, points: drawn.length, path, coordinates: drawn, peak }
-}
-
 /** Two decimals is well below one device pixel in a `100`-wide stretched viewBox. */
 function round(value) {
   return Math.round(value * 100) / 100
+}
+
+/**
+ * Turn one run's vertices into coordinates and a single-subpath `d` string.
+ *
+ * A run shorter than two vertices is not drawable: one point is a measurement,
+ * not a line. It is reported as `present: false` with its coordinates intact, so
+ * a caller can still see that the attempt produced something.
+ */
+function buildRun(run, durationMs, axisMax) {
+  const coordinates = []
+  for (const point of Array.isArray(run?.points) ? run.points : []) {
+    if (!Number.isFinite(point?.timeMs) || !Number.isFinite(point?.tps)) continue
+    const x = xOf(point.timeMs, durationMs)
+    if (x === null) continue
+    coordinates.push({
+      x,
+      y: yOf(point.tps, axisMax),
+      tps: point.tps,
+      timeMs: point.timeMs,
+      attemptId: run.attemptId ?? null,
+    })
+  }
+
+  if (coordinates.length < 2) {
+    return {
+      attemptId: run?.attemptId ?? null,
+      startMs: run?.startMs ?? null,
+      endMs: run?.endMs ?? null,
+      present: false,
+      path: null,
+      coordinates,
+      points: coordinates.length,
+      peak: coordinates.length === 1 ? coordinates[0] : null,
+    }
+  }
+
+  /**
+   * One `M`, then `L` for every other vertex. This string is deliberately
+   * self-contained: joining two runs' strings would produce
+   * `M...L... M...L...` — which is two subpaths, so the break would still be
+   * correct — but a renderer that instead concatenated their *coordinates* would
+   * draw the bridging line this whole structure exists to forbid.
+   */
+  const path = coordinates
+    .map((point, index) => `${index === 0 ? 'M' : 'L'}${round(point.x)} ${round(point.y)}`)
+    .join(' ')
+
+  let peak = coordinates[0]
+  for (const point of coordinates) if (point.tps > peak.tps) peak = point
+
+  return {
+    attemptId: run?.attemptId ?? null,
+    startMs: run?.startMs ?? null,
+    endMs: run?.endMs ?? null,
+    present: true,
+    path,
+    coordinates,
+    points: coordinates.length,
+    peak,
+  }
+}
+
+/** One series entry: every run of one phase, each with its own path. */
+function buildSeries(entry, durationMs, axisMax) {
+  const runs = (Array.isArray(entry?.runs) ? entry.runs : []).map(run => buildRun(run, durationMs, axisMax))
+  const drawable = runs.filter(run => run.present)
+  /**
+   * The peak spans every run, drawable or not. A run of one vertex cannot be drawn
+   * as a line, but its measurement is real, and the turn peak is a statistic — a
+   * rendering limitation may not lower a published number.
+   */
+  let peak = null
+  for (const run of runs) {
+    if (run.peak === null) continue
+    if (peak === null || run.peak.tps > peak.tps) peak = run.peak
+  }
+  return {
+    key: entry?.key ?? null,
+    tone: entry?.tone ?? null,
+    present: drawable.length > 0,
+    runs,
+    /** Concatenated vertices of every run, for a caller that wants one array. */
+    coordinates: runs.flatMap(run => run.coordinates),
+    points: runs.reduce((sum, run) => sum + run.points, 0),
+    /** The single strongest vertex across this phase's runs, or `null`. */
+    peak,
+    /**
+     * A single path string covering every run, for a caller that cannot render a
+     * list. Each run opens its own `M`, so the subpaths are still disjoint even
+     * here: this is a convenience, not a licence to join them.
+     */
+    path: drawable.length === 0 ? null : drawable.map(run => run.path).join(' '),
+  }
+}
+
+/**
+ * Rebuild run structure from a pre-Phase-6 snapshot's flat `reasoning`/`output`
+ * arrays.
+ *
+ * An older snapshot carries no runs, and a phase's evidence is bounded by the
+ * intervals `phaseSpans` recorded. A snapshot older still carries neither, and
+ * then the whole array is one run — the only honest reading of "no availability
+ * metadata". This path exists so a stale snapshot degrades to the old drawing
+ * rather than to an empty chart.
+ */
+function legacyRuns(curve, key) {
+  const points = Array.isArray(curve?.[key]) ? curve[key] : []
+  if (points.length === 0) return []
+  const spans = curve?.phaseSpans
+  const span = spans !== null && typeof spans === 'object' ? (spans[key] ?? null) : undefined
+  if (span === null) return []
+  const filtered = span === undefined
+    ? points
+    : points.filter(point => Number.isFinite(point?.timeMs) && point.timeMs >= span.startMs && point.timeMs <= span.endMs)
+  if (filtered.length === 0) return []
+  return [{
+    attemptId: null,
+    phase: key,
+    startMs: filtered[0].timeMs,
+    endMs: filtered[filtered.length - 1].timeMs,
+    attemptTokens: null,
+    points: filtered,
+  }]
+}
+
+/** The run list of one series, from the modern structure or the legacy one. */
+function runsOf(curve, key, legacy) {
+  const entry = Array.isArray(curve?.series)
+    ? curve.series.find(candidate => candidate?.key === key)
+    : undefined
+  if (entry !== undefined) return entry
+  return { key, tone: key === 'output' ? 'accent' : 'neutral', runs: legacyRuns(curve, key) }
 }
 
 /**
@@ -129,12 +227,6 @@ export function curveViewModel(settled) {
 
   const durationMs = Number.isFinite(curve.durationMs) ? Math.max(0, curve.durationMs) : 0
   /**
-   * A snapshot that predates `phaseSpans` carries no availability metadata, so
-   * `undefined` means "draw what is there" rather than "this phase is absent".
-   */
-  const hasSpans = curve.phaseSpans !== null && typeof curve.phaseSpans === 'object'
-  const spanOf = phase => (hasSpans ? (curve.phaseSpans[phase] ?? null) : undefined)
-  /**
    * The axis is scaled by the **full-series** peak, never by the drawn points:
    * downsampling is a drawing budget and may not rescale the chart either.
    * `downsampleSeries` guarantees the peak-bearing point survives, so the drawn
@@ -143,10 +235,14 @@ export function curveViewModel(settled) {
   const peakValue = Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : 0
   const axisMax = niceCeiling(peakValue)
 
-  const reasoning = buildSeries(curve.reasoning, spanOf('reasoning'), durationMs, axisMax)
-  const output = buildSeries(curve.output, spanOf('output'), durationMs, axisMax)
+  const reasoning = buildSeries(runsOf(curve, 'reasoning'), durationMs, axisMax)
+  const output = buildSeries(runsOf(curve, 'output'), durationMs, axisMax)
 
-  /** The series that actually holds the global peak, so the marker sits on it. */
+  /**
+   * The series holding the global peak, so the marker sits on it. Ties resolve to
+   * `output`, matching the fixed legend order and keeping the position stable
+   * between two runs over equal input.
+   */
   const leader = (output.peak?.tps ?? -1) > (reasoning.peak?.tps ?? -1) ? 'output' : 'reasoning'
   const leaderSeries = leader === 'output' ? output : reasoning
 
@@ -166,6 +262,11 @@ export function curveViewModel(settled) {
       { key: 'output', tone: 'accent', ...output },
     ],
     /**
+     * Per-phase episode intervals, carried through for diagnostics and for tests
+     * that assert no drawable path crosses an absent stretch.
+     */
+    phaseRuns: curve.phaseRuns ?? { reasoning: [], output: [] },
+    /**
      * The peak is a sample of a shape-estimated series, so it is `≈` even when
      * the generated total is exact — a curve point is not a provider-certified
      * maximum (`docs/METRICS_SPEC.md` §9). `x`/`y` place the marker on the
@@ -182,5 +283,8 @@ export function curveViewModel(settled) {
     },
     /** Drawn vertex count, so a test can assert the SVG input is bounded. */
     drawnPoints: reasoning.points + output.points,
+    /** Rendered subpath count: one per drawable run, never one per series. */
+    drawnRuns: reasoning.runs.filter(run => run.present).length
+      + output.runs.filter(run => run.present).length,
   }
 }

@@ -60,6 +60,9 @@ export {
   DEFAULT_WINDOW_MS,
   downsampleSeries,
   peakTps,
+  perAttemptSeries,
+  phaseRuns,
+  phaseSpans,
   rollingTpsSeries,
 } from './curve.js'
 

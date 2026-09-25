@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import { MetricQuality } from '../src/core/metric-quality.js'
+import { peakTps } from '../src/core/curve.js'
 
 function chunk(type, text) {
   if (type === 'reasoning') return { type: 'reasoning-delta', index: 0, text }
@@ -111,10 +112,81 @@ test('the curve is compressed: tool waits and next-call TTFT contribute no width
   assert.deepEqual(settled.curve.segments.map(s => [s.startMs, s.endMs]), [
     [0, 2000], [2000, 8000], [8000, 12_000],
   ])
-  assert.equal(settled.curve.reasoning.at(-1).timeMs, 12_000)
-  assert.equal(settled.curve.output.at(-1).timeMs, 12_000)
-  assert.equal(settled.curve.quality, 'calibrated')
+  assert.equal(settled.curve.quality, 'estimated')
   assert.ok(settled.curve.peakTps > 0)
+})
+
+test('the completed curve is a per-attempt run list, not one array spanning every call', () => {
+  const store = new TurnTelemetryStore()
+  const { settled } = driveMultiCallTurn(store)
+  const curve = settled.curve
+
+  assert.deepEqual(curve.series.map(s => s.key), ['reasoning', 'output'],
+    'the legend order is fixed')
+  /**
+   * One run per attempt **episode** that produced that phase. Two facts show up
+   * here and both are the point of the Phase 6 structure: attempt `c1` emitted
+   * output only, so the reasoning series has fewer runs than the output series —
+   * the structure reports what happened rather than padding a missing phase with
+   * zeros; and attempt `b1`'s two reasoning samples are three seconds apart, which
+   * is longer than the one-second window, so they are two reasoning episodes rather
+   * than one interval spanning the silence between them.
+   */
+  assert.deepEqual(
+    curve.series.find(s => s.key === 'reasoning').runs.map(run => run.attemptId),
+    ['a1', 'b1', 'b1'],
+  )
+  assert.deepEqual(
+    curve.series.find(s => s.key === 'output').runs.map(run => run.attemptId),
+    ['a1', 'b1', 'b1', 'c1', 'c1'],
+    'attempt b1 and c1 each produce two output episodes, four and three seconds apart',
+  )
+
+  /**
+   * `attemptTokens` is the attempt's total for **that phase**, so every run of one
+   * attempt in one series reports the same figure — the phase's shape total, which
+   * `calibrateAttemptSamples` anchors to the authoritative usage. It is a property
+   * of the attempt, not of the run, so episodes cannot dilute it.
+   */
+  const totalsBySeriesAndAttempt = new Map()
+  for (const series of curve.series) {
+    for (const run of series.runs) {
+      const key = `${series.key}:${run.attemptId}`
+      const seen = totalsBySeriesAndAttempt.get(key)
+      if (seen === undefined) totalsBySeriesAndAttempt.set(key, run.attemptTokens)
+      else assert.equal(run.attemptTokens, seen, `${key} reports one token total`)
+    }
+  }
+  for (const series of curve.series) {
+    for (const run of series.runs) {
+      assert.equal(run.phase, series.key)
+      /**
+       * Every vertex carries both clocks: the shared compressed coordinate it is
+       * drawn at, and the attempt-local instant the window was measured on. An
+       * episode that is not the attempt's first therefore opens at a local offset,
+       * which is exactly the distinction the single-clock revision lost.
+       */
+      assert.equal(run.points[0].timeMs, run.startMs, 'the first vertex sits at the run\'s own start')
+      assert.ok(run.points[0].localMs >= 0)
+      assert.equal(run.points.at(-1).timeMs, run.drawnToMs, 'and the last vertex at the run\'s draw limit')
+      assert.ok(run.points.at(-1).timeMs <= run.endMs)
+      assert.ok(run.attemptTokens > 0)
+      assert.equal(run.peak, peakTps(run.points))
+    }
+  }
+
+  /**
+   * The flat arrays remain for callers that want one list, and they carry the
+   * attempt identity on every point so a renderer can still segment them.
+   */
+  assert.equal(curve.output.length, curve.series[1].runs.reduce((n, run) => n + run.points.length, 0))
+  for (const point of curve.output) assert.ok(typeof point.attemptId === 'string')
+  const grouped = curve.output.map(p => p.attemptId).filter((id, i, all) => id !== all[i - 1])
+  assert.deepEqual(grouped, ['a1', 'b1', 'c1'],
+    'the flat list is contiguous per attempt, so it can be segmented in one pass')
+  assert.deepEqual(curve.output.map(p => p.attemptId), [
+    ...curve.series[1].runs.flatMap(run => run.points.map(() => run.attemptId)),
+  ], 'and its order is the run order, so the two views cannot disagree')
 })
 
 test('the live window is reset at each attempt and reports no TPS while a tool runs', () => {

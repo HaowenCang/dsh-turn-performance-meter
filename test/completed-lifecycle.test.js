@@ -21,6 +21,7 @@ import { createController } from '../src/client/live/controller.js'
 import { LiveUiState } from '../src/client/live/live-state.js'
 import { completedViewModel } from '../src/client/ui-model.js'
 import { QualityLevel } from '../src/core/quality-model.js'
+import { turnKey } from '../src/core/types.js'
 import { loadFixture, listFixtures } from './helpers/fixtures.js'
 import { durableSettledView, liveSettledView } from './helpers/equivalence.js'
 import { durableEntry, fakeSessionsService, fixtureEntries, transientEntry } from './helpers/live-replay.js'
@@ -375,6 +376,144 @@ test('a rebaseline drops live state but the rebuilt window still yields the card
     after,
     'and it is memoized again after the replay',
   )
+  controller.dispose()
+})
+
+/**
+ * Reload mid-turn.
+ *
+ * The hard case the whole completed path exists for: the page reloads while the
+ * turn is still open. The new window contains `turn/start`, whatever attempts had
+ * already settled durably, and — for the attempt still streaming — nothing but a
+ * durable settlement if one has been committed since.
+ *
+ * Two rules are frozen here. A reload must not turn the turn into a completed card
+ * it never was, and the live pane must not present the pre-reload window's tokens as
+ * a current rate: those transient deltas are gone, and a rolling window reassembled
+ * as though they had arrived would be a fabrication rather than a measurement.
+ */
+test('a reload mid-turn reopens the live pill from durable evidence and claims no completed card', () => {
+  const sessions = fakeSessionsService()
+  const source = sessions.createSource('s-reload')
+  const controller = createController({ sessions })
+  controller.attach('s-reload')
+  let revision = 1
+
+  /** Live, before the reload: a turn open, one attempt streaming. */
+  source.appendEntry(durableEntry('turn/start', 4, 1000, { turn: 1 }), (revision += 1))
+  source.appendEntry(transientEntry('a:1', 1100, { type: 'text-delta', index: 0, text: 'x'.repeat(400) }), (revision += 1))
+  source.appendEntry(transientEntry('a:1', 1600, { type: 'text-delta', index: 0, text: 'x'.repeat(400) }), (revision += 1))
+  const beforeReload = controller.project('s-reload', 1600)
+  assert.equal(beforeReload.kind, 'streaming')
+  assert.ok(beforeReload.tps > 0)
+
+  /**
+   * The reload: the superseded window is swapped for the durable plane only. The
+   * open turn's transient deltas are not in it — DSH never persisted them — so the
+   * attempt is still open with no streaming evidence at all.
+   */
+  source.replaceEntries([
+    durableEntry('turn/start', 4, 1000, { turn: 1 }),
+    durableEntry('step/start', 5, 1010, { turn: 1, step: 1 }),
+  ], (revision += 1))
+
+  const afterReload = controller.project('s-reload', 1700)
+  assert.notEqual(afterReload.kind, 'completed',
+    'a turn that was still open is never rebuilt as a completed card')
+  assert.notEqual(afterReload.kind, 'streaming',
+    'and it is not streaming either: nothing in this window is streaming')
+  assert.equal(afterReload.turn, 1, 'the open turn is still the turn on screen')
+  assert.equal('tps' in afterReload, false,
+    'no rate is claimed: the window that produced the pre-reload number no longer exists')
+  assert.ok(['ttft', 'waiting', 'transition'].includes(afterReload.kind),
+    `the pill degrades to a neutral stage, not to a number (got ${afterReload.kind})`)
+  assert.equal(controller.store.latestSettled('s-reload'), null, 'and no settled turn is reported')
+  controller.dispose()
+})
+
+test('a reload mid-turn restores a durably settled attempt and measures it exactly', () => {
+  /**
+   * The stronger form: one attempt settled durably before the reload, and a second
+   * is streaming when it happens. The settled attempt comes back whole — its embedded
+   * stream reproduces its delta timestamps — while the streaming one contributes
+   * nothing, because nothing about it survived.
+   */
+  const sessions = fakeSessionsService()
+  const source = sessions.createSource('s-reload-2')
+  const controller = createController({ sessions })
+  controller.attach('s-reload-2')
+  let revision = 1
+
+  const firstStream = [
+    { type: 'chunk', time: 1100, chunk: { type: 'text-delta', index: 0, text: 'first ' } },
+    { type: 'chunk', time: 1600, chunk: { type: 'text-delta', index: 0, text: 'attempt' } },
+  ]
+  source.appendEntry(durableEntry('turn/start', 4, 1000, { turn: 1 }), (revision += 1))
+  source.appendEntry(transientEntry('a:1', 1100, { type: 'text-delta', index: 0, text: 'first ' }), (revision += 1))
+  source.appendEntry(transientEntry('a:1', 1600, { type: 'text-delta', index: 0, text: 'attempt' }), (revision += 1))
+  /** The durable settlement of attempt 1, with its embedded compact stream. */
+  const settlement = durableEntry('assistant/message', 9, 1700, {
+    turn: 1,
+    step: 1,
+    message: { role: 'assistant', content: [{ type: 'text', text: 'first attempt' }] },
+    usage: { inputTokens: 10, outputTokens: 40, reasoningTokens: 0 },
+    stream: firstStream,
+  })
+  source.appendEntry(settlement, (revision += 1))
+  source.settleAssistant('a:1', settlement, (revision += 1))
+  /** Attempt 2 starts and streams; then the page reloads. */
+  source.appendEntry(durableEntry('step/start', 10, 1800, { turn: 1, step: 2 }), (revision += 1))
+  source.appendEntry(transientEntry('a:2', 1900, { type: 'text-delta', index: 0, text: 'y'.repeat(400) }, { step: 2 }), (revision += 1))
+
+  source.replaceEntries([
+    durableEntry('turn/start', 4, 1000, { turn: 1 }),
+    durableEntry('step/start', 5, 1010, { turn: 1, step: 1 }),
+    settlement,
+    durableEntry('step/start', 10, 1800, { turn: 1, step: 2 }),
+  ], (revision += 1))
+
+  const record = controller.store.turns.get(turnKey('s-reload-2', 1))
+  assert.ok(record !== undefined, 'the turn record was rebuilt from the durable plane')
+  /**
+   * The settlement's embedded stream is restored as its own attempt, with the
+   * original delta timestamps rather than reconstructed ones. The attempt that was
+   * streaming when the page reloaded has no durable settlement, so nothing restores
+   * it: whatever the superseded window had observed for it is not in this window and
+   * is not invented.
+   */
+  const restored = record.attempts.find(attempt => attempt.usage?.outputTokens === 40)
+  assert.ok(restored !== undefined, 'the durably settled attempt is present')
+  assert.deepEqual(restored.samples.map(sample => sample.timeMs), [1100, 1600],
+    'its two deltas came back with their original timestamps')
+  assert.equal(restored.settlementKind, 'message')
+  assert.equal(restored.surfaceCommitted, true)
+  assert.equal(restored.usage.reasoningTokens, 0)
+  /**
+   * TTFT is derivable again — `turn/start` and the first generated delta are both in
+   * the rebuilt window — which is exactly the guarantee the durable-reconstruction
+   * path exists to provide. It is not a new TTFT: the delta's original timestamp was
+   * replayed from the settlement.
+   */
+  assert.equal(record.firstTokenMs, 1100)
+  assert.equal(controller.project('s-reload-2', 2000).kind !== 'completed', true,
+    'the turn is still open, so no card is shown')
+  controller.dispose()
+})
+
+test('a rebaseline with no turn at all leaves the slot empty rather than guessing', () => {
+  const sessions = fakeSessionsService()
+  const source = sessions.createSource('s-empty-reload')
+  const controller = createController({ sessions })
+  controller.attach('s-empty-reload')
+  let revision = 1
+  source.appendEntry(durableEntry('turn/start', 4, 1000, { turn: 1 }), (revision += 1))
+  source.appendEntry(transientEntry('a:1', 1100, { type: 'text-delta', index: 0, text: 'x' }), (revision += 1))
+  /** The reload lands in a window that no longer contains this turn at all. */
+  source.replaceEntries([], (revision += 1))
+  const view = controller.project('s-empty-reload', 1200)
+  assert.equal(view.kind, 'hidden', 'nothing is rendered, and no card is invented')
+  assert.equal(view.turn, null, 'and no turn is claimed')
+  assert.equal(controller.store.latestSettled('s-empty-reload'), null)
   controller.dispose()
 })
 
