@@ -1469,6 +1469,25 @@ Replayed through the durable window and shaped by `completedViewModel` + `curveV
 t1's compressed duration is 440 ms and carries no reasoning evidence, which is why its reasoning line is absent
 rather than flat; t3 shows the mirror case.
 
+**Peak changes caused by the Phase 6 correction.** Only `t2` moved, and the reason is the defect itself:
+
+| fixture | peak as reported in Phase 5 | peak after Phase 6 | why |
+|---|---|---|---|
+| t1-reasoning-tool-reasoning | ≈12.8 | 12.75 | unchanged; one attempt carries evidence |
+| t2-pwsh-write-edit | ≈206 | **29.0** | the 206 was a bridged value |
+| t3-interrupted-mid-reasoning | ≈263 | 262.5 | unchanged; single attempt |
+| t4-reasoning-tool-deepseek-official | ≈74.5 | 74.5 | unchanged |
+| t5-reasoning-text-deepseek-official | ≈84.0 | 84.0 | unchanged |
+
+`t2` has four attempts. Attempt 1 generates 206.8 shape tokens of reasoning and 25.5 output tokens in 1 428 ms; attempts
+2–4 generate **no reasoning at all** and 24.5–29.0 output tokens each. Reconstructed verbatim, the rejected pipeline
+reports 274.0 tokens/s at t = 2 000 — attempt 1's reasoning tokens counted inside attempt 2's window — and 234.5 at
+t = 1 500 and 222.5 at t = 1 750. Under the per-attempt construction the reported peak is 29.0, which is attempt 4's own
+output total and the largest single-attempt rate in the turn. The 206 figure was not a measurement of anything.
+
+This is the expected direction of the correction: the peak can only fall when a bridged window is removed, and it fell
+by the size of the tokens that had been borrowed. The old number was not kept.
+
 #### 10. Browser verification
 
 `dev/screenshots/phase5/` (gitignored, as required) holds the ten required captures plus the raw JSON evidence:
