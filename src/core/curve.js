@@ -30,6 +30,17 @@ export const DEFAULT_SAMPLE_EVERY_MS = 250
 export const DEFAULT_MAX_POINTS = 512
 
 /**
+ * Largest number of vertices **one chart** may receive across every series, every
+ * run and both phases.
+ *
+ * `DEFAULT_MAX_POINTS` bounds per run, which is not a bound on a chart: a hundred
+ * runs of 512 points each would be 51 200 SVG vertices, and the card renders inside
+ * a conversation that may hold several of them. This is the budget the settled
+ * snapshot actually allocates, and `allocateRunBudgets` is what divides it.
+ */
+export const MAX_RENDER_POINTS_TOTAL = 512
+
+/**
  * Smallest budget that can hold the guaranteed anchors: the first point, the
  * last point and the global maximum are three distinct indices in the worst case.
  * A smaller budget is unsatisfiable rather than merely tight.
@@ -49,23 +60,33 @@ function assertPositive(value, label) {
  * `SlidingWindowMeter` implements for the live pill, which is what makes a curve
  * vertex and a live reading comparable at the same attempt-local instant.
  *
- * **The opening vertex is measured separately, and it is not cosmetic.** An
- * attempt's local zero *is* its first delta: the axis is defined so the call
- * starts where its first token lands, so a half-open window there is
- * `(-windowMs, 0]` and contains nothing. Reporting `0 tokens/s` on the vertex that
- * carries the call's first tokens would be a fabricated trough. The opening vertex
- * therefore measures the attempt's own first instant — the samples at local zero —
- * which under `perAttemptSeries` is exactly the delta the call opened with.
+ * **Every vertex uses one bound, including an opening vertex.** An attempt's local
+ * zero *is* its first delta, so a reader may expect an opening vertex to need
+ * rescuing from an empty window. It does not: at `localMs = 0` the ordinary bound
+ * is `-windowMs`, and a sample at zero lies inside `(-windowMs, 0]`. The opening
+ * delta is therefore included by the arithmetic rather than by a special case.
  *
- * **A trailing run is sampled on a shifted grid.** The decay past an attempt's
- * last sample is sampled at `localEnd + sampleEveryMs`, `localEnd + 2 *
- * sampleEveryMs`, … rather than on the grid anchored at local zero. Both grids
+ * Phase 6 briefly carried such a special case —
+ * `localMs <= fromMs ? -Infinity : localMs - windowMs` — and it was wrong for the
+ * reason that makes it worth stating here: `fromMs` is the **episode** bound, so
+ * `localMs == fromMs` holds at every episode's opening vertex. Under
+ * `perAttemptSeries` a same-attempt phase that falls silent for more than one
+ * window splits into two episodes, and the second episode's opening vertex reopened
+ * the window to negative infinity and read back samples the trailing definition had
+ * already evicted. The counterexample is frozen in
+ * `test/curve-episode-opening.test.js`: samples at attempt-local 0 ms and 3000 ms
+ * with a 1000 ms window are episodes `0 -> 1000` and `3000 -> 4000`, and the second
+ * opening measures `(2000, 3000]` — 100 tokens/s, not the 200 the clamp reported.
+ *
+ * **A trailing run is sampled on a shifted grid.** The decay past a run's last
+ * sample is sampled at `localEnd + sampleEveryMs`, `localEnd + 2 *
+ * sampleEveryMs`, … rather than on the grid anchored at the run's start. Both grids
  * place every vertex on a multiple of `sampleEveryMs`, but only the shifted one
- * keeps every window inside `(last − windowMs, last]`: anchoring the grid at zero
- * makes the final vertex a truncated half-window and reports a rate no
+ * keeps every window inside `(last − windowMs, last]`: anchoring the grid at the
+ * start makes the final vertex a truncated half-window and reports a rate no
  * definition produces. The shift is the smallest one that leaves the tail
- * on-spec, and it is applied only to that tail — the attempt's own body is
- * sampled from its local zero.
+ * on-spec, and it is applied only to that tail — the run's own body is
+ * sampled from its start.
  *
  * **One clock, one window.** This function has no notion of an attempt, so
  * calling it across an attempt boundary bridges two model calls — the exact
@@ -126,7 +147,7 @@ export function rollingTpsSeries(samples, options = {}) {
    * floating-point error over a ten-minute turn would otherwise put the last
    * vertex off the grid it claims to be on.
    *
-   * The body grid always starts at `fromMs`, so an attempt's opening vertex is
+   * The body grid always starts at `fromMs`, so a run's opening vertex is
    * drawn even when it produced a single delta; the tail grid starts one step past
    * the last sample, so it never repeats a vertex the body already drew.
    */
@@ -149,10 +170,27 @@ export function rollingTpsSeries(samples, options = {}) {
       right += 1
     }
     /**
-     * The lower bound is clamped at the attempt's own zero **at the opening
-     * vertex only**, so that vertex can see the delta the call opened with;
-     * clamping at every vertex would hold a sample for an extra window and produce
-     * a different, wrong series.
+     * The lower bound is the trailing-window definition itself, uniformly:
+     * `(localMs - windowMs, localMs]`. There is no opening-vertex special case, and
+     * Phase 7 removed the one that existed.
+     *
+     * The removed clamp read `localMs <= fromMs ? -Infinity : localMs - windowMs`.
+     * It was written to keep an attempt's *first* vertex from reporting `0 tokens/s`
+     * on the delta the call opened with, on the reasoning that local zero is the
+     * attempt's opening delta and `(-windowMs, 0]` contains nothing. That reasoning
+     * is sound about the attempt and wrong about the coordinate: `localMs == fromMs`
+     * is true at **every** episode's first vertex, not only the attempt's, because
+     * `fromMs` is the episode bound. An attempt that falls silent for longer than one
+     * window produces a second episode, and at that episode's opening instant the
+     * bound collapsed to negative infinity and readmitted samples the trailing window
+     * had already evicted (docs/METRICS_SPEC.md §8.2).
+     *
+     * The clamp was also unnecessary for the case it was written for. At an attempt's
+     * local zero, `localMs - windowMs` is `-windowMs`, and a sample at zero lies
+     * inside `(-windowMs, 0]`, so the opening delta is included by the ordinary
+     * arithmetic. `test/curve-episode-opening.test.js` pins both halves: the later
+     * episode opening measures its own window alone, and the first opening still
+     * reports its first sample.
      *
      * Both bounds are expressed on the **same** clock the samples carry:
      * `offsetMs` relabels the emitted `timeMs` and must not enter this comparison,
@@ -160,9 +198,7 @@ export function rollingTpsSeries(samples, options = {}) {
      * left a claim of 100 tokens/s on an instant whose only sample had already been
      * evicted.
      */
-    const lowerExclusive = localMs <= fromMs
-      ? Number.NEGATIVE_INFINITY
-      : localMs - windowMs
+    const lowerExclusive = localMs - windowMs
     while (left < right && filtered[left].activeTimeMs <= lowerExclusive) {
       total -= filtered[left].tokens ?? filtered[left].weight ?? 0
       left += 1
@@ -486,9 +522,165 @@ export function phaseSpans(samples, segments, windowMs = DEFAULT_WINDOW_MS, dura
   return { reasoning: outer(runs.reasoning), output: outer(runs.output) }
 }
 
+/** Rate a series' point carries, in either supported field spelling. */
+function rateOf(point) {
+  const value = point?.tps ?? point?.tokens ?? point?.weight
+  return Number.isFinite(value) ? value : null
+}
+
+/**
+ * Divide one chart-wide rendering budget across the runs that will be drawn.
+ *
+ * `downsampleSeries` bounds *one* run. Nothing bounded the sum, so the SVG could
+ * grow with the number of episodes: a turn with a hundred phase alternations
+ * produced a hundred runs of up to 512 vertices each, and the card's element count
+ * became a function of the model's delivery pattern rather than of a design
+ * decision. This function is the missing global bound.
+ *
+ * Three constraints, in priority order, because a budget smaller than the number of
+ * runs must degrade predictably rather than silently:
+ *
+ *   1. **The global peak keeps a drawable budget.** The run whose series carries the
+ *      chart's maximum rate is allocated first and is never thinned to a point per
+ *      run. Without this, a many-run turn could drop the one vertex the card's
+ *      printed peak refers to, and the chart would contradict its own number.
+ *   2. **Every run keeps its own first and last vertex.** `downsampleSeries` treats
+ *      those as unconditional anchors, so a run whose allocation is below
+ *      `MIN_MAX_POINTS` cannot honour the anchors its own contract promises.
+ *      Allocations are therefore `0` or `>= MIN_MAX_POINTS`, and a `0` is an
+ *      explicit "not drawable", not a silently truncated run.
+ *   3. **Remaining budget is shared proportionally to length**, with shorter runs
+ *      served first at equal fairness. A long flat stretch can be described by
+ *      fewer vertices than a dense one; ranking by length is the cheapest
+ *      approximation of vertex density that does not require inspecting the values
+ *      here, and it is deterministic.
+ *
+ * The allocation is a **pure function of run lengths and the budget**, and it is
+ * applied per run. Flattening the runs into one series, downsampling that and
+ * cutting it back apart is the one construction this module forbids: the cut points
+ * would not fall on run boundaries, so a bridged line could appear across a stretch
+ * where the phase produced nothing — the defect `perAttemptSeries` and `phaseRuns`
+ * exist to prevent.
+ *
+ * Degradation policy when even the anchors do not fit: runs are refused in reverse
+ * priority order, so the peak-bearing run is the last to be refused, and a run
+ * given `0` is reported as `points: 0` with `degraded: true`. A caller must render
+ * it as absent. The policy is stated rather than implied because an unbounded DOM is
+ * the failure mode this function exists to remove.
+ *
+ * @param {readonly {points?: readonly unknown[]}[]} runs in draw order
+ * @param {number} [totalBudget] chart-wide vertex budget
+ * @returns {{budgets:number[], total:number, allocated:number, degraded:number[]}}
+ *   `budgets[i]` is the allowance for `runs[i]`, `degraded` lists the indices that
+ *   received `0`
+ */
+export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) {
+  const list = Array.isArray(runs) ? runs : []
+  const budget = Number.isFinite(totalBudget) && totalBudget > 0 ? Math.floor(totalBudget) : 0
+  const lengths = list.map(run => (Array.isArray(run?.points) ? run.points.length : 0))
+  const budgets = lengths.map(() => 0)
+  if (list.length === 0 || budget <= 0) {
+    return {
+      budgets,
+      total: budget,
+      allocated: 0,
+      degraded: lengths.map((_, index) => index),
+    }
+  }
+
+  /**
+   * The chart's maximum rate, recovered from the runs themselves rather than passed
+   * in, so this function cannot be handed a peak that disagrees with the points it
+   * is budgeting. The earliest run wins a tie, which keeps the allocation stable
+   * when two runs share the maximum.
+   */
+  let peakIndex = -1
+  let peakValue = Number.NEGATIVE_INFINITY
+  for (let i = 0; i < lengths.length; i += 1) {
+    for (const point of list[i].points) {
+      const rate = rateOf(point)
+      if (rate !== null && rate > peakValue) {
+        peakValue = rate
+        peakIndex = i
+      }
+    }
+  }
+  const conveysPeak = index => index === peakIndex || (peakValue <= 0 && lengths[index] > 0)
+
+  /** Ranked by band descending: the peak-bearing run first, then the longer runs. */
+  const ranked = lengths.map((length, index) => ({ index, length }))
+    .sort((left, right) => (
+      Number(conveysPeak(right.index)) - Number(conveysPeak(left.index))
+      || right.length - left.length
+      || left.index - right.index
+    ))
+
+  /**
+   * Two classes of run are **locked**: a run shorter than `MIN_MAX_POINTS` holds
+   * only the measurements it has, so its allowance is its whole length and it cannot
+   * be thinned further; a run of no points needs no allowance at all. Both are
+   * committed before anything is ranked, because their cost is fixed and pretending
+   * otherwise would misreport the budget left for the runs that compete for it.
+   */
+  const locked = new Set()
+  let allocated = 0
+  for (let i = 0; i < lengths.length; i += 1) {
+    if (lengths[i] > 0 && lengths[i] < MIN_MAX_POINTS) {
+      budgets[i] = lengths[i]
+      allocated += lengths[i]
+      locked.add(i)
+    }
+  }
+
+  /**
+   * Anchors for the drawable runs, in priority order. A run that does not fit is
+   * left at `0` — refused outright rather than thinned below its own anchor
+   * contract — and the ranking guarantees the peak-bearing run is the last one that
+   * could ever be refused.
+   */
+  for (const entry of ranked) {
+    if (locked.has(entry.index)) continue
+    if (allocated + MIN_MAX_POINTS > budget) continue
+    budgets[entry.index] = MIN_MAX_POINTS
+    allocated += MIN_MAX_POINTS
+  }
+
+  /**
+   * Surplus, shared out so that equal fairness goes to the shorter run first:
+   * one vertex at a time around the ranking, which is what keeps a two-vertex run
+   * from being starved by a four-hundred-vertex one. The loop terminates because
+   * every pass either grants a vertex or finds nothing left to grant.
+   */
+  let remaining = budget - allocated
+  while (remaining > 0) {
+    let served = false
+    for (const entry of ranked) {
+      if (remaining <= 0) break
+      const capacity = lengths[entry.index] - budgets[entry.index]
+      if (capacity <= 0) continue
+      const share = Math.max(1, Math.floor(remaining / ranked.length))
+      const grant = Math.min(capacity, share)
+      budgets[entry.index] += grant
+      remaining -= grant
+      served = true
+    }
+    if (!served) break
+  }
+
+  const degraded = []
+  for (let i = 0; i < lengths.length; i += 1) {
+    if (budgets[i] === 0 && lengths[i] > 0) degraded.push(i)
+  }
+  return {
+    budgets,
+    total: budget,
+    allocated: budgets.reduce((sum, value) => sum + value, 0),
+    degraded,
+  }
+}
+
 /** Index of the first finite global maximum (or minimum) of a series. */
-function extremeIndex(points, direction) {
-  let best = -1
+function extremeIndex(points, direction) {  let best = -1
   let bestValue = 0
   for (let i = 0; i < points.length; i += 1) {
     const value = points[i]?.tps

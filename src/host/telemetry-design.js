@@ -21,6 +21,9 @@ import { compressAttempts } from '../core/time-axis.js'
 import {
   DEFAULT_SAMPLE_EVERY_MS as CURVE_SAMPLE_EVERY_MS,
   DEFAULT_WINDOW_MS as CURVE_WINDOW_MS,
+  MAX_RENDER_POINTS_TOTAL,
+  MIN_MAX_POINTS,
+  allocateRunBudgets,
   downsampleSeries,
   peakTps,
   perAttemptSeries,
@@ -327,18 +330,80 @@ export class TurnTelemetryStore {
         /** The last attempt may draw its decay as far as the axis it was given. */
         durationMs: compressed.durationMs,
       })
-      return {
-        key,
-        tone,
-        phase,
-        present: runs.some(run => run.points.length >= 2),
-        runs: runs.map(run => ({
+      return { key, tone, phase, runs }
+    })
+
+    /**
+     * The chart-wide point budget, allocated **before** any downsampling runs.
+     *
+     * `downsampleSeries` bounds one run, and one run is not a chart: a turn that
+     * alternates reasoning and output a hundred times produced a hundred runs of up
+     * to `DEFAULT_MAX_POINTS` vertices each, so the SVG's element count followed the
+     * model's delivery pattern. Both phases are budgeted together because they are
+     * drawn into one plot area and share one axis.
+     *
+     * The allocation is computed over the run lists and then applied per run. The
+     * runs are never flattened, downsampled as one series and cut back apart: the
+     * cut points would not fall on run boundaries, and a single bridged polyline
+     * across a stretch where a phase produced nothing is exactly the defect the
+     * per-attempt and per-episode structure exists to prevent.
+     *
+     * `peakTps` below still reads the **full** series, and `downsampleSeries`
+     * independently guarantees the maximum survives into whatever budget it is
+     * given, so the budget can thin the drawing but never move a reported number.
+     */
+    const drawables = series.flatMap(entry => entry.runs)
+    const allocation = allocateRunBudgets(drawables, MAX_RENDER_POINTS_TOTAL)
+    let cursor = 0
+
+    const budgeted = series.map((entry) => {
+      const runs = entry.runs.map((run) => {
+        const allowance = allocation.budgets[cursor] ?? run.points.length
+        const refused = allocation.degraded.includes(cursor)
+        cursor += 1
+        /**
+         * Two runs bypass `downsampleSeries` and keep their measured vertices: a
+         * refused run keeps none, and a run of one or two vertices keeps all of them.
+         * The second case matters because `downsampleSeries` refuses a budget below
+         * `MIN_MAX_POINTS` by design — it cannot honour the three anchors — and a run
+         * that already has fewer vertices than that is at full resolution. Such a run
+         * is a **singleton measurement**, drawn as a point marker rather than as a
+         * line (`src/client/completed/curve-view-model.js`), which is why carrying it
+         * through is not the same as inventing a second vertex to draw a segment with.
+         */
+        const measured = run.points.length < MIN_MAX_POINTS
+        const points = refused
+          ? []
+          : (measured ? run.points.slice() : downsampleSeries(run.points, allowance))
+        return {
           ...run,
-          points: downsampleSeries(run.points),
+          points,
           peak: peakTps(run.points),
-        })),
+          degraded: refused,
+          /**
+           * `false` when the run is drawn under a reduced allowance. A caller that
+           * wants to annotate a thinned run can read it; nothing renders it.
+           */
+          fullResolution: !refused && allowance >= run.points.length,
+        }
+      })
+      return {
+        key: entry.key,
+        tone: entry.tone,
+        phase: entry.phase,
+        present: runs.some(run => run.points.length >= 2),
+        runs,
       }
     })
+
+    /**
+     * Runs the allocator had to refuse outright, because even the three anchors that
+     * `downsampleSeries` guarantees could not fit inside the chart budget. This is
+     * the documented degradation: a refused run is **not drawn at all** rather than
+     * drawn truncated, and the count is published so the condition is inspectable
+     * instead of silent.
+     */
+    const degradedRuns = allocation.degraded.length
 
     /**
      * `peakTps` is measured on the **full** series, before downsampling. The
@@ -359,6 +424,9 @@ export class TurnTelemetryStore {
      * because its throughput collapsed, and a renderer must not draw the two the
      * same way. A turn with two reasoning episodes gets two runs, so no drawable
      * path is ever asked to bridge an output-only stretch.
+     *
+     * `renderBudget` publishes the allocation itself, so a test or a diagnostic can
+     * assert the chart-wide bound without re-deriving it from the point counts.
      */
     return {
       ...aggregate,
@@ -366,16 +434,38 @@ export class TurnTelemetryStore {
       curve: {
         durationMs: compressed.durationMs,
         segments: compressed.segments,
-        series,
+        series: budgeted,
         phaseRuns: phaseRuns(compressed.samples, compressed.segments, CURVE_WINDOW_MS, compressed.durationMs),
         peakTps: peakTps(...series.flatMap(entry => entry.runs.map(run => run.points))),
         /**
          * Flat concatenations of the per-attempt series, retained for callers that
          * want one array of vertices. They carry `attemptId` on every point; a
          * renderer must segment on it rather than joining the array into one path.
+         * They are the **budgeted** series, so a caller cannot accidentally render
+         * an unbounded list through this compatibility path.
          */
-        reasoning: series[0].runs.flatMap(run => run.points),
-        output: series[1].runs.flatMap(run => run.points),
+        reasoning: budgeted[0].runs.flatMap(run => run.points),
+        output: budgeted[1].runs.flatMap(run => run.points),
+        /**
+         * The chart-wide rendering budget, and what became of it. `allocated` is at
+         * or below `total`, and `degradedRuns` counts the runs refused outright when
+         * the anchors did not fit — the documented degradation, published rather
+         * than silent.
+         */
+        renderBudget: {
+          total: allocation.total,
+          allocated: allocation.allocated,
+          runs: allocation.budgets.length,
+          degradedRuns,
+        },
+        /**
+         * Total vertices the SVG will receive, summed over both phases and every
+         * run. This is the quantity `MAX_RENDER_POINTS_TOTAL` bounds.
+         */
+        drawnPoints: budgeted.reduce(
+          (sum, entry) => sum + entry.runs.reduce((inner, run) => inner + run.points.length, 0),
+          0,
+        ),
         /**
          * Curve quality follows the **temporal shape** axis, not the token axis.
          * A curve is a shape claim, so an exactly known token total with

@@ -427,7 +427,7 @@ test('downsampling preserves the peak policy on every run whatever the budget', 
 test('an internal stall keeps its full width inside the attempt', () => {
   /** A delivery stall is model time, so it is drawn; a tool gap is not. */
   const { curve } = build({
-    attempts: [{ id: 'a', step: 1, at: 0, chunks: [[0, 'output', 'o'], [4000, 'output', 'o']] }],
+    attempts: [{ id: 'a', step: 1, at: 0, chunks: [[0, 'output', 'o'.repeat(400)], [4000, 'output', 'o'.repeat(400)]] }],
     endMs: 6000,
   })
   assert.equal(curve.durationMs, 4000, 'the stall is part of the attempt\'s width')
@@ -441,12 +441,32 @@ test('an internal stall keeps its full width inside the attempt', () => {
   const runs = runsOf(curve, 'output')
   assert.equal(runs.length, 2, 'the stall splits the episode')
   assert.deepEqual(runs.map(run => [run.startMs, run.endMs]), [[0, 1000], [4000, 5000]])
-  assert.deepEqual(runs[0].points.map(p => p.tps), [0.25, 0.25, 0.25, 0.25, 0],
+  assert.deepEqual(runs[0].points.map(p => p.tps), [100, 100, 100, 100, 0],
     'the first delta is measured and then decays')
-  assert.deepEqual(runs[1].points.map(p => p.tps), [0.5, 0.25, 0.25, 0.25, 0],
-    'the second delta opens at 0.5 because the attempt\'s whole output sits in its window')
+  /**
+   * The second episode's opening vertex measures `(3000, 4000]` and nothing older,
+   * so it reads only the delta that opened it: 100 tokens/s.
+   *
+   * This assertion previously read `0.5` — that is, 100 tokens/s from the sample at
+   * local zero plus the 400 at local 4000, counted together on an instant where only
+   * the second one was inside the window. It was the Phase 7 audit's second defect,
+   * and in this scenario the leaked sample was four windows stale. The two episodes
+   * belong to one attempt, so no attempt-boundary reasoning is involved: the window
+   * definition alone decides the number, and it excludes the first delta.
+   */
+  assert.deepEqual(runs[1].points.map(p => p.tps), [100, 100, 100, 100, 0],
+    'the second episode opens on its own delta alone, never on the first episode\'s expired one')
   assert.ok(runs[0].endMs < runs[1].startMs, 'and the stall is visible between them')
-  assert.equal(curve.peakTps, 0.5)
+  assert.equal(curve.peakTps, 100,
+    'two 100-token deltas four windows apart never coexist in one window, so the turn peak is one delta')
+  assert.equal(runs[1].attemptTokens, 200,
+    'the attempt produced both deltas, and the second run accounts for the whole attempt')
+  for (const run of runs) {
+    for (const point of run.points) {
+      assert.ok(point.tps <= 100 + 1e-9,
+        `vertex ${point.timeMs} claims ${point.tps} tokens/s, but no single window of this attempt holds more than one delta`)
+    }
+  }
 })
 
 test('every run reports a peak equal to its own strongest vertex', () => {

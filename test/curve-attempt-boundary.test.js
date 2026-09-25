@@ -417,9 +417,24 @@ test('an attempt\'s decay tail is drawn, clamped to the next attempt rather than
   assert.deepEqual(runs[0].points.map(p => p.tps), [100, 100, 100, 100, 0],
     'the opening delta is measured for one window and then expires')
   assert.deepEqual(runs[1].points.map(p => p.timeMs), [3000, 3250, 3500, 3750, 4000])
-  assert.deepEqual(runs[1].points.map(p => p.tps), [200, 100, 100, 100, 0],
-    'the closing delta opens at 200 because both of the attempt\'s measurements are in its window')
-  assert.equal(curve.peakTps, 200)
+  /**
+   * The second episode opens on its own delta, at 100 and not 200.
+   *
+   * This expectation previously read `[200, 100, 100, 100, 0]`: `rollingTpsSeries`
+   * clamped the lower bound to negative infinity whenever `localMs == fromMs`, which
+   * is true at **every** episode opening and not only at an attempt's first, so the
+   * second episode readmitted the sample from local zero that its `(2000, 3000]`
+   * window had already evicted. The independent Phase 7 audit found it and
+   * `test/curve-episode-opening.test.js` carries the standalone counterexample.
+   *
+   * Both episodes here belong to **one** attempt, so this is not an attempt-boundary
+   * effect: Section 6 of the Phase 6 fix remains correct and is what the rest of this
+   * file holds fixed, while the window definition itself is now uniform.
+   */
+  assert.deepEqual(runs[1].points.map(p => p.tps), [100, 100, 100, 100, 0],
+    'the closing delta opens on its own measurement alone: expected 100, not 200')
+  assert.equal(curve.peakTps, 100,
+    'no window ever holds both deltas three seconds apart, so neither the run peak nor the turn peak is 200')
 })
 
 test('an intermediate attempt draws no decay tail, because the next call owns those coordinates', () => {
