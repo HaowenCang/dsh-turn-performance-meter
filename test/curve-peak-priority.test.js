@@ -159,8 +159,70 @@ test('a long global peak keeps its priority under the same saturated budget', ()
   assert.ok(result.allocated <= MAX_RENDER_POINTS_TOTAL)
 })
 
-/* --------------------------------------- priority is independent of input order */
+/* ------------------------------------------------ the equal-cost length tie-break */
 
+test('runs of equal irreducible cost are served shortest first, whatever their input order', () => {
+  /**
+   * Every run longer than `MIN_MAX_POINTS` costs exactly `MIN_MAX_POINTS`, so the seating
+   * pass cannot separate two long runs from each other by cost, and the length tie-break is
+   * what decides which equal-cost run is served. The ranking this round corrected had a
+   * comment claiming a dense run is preferred at equal cost; the code sorts by ascending
+   * length, matching the surplus rule below it — "equal fairness goes to the shorter run
+   * first". These assertions freeze the rule the code actually implements.
+   *
+   * The fixture separates the two readings. The long run is nine vertices and the flat run
+   * three, and the budget seats only one of them, so the tie-break alone decides which one is
+   * drawn: ascending length keeps the flat run, and a ranking that preferred the longer run at
+   * equal cost would seat the nine-vertex one instead.
+   */
+  const flat = () => runOf(3)
+  const long = () => runOf(9)
+  const peak = singleton(9999)
+
+  /** Budget five: one for the peak band, so cost three seats exactly one of the two runs. */
+  const flatFirst = allocateRunBudgets([flat(), long(), peak], 5)
+  assert.equal(flatFirst.peakIndex, 2, 'the peak band leads regardless of length')
+  assert.equal(flatFirst.budgets[0], 3,
+    'the flat run is seated at its own length, which is its full resolution')
+  assert.equal(flatFirst.budgets[1], 0, 'and the nine-vertex run is refused rather than part-drawn')
+  assert.deepEqual(flatFirst.degraded, [1])
+
+  /**
+   * The rule is positional rather than incidental, and that is the observable difference: the
+   * same two runs in either input order receive the same allowances, because ascending length
+   * puts the three-vertex run ahead of the nine-vertex one whichever index each was given. A
+   * ranking that preferred the longer run at equal cost would give the nine-vertex run the seat
+   * in both orders, since cost alone cannot separate the two.
+   */
+  const longFirst = allocateRunBudgets([long(), flat(), peak], 5)
+  assert.equal(longFirst.peakIndex, 2)
+  assert.deepEqual(longFirst.budgets, [0, 3, 1],
+    'the shorter run keeps the seat even when it arrives second in the input')
+  assert.deepEqual(
+    { flat: longFirst.budgets[1], long: longFirst.budgets[0] },
+    { flat: flatFirst.budgets[0], long: flatFirst.budgets[1] },
+    'the tie resolves by length, so the input order cannot move an allowance between the runs')
+  assert.notDeepEqual(longFirst.budgets, [3, 3, 1], 'and the wider run is not preferred at equal cost')
+
+  /**
+   * Once both fit, the tie-break is a distribution choice rather than a licence to exceed the
+   * chart: the same two runs under a wider budget are both drawn, and the total stays bounded.
+   */
+  const both = allocateRunBudgets([flat(), long(), peak], 7)
+  assert.deepEqual(both.budgets, [3, 3, 1])
+  assert.equal(both.degraded.length, 0)
+  assert.ok(both.allocated <= 7)
+
+  /**
+   * A uniform chart has no length tie to break, which is why the ordering rule needs a mixed
+   * fixture: with every run at one length, cost and length agree and the index decides.
+   */
+  const uniform = allocateRunBudgets([runOf(9), runOf(9), runOf(9), peak], 7)
+  assert.deepEqual(uniform.budgets, [3, 3, 0, 1],
+    'equal length, equal cost, so the earliest indices are served first')
+})
+
+/* --------------------------------------- priority is independent of input order */
 test('the priority band follows the peak run to the front of the input', () => {
   const runs = [singleton(9999), ...Array.from({ length: 170 }, () => runOf(MIN_MAX_POINTS)), singleton(10), singleton(20)]
   const result = allocateRunBudgets(runs, MAX_RENDER_POINTS_TOTAL)

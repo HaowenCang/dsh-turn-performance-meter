@@ -1992,3 +1992,101 @@ idempotence over three consecutive replaces; an empty replacement window leaving
 Phase 5–7 were re-run unchanged: the 0 ms / 3000 ms episode-opening arithmetic (100 tokens/s at the second opening,
 never 200), the attempt-boundary and retry matrix, the mid-turn adoption and authoritative-upgrade suite, the
 completed-card reconstruction suite, and `SLOT_ORDER === -10`.
+
+## Phase 7B — Browser, E2E and visual verification (2026-09-26)
+
+Verified against a **freshly started** `dsh web` process on port 50002 through the normal plugin path
+(`link:E:/Projects/DSHarness/dsh-turn-performance-meter`, listed in the profile's `dsh.profile.bundles`). The local
+injector's `dev_reload_package` was deliberately **not** used as evidence for this round: its repair is not
+upstreamed and its release artifact is not reproducibly rebuilt, so it cannot certify a shipped loading path. Normal
+load was proven from the served module in the plugin batch response (`meterModuleIndex` 226 of 430 in batch revision
+`071dce77e1de`), gated on build-specific markers that exist in no earlier build — the corrected peak-tie comment, the
+corrected ascending-length ranking prose and the corrected all-zero-peak prose, with all three superseded claims and
+any merge-conflict markers absent. DSH transpiles each client bundle on serve, so the served module is not
+byte-identical to the pre-merged `client.js`; freshness is therefore proven by markers, not by a whole-file digest.
+`client.js` and `lib/client.js` are byte-identical to each other (SHA-256 `C3FB38DF…7AA69B`).
+
+Measured on the real rendered UI: the meter occupies `conversation.input.dock` and precedes every task-state card in
+that slot — `meter → todo → goal → queue → composer`, with `todo` 0, `goal` 10, `queue` 20 and the composer after
+`input.dock`. Both slot wrappers are `display: contents`, so every occupant is a direct flex item of the
+`composerStack` (flex column, `gap: 6px`); the measured inter-element gap was 6 px in every state, including between
+the meter and the composer, and the previously observed orphan band did not reproduce in any state. The full
+`meter → todo → goal → composer` stack was observed directly on the everyday instance; no queue card appeared as a
+child of `conversation.input.dock` in either instance, so the queue-containing combinations are supported by the slot
+contract plus the measured uniform gap rather than by direct observation.
+
+Production presentation cadence is `DEFAULT_PRESENTATION_REFRESH_MS = 50` with no diagnostic override present, and
+the browser confirms it: DOM write intervals on the TTFT counter and on the live pill measure p50 48.5–51.7 ms across
+the reasoning, tool-running and waiting-model states. The tool wall timer prints tenths, so its writes land on a
+~100 ms grid. Reported frame statistics are not usable from this round — the automation tab was backgrounded and
+Chrome throttles `requestAnimationFrame` to ~1 Hz — so cadence is evidenced from timer-driven DOM writes instead.
+
+Live semantics held in the browser: `data-state` walked
+`pending-first-token → streaming-reasoning → streaming-output → tool-running → transition → waiting-model →
+streaming-reasoning → streaming-output → completed`; TTFT appeared only before the first generated delta; the tool
+window contained no TPS number at all, only the wall timer and the turn elapsed counter; and a later attempt did not
+restart TTFT. Three 10.3 s tool calls produced a 31.0 s union and three 20 s calls a 40.7 s union, consistent with
+the footer arithmetic. An interrupted turn rendered its full card with `data-status="interrupted"`; a deterministic
+provider error was not reproducible without fabricating one.
+
+A mid-turn reload driven by `location.reload()` the instant `data-state` became `tool-running` (confirmed by
+`navigation[0].type === 'reload'`) recovered honestly: the meter reappeared, the turn was adopted, the tool wall
+timer and the turn elapsed counter continued from the durable record (7.3 s → 56.9 s), no `0 s` elapsed and no TTFT
+were fabricated, and the turn settled into a coherent card. Interaction, theme, viewport, host font-size and locale
+matrices were measured from bounding rectangles rather than asserted: no horizontal overflow, no clipping, no
+overlap with the composer or with native `StatsPills`, cell text collisions zero and truncation zero at 1652×880,
+1440×950, 1280×800, 1024×768, 768×900, 520×900 and 390×844, with the four columns reflowing from one row to a 2×2
+grid between 768 px and 520 px (measured 4 columns at 768 px, 2×2 at 520 px and at 390 px) and the card height
+staying a function of the breakpoint (149.29 px in one row, 239.6 px in two). The host font control
+scaled the meter's own type scale through `--dsh-content-font-size-secondary` (11 / 13 / 15 px) with no collision,
+and the English locale produced `Reasoning TPS / Output TPS / Generated Tokens / TTFT` with identical geometry and
+identical metric values. All settings touched during the round (appearance, font size, language) were restored.
+
+The chart budget was cross-checked against the DOM rather than trusted from `curve.renderBudget`: a completed chart
+reported `data-points="64"` and the SVG contained exactly 64 vertices across five `dsh-tpm-series` paths plus one
+singleton marker — 65 element points against the 512 ceiling. Accessibility measured in the browser: one focus stop,
+`role="group"` with `aria-label` and `aria-description`, per-cell descriptive labels, `aria-hidden` on the hidden
+layer and on the SVG, a 2 px accent focus ring, and 100 hover/focus cycles with zero card-height drift, zero style
+tag growth and no scheduler or timer leak.
+
+### 1. Three stale source comments corrected
+
+Three comments contradicted the code they described. Only prose changed; no runtime behaviour was touched, and each
+existing rule was frozen by an added test rather than by altering the implementation.
+
+| Site | Claim | Code | Action |
+| --- | --- | --- | --- |
+| `src/client/completed/curve-view-model.js` | "Ties resolve to `output`" | strict `>` over a reasoning-first pair resolves a tie to `reasoning` | comment corrected; `test/curve-view-model.test.js` freezes the tie to `reasoning` and its marker position |
+| `src/core/curve.js` (`allocateRunBudgets`) | "a dense run is preferred over a flat one of the same cost" | `left.length - right.length` serves the **shorter** run first | comment corrected; `test/curve-peak-priority.test.js` freezes the ascending-length tie-break |
+| `src/core/curve.js` (`allocateRunBudgets`) | "a chart whose every rate is zero or non-finite has no maximum" | `peakValue` starts at `-Infinity`, so finite `0` is accepted and an all-zero chart has a `peakIndex` | comment corrected |
+
+The peak-tie rule is one rule at two levels rather than two rules: `buildSeries` resolves an intra-series tie to the
+earliest vertex with the same strict comparison, and the series-level leader resolves to the series scanned first.
+The length tie-break is load-bearing rather than decorative — every run longer than `MIN_MAX_POINTS` costs exactly
+`MIN_MAX_POINTS`, so cost alone cannot separate long runs and the shorter one is genuinely served first. The added
+test discriminates the corrected reading from the superseded one: the same two runs in either input order receive
+the same per-run allowances, which a longest-first ranking could not produce.
+
+### 2. A core-metric contradiction found in the browser (not fixed here)
+
+The completed curve's printed peak is inconsistent with the same snapshot's own token counts. For turn 5 the settled
+record reports `generatedTokens: 365` over a curve span of 1530 ms — a mean of 238.6 tokens/s — while `peakTps` is
+**63.75**, i.e. 0.267 of the mean. A maximum cannot fall below its own mean, and the same card prints
+`reasoningTps 157.2` and `outputTps 325.7`, with the live pill observed at `≈326 tokens/s` during the output phase
+of that very turn. The evidence is the plugin's own debug snapshot
+(`window.__dshTurnPerformanceMeter.controller.store`, turn 5) cross-checked against the session log, which records
+320 reasoning tokens delivered inside a ~1.28 s stream. No existing test bounds `peakTps` against the mean, the phase
+totals, or the live series, so the contradiction is untested rather than newly introduced.
+
+This is a **core metrics** defect — token accounting, rolling-window semantics or the shape/calibration path — and
+Phase 7B is not permitted to change those. It is recorded here as a blocker for Phase 8 with its reproduction rather
+than patched, because a fix chosen without establishing the intended semantics would be a guess about a frozen
+contract. The suite is deliberately left green: the honest artefact is a documented repro, not a red test asserting
+behaviour nobody has yet decided.
+
+### 3. Verification for this round
+
+`npm run build:client` rebuilt `client.js` and `lib/client.js` (372 739 bytes each, identical SHA-256) and
+`npm run verify` reports **538 tests, 538 pass, 0 fail** — the 535 of `331968d` plus three added here. Browser
+evidence, including the layout/measurement JSON and the screenshots, is kept under `dev/screenshots/phase7b/`, which
+is gitignored.

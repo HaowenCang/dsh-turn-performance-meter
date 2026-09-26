@@ -570,10 +570,13 @@ export function minimumRunCost(length) {
  *      irreducible cost cannot honour the anchors its own contract promises.
  *      Allocations are therefore `0` or at least `minimumRunCost(length)`, and a `0`
  *      is an explicit "not drawable", not a silently truncated run.
- *   3. **Remaining budget is shared proportionally to length**, with shorter runs
- *      served first at equal fairness. A long flat stretch can be described by fewer
- *      vertices than a dense one; ranking by length is the cheapest approximation of
- *      vertex density that does not require inspecting the values here, and it is
+ *   3. **Remaining budget is shared out in the ranked order**, which serves the
+ *      shorter run first whenever two runs cost the same. Above `MIN_MAX_POINTS`
+ *      every run costs three, so the length tie-break decides most charts, and it
+ *      resolves towards the shorter run: a long stretch is described by fewer
+ *      vertices before a dense one is topped up, because the short run is the one
+ *      whose whole shape still fits. Ranking by length is the cheapest approximation
+ *      of vertex density that does not require inspecting the values here, and it is
  *      deterministic.
  *
  * ## One priority order, not one per run length
@@ -658,18 +661,24 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
     }
   }
   /**
-   * Exactly one run carries the priority band, and `peakValue` starts below every finite
-   * rate, so a run is identified whenever any run holds a finite one. A chart whose every
-   * rate is zero or non-finite has no maximum to keep on the chart, and only then does no
-   * run receive priority — which is the correct reading rather than a fallback.
+   * Exactly one run carries the priority band. `peakValue` starts below every finite
+   * rate — `0` is finite — so a run is identified whenever any run holds a finite one,
+   * including an all-zero chart, whose maximum is `0` and whose earliest run carries it.
+   * Only a chart with no finite rate anywhere leaves `peakIndex` at `-1`, and only then
+   * does no run receive priority, which is the correct reading rather than a fallback.
    */
   const conveysPeak = index => index === peakIndex
 
   /**
    * **The one priority order.** After the peak band, runs are ranked by what they
-   * irreducibly cost (so the most runs survive a tight budget), then by length (so a
-   * dense run is preferred over a flat one of the same cost), then by original index,
-   * which makes the result a pure function of the input.
+   * irreducibly cost (so the most runs survive a tight budget), then by **ascending
+   * length** — the shorter run wins the tie, matching the surplus pass below, which
+   * grants its vertices "to the shorter run first" — then by original index, which
+   * makes the result a pure function of the input.
+   *
+   * The length tie-break is load-bearing rather than decorative: every run longer than
+   * `MIN_MAX_POINTS` costs exactly `MIN_MAX_POINTS`, so cost alone cannot separate them
+   * and the shorter run is the one served first among equals.
    */
   const ranked = lengths.map((length, index) => ({ index, length, cost: minimumRunCost(length) }))
     .sort((left, right) => (

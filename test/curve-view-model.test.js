@@ -240,6 +240,71 @@ test('an exact token total does not make the peak exact', () => {
   assert.equal(view.peak.display.startsWith('≈'), true)
 })
 
+test('a peak shared by both series resolves to reasoning, the earliest series scanned', () => {
+  /**
+   * The leader is chosen by a strict `>`, and `reasoning` is scanned first, so an equality
+   * stays on the reasoning series. That is the same earliest-wins rule `buildSeries` applies
+   * *inside* a series, where the comparison is also strict and the points are walked in
+   * order — one rule at both levels rather than two.
+   *
+   * The tie is deliberately *exactly* equal: `placedPeak` is matched to `peak.value` with a
+   * floating-point tolerance, so a tie resolved differently on the two sides would leave the
+   * card printing a peak with no dot under it.
+   */
+  const shared = 700
+  const view = curveViewModel(settledCurve({
+    series: [
+      {
+        key: 'reasoning',
+        tone: 'neutral',
+        runs: [run('a', [
+          { timeMs: 0, tps: 50 },
+          { timeMs: 2500, tps: shared },
+          { timeMs: 5000, tps: 300 },
+        ])],
+      },
+      {
+        key: 'output',
+        tone: 'accent',
+        runs: [run('b', [
+          { timeMs: 5000, tps: 0 },
+          { timeMs: 10_000, tps: shared },
+          { timeMs: 20_000, tps: 120 },
+        ])],
+      },
+    ],
+    peakTps: shared,
+  }))
+
+  assert.equal(view.peak.leader, 'reasoning', 'a tie belongs to the series scanned first')
+  assert.equal(view.peak.value, shared)
+  assert.notEqual(view.peak.x, null, 'and the shared measurement still has a position')
+  assert.notEqual(view.peak.y, null)
+  /**
+   * The dot must sit on the reasoning vertex, not the output one. Both vertices carry the same
+   * rate, so `y` cannot tell them apart — the `x` axis can, because the two series reach the
+   * shared maximum at 2500ms and 10000ms respectively. A leader that flipped would place the
+   * marker above the same number at a visibly different time.
+   */
+  const reasoningPeak = view.series[0].peak
+  const round2 = value => Math.round(value * 100) / 100
+  assert.equal(reasoningPeak.tps, shared)
+  assert.equal(reasoningPeak.timeMs, 2500, 'the reasoning vertex that holds the shared maximum')
+  assert.equal(view.series[1].peak.timeMs, 10_000, 'and the output one, at a different time')
+  assert.equal(view.peak.x, round2(reasoningPeak.x),
+    'the marker is placed on the reasoning measurement, which is what the card prints')
+  assert.ok(view.peak.x < round2(view.series[1].peak.x),
+    `the placed marker sits at ${view.peak.x}, and the output vertex is at ${round2(view.series[1].peak.x)}`)
+})
+
+test('a strictly larger output peak still takes the leader', () => {
+  /** The tie rule must not shadow the ordinary case: a real maximum on output still wins. */
+  const view = curveViewModel(settledCurve())
+  assert.equal(view.peak.leader, 'output')
+  assert.equal(view.peak.value, 700)
+  assert.equal(view.peak.x, view.series[1].peak.x)
+})
+
 test('the view model carries no more points than the downsample budget allowed', () => {
   const reasoning = []
   const output = []

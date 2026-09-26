@@ -283,9 +283,10 @@ export function curveViewModel(settled) {
   const output = buildSeries(runsOf(curve, 'output'), durationMs, axisMax)
 
   /**
-   * The series holding the global peak, so the marker sits on it. Ties resolve to
-   * `output`, matching the fixed legend order and keeping the position stable
-   * between two runs over equal input.
+   * The series holding the global peak, so the marker sits on it. A tie resolves to
+   * `reasoning`, because the comparison is strict and `reasoning` is scanned first —
+   * the same earliest-wins rule `buildSeries` applies inside a series, which keeps the
+   * position stable between two runs over equal input.
    */
   const leader = (output.peak?.tps ?? -1) > (reasoning.peak?.tps ?? -1) ? 'output' : 'reasoning'
   const leaderSeries = leader === 'output' ? output : reasoning
