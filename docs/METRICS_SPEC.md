@@ -88,6 +88,25 @@ TTFT=t_{first\ generated\ delta}-t_{turn/start}
 
 The first generated delta may be reasoning, visible text, or tool-call arguments. Empty deltas do not stop the TTFT clock.
 
+**Unknown start.** A page that attaches in the middle of a turn never observes that turn's `turn/start` (the published window is a live tail), so
+the boundary is *adopted* from the transient rows' own `turn` field (`src/dsh/client-feed.js` `adoptTurn`, marked `recovered`). The adopted turn
+opens with an unknown start time, and both turn TTFT and turn elapsed are then reported as **unknown** — never as `0` or as "time since the page
+loaded".
+
+Two rules bound the adoption. It happens **once per turn**, and a turn is never re-opened once its `turn/end` has been observed: a late transient row
+of a finished turn is dropped and recorded as `transient-row-of-a-finished-turn`, not delivered into a settled record. A row naming no finite turn
+adopts nothing, because there is no identity to adopt.
+
+**Recovered authority.** The unknown start is upgraded, not redefined, the moment the durable `turn/start` enters this client's evidence (a
+reconnect, or the tail sliding back over the row): `turnStartObserved` records the observed instant and both metrics become computable from it over
+the evidence already held — `firstTokenMs` keeps the timestamp its delta carried, so TTFT stays `first token - turn/start` and elapsed stays the same
+interval. The upgrade is one-way: an observed start is never replaced by a later absent or synthetic one, and is fixed at the first observation
+because a turn has exactly one start.
+
+If the durable `turn/start` **never** enters this client, the completed card reports TTFT as unavailable and renders it as an em dash. A durable
+settlement's embedded stream carries absolute timestamps for the deltas it delivered, but those say when a delta was *produced*, never when the turn
+started; deriving a TTFT from them would substitute "time since the page attached" for the metric.
+
 Later LLM calls after tools do not redefine the turn TTFT. Per-attempt first-token latency may be retained internally for diagnostics but is not the primary fourth-column value.
 
 ## 5. Tool latency

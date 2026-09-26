@@ -148,6 +148,65 @@ test('a plain durable settlement is correlated to the open transient attempt whe
   assert.equal(settle.attemptOutcome, 'unknown', 'the durable payload proves no cause; no guessing')
 })
 
+test('a transient row naming an untracked turn adopts a recovered turn boundary', () => {
+  const { feed, events } = collect()
+  /** The mid-turn-attach window: transient rows only, no `turn/start` row. */
+  feed.applyWindow({
+    entries: [transientEntry('s:1', 1100, chunk('mid'))],
+    revision: 1,
+    change: { kind: 'replace', entries: [transientEntry('s:1', 1100, chunk('mid'))] },
+  })
+  assert.deepEqual(events.map(event => event.kind), ['turn-start', 'attempt-start', 'attempt-delta'])
+  const adopted = events[0]
+  assert.equal(adopted.turn, 1, 'the turn number comes from the row')
+  assert.equal(adopted.recovered, true, 'and it is marked inferred, not observed')
+  assert.equal(adopted.timeMs, null, 'with no start time, so TTFT cannot be measured from it')
+
+  // The same turn later on is not re-adopted, and a different turn is.
+  events.length = 0
+  feed.applyWindow({
+    entries: [transientEntry('s:2', 1200, chunk('more'))],
+    revision: 2,
+    change: { kind: 'append', entries: [transientEntry('s:2', 1200, chunk('more'))] },
+  })
+  assert.deepEqual(events.map(event => event.kind), ['attempt-start', 'attempt-delta'],
+    'an already-tracked turn is not re-opened')
+
+  events.length = 0
+  feed.applyWindow({
+    entries: [transientEntry('s:3', 1300, chunk('next'), { turn: 2 })],
+    revision: 3,
+    change: { kind: 'append', entries: [transientEntry('s:3', 1300, chunk('next'), { turn: 2 })] },
+  })
+  assert.equal(events[0].kind, 'turn-start')
+  assert.equal(events[0].turn, 2)
+})
+
+test('a transient row that names no turn adopts nothing', () => {
+  const { feed, events } = collect()
+  const row = transientEntry('s:1', 1100, chunk('x'), { turn: null })
+  feed.applyWindow({ entries: [row], revision: 1, change: { kind: 'replace', entries: [row] } })
+  assert.deepEqual(events.map(event => event.kind), ['attempt-start', 'attempt-delta'],
+    'no boundary can be derived without a turn on the row')
+})
+
+test('a settled turn is never re-opened by a late transient row', () => {
+  const { feed, events } = collect()
+  const entries = [
+    durableEntry('turn/start', 1, 1000, { turn: 1 }),
+    durableEntry('turn/end', 4, 1300, { turn: 1, reason: { kind: 'completed' } }),
+  ]
+  feed.applyWindow({ entries, revision: 1, change: { kind: 'replace', entries } })
+  events.length = 0
+  feed.applyWindow({
+    entries: [transientEntry('s:1', 1400, chunk('late'))],
+    revision: 2,
+    change: { kind: 'append', entries: [transientEntry('s:1', 1400, chunk('late'))] },
+  })
+  assert.equal(events.some(event => event.kind === 'turn-start'), false,
+    'turn 1 already ended: a late frame must not resurrect it')
+})
+
 test('malformed windows, changes and entries degrade into issues without throwing', () => {
   const { feed, issues } = collect()
   assert.doesNotThrow(() => feed.applyWindow(null))

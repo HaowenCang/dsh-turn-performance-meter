@@ -33,6 +33,24 @@ test('TTFT is measured once per turn and never redefined by a later call', () =>
   assert.equal(meter.snapshot(3100).ttftMs, 400, 'the second call must not redefine turn TTFT')
 })
 
+test('an unobserved turn start reports elapsed and TTFT as unknown, never as zero', () => {
+  /**
+   * The adopted mid-turn boundary (`client-feed.adoptTurn`) opens the turn with
+   * `timeMs: null`. `0 ms` would be a fabricated measurement for a turn that may
+   * have been running for minutes, so both elapsed and TTFT are `null` and the
+   * pill omits them.
+   */
+  const meter = new LiveMeter({ windowMs: 1000 })
+  meter.turnStarted({ turn: 3, timeMs: null })
+  meter.attemptStarted({ attemptId: 'a1', step: 1, timeMs: 5000 })
+  meter.acceptSample({ timeMs: 5100, phase: 'output', weight: 40, attemptId: 'a1' })
+
+  const snapshot = meter.snapshot(5200)
+  assert.equal(snapshot.turnElapsedMs, null, 'elapsed is unknown')
+  assert.equal(snapshot.ttftMs, null, 'TTFT is unknown')
+  assert.equal(snapshot.tps, 40, 'the trailing rate is still measurable from the deltas themselves')
+})
+
 test('a new attempt resets the window: a tool boundary never mixes two calls', () => {
   const meter = streamingMeter()
   meter.acceptSample({ timeMs: 500, phase: 'output', weight: 100, attemptId: 'a1' })

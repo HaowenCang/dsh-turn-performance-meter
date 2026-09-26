@@ -52,6 +52,32 @@ test('turn/start enters pending-first-token and a replayed turn/start does not r
   assert.equal(replayed, streaming, 'same turn + already open => no state change')
 })
 
+test('an adopted (recovered) turn/start opens the waiting stage with the TTFT frozen as unknown', () => {
+  /**
+   * A page that attaches mid-turn never sees this turn's `turn/start`; the
+   * boundary is inferred from the transient plane (`client-feed.adoptTurn`).
+   * Restarting the TTFT stopwatch here would print a TTFT measured from the
+   * moment the page loaded.
+   */
+  const adopted = reduceLiveUi(initialLiveUi(), {
+    type: LIVE_UI_EVENT.TURN_START,
+    turn: 4,
+    timeMs: null,
+    recovered: true,
+  })
+  assert.equal(adopted.state, LiveUiState.WAITING_MODEL, 'the neutral waiting stage, not pending-first-token')
+  assert.equal(adopted.ttftFrozen, true, 'the TTFT stopwatch is frozen, never restarted')
+  assert.equal(adopted.turn, 4)
+  assert.equal(adopted.sinceMs, null, 'no invented stage entry time')
+
+  const streaming = reduceLiveUi(adopted, { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'output', timeMs: 1500 })
+  assert.equal(streaming.state, LiveUiState.STREAMING_OUTPUT, 'the first accepted delta streams')
+  assert.equal(streaming.ttftFrozen, true, 'and the adopted turn never returns to pending-first-token')
+
+  const nextStep = reduceLiveUi(streaming, { type: LIVE_UI_EVENT.STEP_START, turn: 4, step: 2, timeMs: 2000 })
+  assert.equal(nextStep.state, LiveUiState.WAITING_MODEL, 'later boundaries can only wait')
+})
+
 test('the first model-producing delta freezes TTFT; later LLM calls never return to pending-first-token', () => {
   const { state } = applyAll(initialLiveUi(), [
     { type: LIVE_UI_EVENT.TURN_START, turn: 1, timeMs: 0 },

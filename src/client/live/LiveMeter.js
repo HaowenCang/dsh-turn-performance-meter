@@ -66,6 +66,21 @@ function metric(value, unit, { tone = 'primary', className = 'dsh-tpm-number' } 
   ])
 }
 
+/**
+ * Separator plus turn-elapsed run, or nothing.
+ *
+ * The turn elapsed is `null` when the turn start was not observed (a page that
+ * attached mid-turn adopts the open turn without its `turn/start`); rendering
+ * `0 s` there would be a fabricated number, so the run is omitted entirely.
+ */
+function elapsedRun(view) {
+  if (!Number.isFinite(view.elapsedMs)) return []
+  return [
+    h('span', { key: 's', className: 'dsh-tpm-sep' }),
+    h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs)),
+  ]
+}
+
 function pillContent(view, label) {
   switch (view.kind) {
     case 'ttft': {
@@ -85,16 +100,14 @@ function pillContent(view, label) {
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
         metric(formatApproxTps(view.tps, view.approximate), 'tokens/s', { tone: 'accent' }),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
 
     case 'tool':
       return [
         h('span', { key: 'n', className: 'dsh-tpm-tool' }, formatToolLabel(view.names, view.count)),
         h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatElapsed(view.toolElapsedMs ?? 0)}`),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
 
     case 'waiting': {
@@ -102,16 +115,14 @@ function pillContent(view, label) {
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
         metric(parts.value, parts.unit),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
     }
 
     case 'transition':
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, `${label}…`),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
 
     default:
@@ -127,7 +138,9 @@ function pillContent(view, label) {
 export function LivePill({ view, translate }) {
   const t = typeof translate === 'function' ? translate : (key => key)
   const label = t(stateLabelKey(view))
-  const ariaLabel = `${label} · ${formatElapsed(view.elapsedMs ?? 0)}`
+  const ariaLabel = Number.isFinite(view.elapsedMs)
+    ? `${label} · ${formatElapsed(view.elapsedMs)}`
+    : label
   return h('div', {
     className: 'dsh-tpm-root',
     'data-kind': 'live',

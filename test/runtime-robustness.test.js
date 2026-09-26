@@ -546,14 +546,41 @@ test('a late frame for a superseded attempt lands in the completed curve but nev
   assert.ok(runA.attemptTokens > 1000, 'attempt A owns all three of its deltas')
 })
 
-test('a delta with no matching turn is reported and dropped, never attached to a guess', () => {
+test('a transient row naming an untracked turn adopts the boundary instead of dropping the turn', () => {
   const sessions = fakeSessionsService()
   const source = sessions.createSource('s-orphan')
   const controller = createController({ sessions })
   controller.attach('s-orphan')
   let revision = 1
-  /** No `turn/start` in this window, so nothing can own the delta. */
+  /**
+   * No `turn/start` in this window — the shape a page sees when it attaches
+   * (or reconnects) in the middle of a turn, because the published window is a
+   * live tail. The open turn is then known only from the transient row's own
+   * `turn` field, which is evidence, not a guess: the boundary is *adopted*
+   * (`recovered`) so the turn's metrics survive, while its start time stays
+   * unknown so no TTFT can be measured from the reload.
+   */
   source.appendEntry({ type: 'transient', event: { type: 'assistant/live-chunk', seq: 1, time: 1100, data: { attemptId: 'a:1', turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'orphan' } } } }, (revision += 1))
+  const view = controller.project('s-orphan', 1200)
+  assert.equal(view.kind, 'streaming', 'the adopted turn renders its live pill')
+  assert.equal(view.turn, 1, 'the turn number comes from the row, never invented')
+  assert.equal(controller.diagnostics('s-orphan').droppedDeltas, 0, 'the delta is owned, not dropped')
+  assert.equal(controller.store.turns.size, 1, 'exactly one turn record exists for it')
+  const record = [...controller.store.turns.values()][0]
+  assert.equal(record.startMs, null, 'and its start time is unknown, not the reload instant')
+  assert.equal(view.elapsedMs, null, 'so the elapsed run is omitted instead of printed as 0 s')
+  assert.equal(controller.project('s-orphan', 1200).kind, 'streaming', 'and the adoption is idempotent')
+  controller.dispose()
+})
+
+test('a transient row that names no turn is still dropped, never attached to a guess', () => {
+  const sessions = fakeSessionsService()
+  const source = sessions.createSource('s-orphan')
+  const controller = createController({ sessions })
+  controller.attach('s-orphan')
+  let revision = 1
+  /** No `turn/start` *and* no `turn` on the row: there is nothing to adopt. */
+  source.appendEntry({ type: 'transient', event: { type: 'assistant/live-chunk', seq: 1, time: 1100, data: { attemptId: 'a:1', turn: null, step: 1, chunk: { type: 'text-delta', index: 0, text: 'orphan' } } } }, (revision += 1))
   const view = controller.project('s-orphan', 1200)
   assert.equal(view.kind, 'hidden', 'nothing renders without a turn')
   assert.equal(controller.diagnostics('s-orphan').droppedDeltas, 1, 'and the drop is counted')

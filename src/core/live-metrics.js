@@ -83,6 +83,39 @@ export class LiveMeter {
   }
 
   /**
+   * Record the turn's start now that it has been observed.
+   *
+   * Two orderings reach this method. A page that attached mid-turn adopted the
+   * open turn with an unknown start, and the turn's own `turn/start` row later
+   * enters the window (a reconnect, or the window sliding back far enough): the
+   * missing instant is then *recovered*, not redefined. Second, the ordinary
+   * case calls it on every durable `turn/start` after `turnStarted`, where a
+   * finite start is already present.
+   *
+   * Both elapsed time and turn TTFT are defined as intervals from the turn's
+   * start, so recording that instant late does not move either measurement: it
+   * is the same arithmetic on the same evidence, and the first token timestamp
+   * was already stamped when its delta arrived. What the call changes is
+   * whether the metric is *computable* — a finite start turns an unknown into a
+   * measured value, which is strictly more evidence than was held before.
+   *
+   * The converse is refused: an observed start is never replaced by a later
+   * non-finite one, so authority can only be added, never withdrawn. The first
+   * finite observation wins because a turn has exactly one start.
+   *
+   * @param {{turn:number|null, timeMs:number|null}} input
+   * @returns {boolean} whether the recorded start changed
+   */
+  turnStartObserved({ turn, timeMs }) {
+    if (turn === null || turn === undefined) return false
+    if (turn !== this.turn) return false
+    if (Number.isFinite(this.turnStartMs)) return false
+    if (!Number.isFinite(timeMs)) return false
+    this.turnStartMs = timeMs
+    return true
+  }
+
+  /**
    * Begin a new model attempt. Always resets the window: a new attempt identity
    * is exactly the boundary across which a rolling window must not be bridged.
    * @returns {boolean} whether the identity actually changed
@@ -182,7 +215,13 @@ export class LiveMeter {
   snapshot(nowMs) {
     if (this.turn === null) return { phase: LivePhase.IDLE }
     const now = this.clock(nowMs)
-    const elapsedMs = Number.isFinite(this.turnStartMs) ? Math.max(0, now - this.turnStartMs) : 0
+    /**
+     * `null`, never `0`, when the turn start was not observed: a page that
+     * attaches mid-turn adopts the open turn without its `turn/start` boundary
+     * (see `client-feed`), and "elapsed 0 s" would then be a fabricated number
+     * for a turn that may have been running for minutes.
+     */
+    const elapsedMs = Number.isFinite(this.turnStartMs) ? Math.max(0, now - this.turnStartMs) : null
     const base = {
       turn: this.turn,
       phase: this.phase,

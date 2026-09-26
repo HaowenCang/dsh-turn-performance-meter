@@ -42,6 +42,18 @@ Verified live in the running DSH client (Phase 3), with the presentation
 throttled to a single 50 ms ticker (Phase 5A; the constant lives in
 `src/client/live/cadence.js`).
 
+**Adopted turn boundary (`recovered`).** When the page attaches mid-turn — a reload, or a reconnect that produces a `replace` window — the open turn's
+`turn/start` row is normally outside the published tail. The boundary is then *derived* from the transient rows' own `turn` field and marked
+`recovered`; the turn opens directly in `waiting-model` with the TTFT stopwatch frozen **as unknown**. It never enters `pending-first-token`, because
+that stage's counter would be measured from the reload. For such a turn the pill omits the turn-elapsed run (§3.2–§3.5 show it as the trailing
+`n.n s`) instead of printing `0 s`; the tool-stage timer, TPS and tool labels are unaffected, since those are measured from deltas and events the
+page did observe.
+
+The omission is not permanent. If the durable `turn/start` later enters the client's evidence, the turn start is upgraded to the observed instant and
+the elapsed run reappears with the recovered value on the next presentation tick; the TTFT stopwatch is not restarted either way, and the live pane
+never states a TTFT of its own for an adopted turn. The *completed* card is a separate rendering path: it reports the turn's TTFT when the durable
+`turn/start` was part of the evidence the card was built from, and renders an em dash when it was not (see `METRICS_SPEC.md` §4).
+
 ### 3.1 Pending / TTFT
 
 From `turn/start` until the first non-empty generated delta, render a centered compact pill similar to the reference:

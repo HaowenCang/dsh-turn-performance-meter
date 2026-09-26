@@ -96,6 +96,22 @@ export function reduceLiveUi(machine, event) {
       // A replayed durable turn/start for the open turn must not restart the
       // TTFT stage or wipe the frozen marker.
       if (machine.state !== INACTIVE && machine.state !== SETTLED && event.turn === machine.turn) return machine
+      /**
+       * Adopted boundary (`recovered`): the page attached mid-turn and the
+       * open turn's `turn/start` was outside the published window, so this
+       * turn's TTFT was never observed *here*. The turn opens in the neutral
+       * waiting stage with the TTFT stopwatch already frozen as unknown —
+       * restarting it would print a TTFT measured from the reload.
+       */
+      if (event.recovered === true) {
+        return {
+          state: WAITING_MODEL,
+          turn: event.turn ?? machine.turn,
+          ttftFrozen: true,
+          sinceMs: null,
+          activeTools: 0,
+        }
+      }
       return {
         state: PENDING_FIRST_TOKEN,
         turn: event.turn ?? machine.turn,

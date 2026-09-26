@@ -131,6 +131,37 @@ export class TurnTelemetryStore {
   }
 
   /**
+   * Record a turn's start time that was **observed after the record already
+   * existed**.
+   *
+   * The one path that needs this is the mid-turn attach. A page that reloads
+   * during a turn sees no `turn/start` in its window and adopts the open turn
+   * from transient evidence (`SessionEventFeed.adoptTurn`, marked `recovered`),
+   * which opens the record with `startMs: null` so nothing is measured from the
+   * reload. If the durable `turn/start` row is later published into this client
+   * — a reconnect, or the window sliding back over it — its timestamp is the
+   * turn's real start, and `beginTurn` is idempotent and would otherwise keep
+   * the record at `null` for the rest of the turn.
+   *
+   * Two rules make the upgrade safe. It is **one-way**: a node already holding a
+   * finite start is left untouched, so re-observing a turn can never withdraw
+   * authority or move a measurement that was already reported. And it is
+   * **recomputed, not restarted**: `record.firstTokenMs` is the absolute time of
+   * the first token-producing delta and is never rewritten here, so TTFT stays
+   * `firstToken - turn/start` over the same evidence, and elapsed is the same
+   * interval it always was — merely computable now.
+   *
+   * @returns {boolean} whether anything was upgraded
+   */
+  turnStartObserved(record, { timeMs }) {
+    if (record === null || record === undefined) return false
+    if (Number.isFinite(record.startMs) || !Number.isFinite(timeMs)) return false
+    record.startMs = timeMs
+    this.live(record.sessionId).turnStartObserved({ turn: record.turn, timeMs })
+    return true
+  }
+
+  /**
    * Begin an attempt. A new `attemptId` is a hard window boundary: it is exactly
    * the signal that the previous call ended, whether it committed, settled
    * without a surface message, or is being retried.

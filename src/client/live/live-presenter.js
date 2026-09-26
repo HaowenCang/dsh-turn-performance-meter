@@ -69,7 +69,12 @@ export class LivePresenter {
     if (!snapshot || snapshot.phase === 'idle' || snapshot.phase === 'settled') return hidden(machine)
 
     const turn = machine.turn ?? snapshot.turn ?? null
-    const elapsedMs = Number.isFinite(snapshot.turnElapsedMs) ? snapshot.turnElapsedMs : 0
+    /**
+     * `null` when the turn start was not observed (mid-turn attach): the pill
+     * then omits the elapsed run instead of printing `0 s`. Never a stale or
+     * fabricated number.
+     */
+    const elapsedMs = Number.isFinite(snapshot.turnElapsedMs) ? snapshot.turnElapsedMs : null
 
     // Tool stage: both the machine's activity counter and the meter's phase
     // are accepted as evidence, so a missed event cannot show a stale TPS.

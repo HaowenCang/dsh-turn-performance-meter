@@ -122,11 +122,34 @@ export function createController({
       }
 
       case NORMALIZED_KIND.TURN_START: {
-        state.currentRecord = store.beginTurn({ sessionId, turn: event.turn, timeMs: event.timeMs })
-        state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs })
+        /**
+         * `recovered` marks a boundary the feed *derived* from transient
+         * evidence (mid-turn attach) rather than observed as a durable event.
+         * The record is opened with an unknown start time (`timeMs: null`), so
+         * TTFT and turn elapsed stay unknown instead of being measured from the
+         * reload.
+         */
+        const recovered = event.recovered === true
+        state.currentRecord = store.beginTurn({
+          sessionId,
+          turn: event.turn,
+          timeMs: recovered ? null : event.timeMs,
+        })
+        /**
+         * The durable `turn/start` can arrive **after** the turn was adopted: the
+         * window is a live tail, so a reconnect (or the tail sliding back over
+         * the row) publishes it mid-turn. It is then an upgrade of an unknown
+         * start to the observed one, never a restart of the metrics — the
+         * attempt boundaries, deltas and first-token stamp already collected for
+         * this turn are kept. The inverse is impossible by construction: only a
+         * `recovered` event carries `timeMs: null`, and such an event is emitted
+         * exactly once per turn, when the turn is first adopted.
+         */
+        store.turnStartObserved(state.currentRecord, { timeMs: event.timeMs })
+        state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs, recovered })
         /** A new turn supersedes the previous card in this same advance. */
         state.settledRead = undefined
-        log('turn open', sessionId, event.turn)
+        log(recovered ? 'turn adopted (mid-turn attach)' : 'turn open', sessionId, event.turn)
         return
       }
 
