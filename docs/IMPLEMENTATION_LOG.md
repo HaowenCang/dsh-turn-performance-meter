@@ -1671,8 +1671,9 @@ Keep this current. Every approximation that can affect displayed numbers belongs
 6. The composed `web` profile config cannot be dumped in one piece because two pre-existing patch entries target absent
    rows; this is unrelated to this plugin but affects future config-based verification.
 7. The Phase 2 fixtures record the transient plane **host-side** (`agent/assistant-stream`), which is the same evidence
-   the browser receives but before the client fold. The two forms are asserted equivalent; the browser transport itself
-   is unverified until Phase 7.
+   the browser receives but before the client fold. The two forms are asserted equivalent; Phase 7B closed the browser
+   half of this by driving real turns through a real page and checking the rendered states, the write cadence and the
+   live/reloaded card against the same session's own record.
 8. The fixture set **now contains** a tool-only turn (`t6`). It still contains no provider-error retry and no tool-error
    turn: three recordings were made on the official route specifically to obtain a retry and none scheduled one, and a
    failing shell command turns out to be recorded by DSH as a *successful* call (`t7`). Both shapes are covered
@@ -1698,6 +1699,15 @@ Keep this current. Every approximation that can affect displayed numbers belongs
     vertex has no position on the chart. A marker is not a path vertex, so it does not enter `drawnPoints`; Phase 7A.1
     established that it *is* an element of the plot all the same, and the quantity the chart-wide budget bounds is now
     `renderBudget.elementPoints` = path vertices + markers (§"Phase 7A.1" below).
+14. **Open defect, found in the browser during Phase 7B.** The curve's published `peakTps` can be far below the same
+    snapshot's own mean rate. Turn 5 of the Phase 7B session settled at `generatedTokens: 365` over a 1530 ms curve span
+    — a mean of 238.6 tokens/s — while `peakTps` was 63.75, with the same card printing `reasoningTps 157.2` and
+    `outputTps 325.7` and the live pill observed at `≈326 tokens/s` in that turn's output phase. A maximum cannot fall
+    below its own mean, so either the curve's published peak or the span/calibration it is measured over is wrong. It
+    is a core-metric question — token accounting, rolling-window semantics or the shape/calibration path — so Phase 7B
+    recorded the reproduction without changing it (`dev/screenshots/phase7b/phase7b-measurements.json`,
+    §"Phase 7B" §2). It must be resolved before Phase 8; no test currently bounds `peakTps` against the mean, the phase
+    totals or the live series.
 
 ## Phase 7 — curve correctness, chart budget, dock placement (2026-09-26)
 
