@@ -2013,7 +2013,8 @@ that slot — `meter → todo → goal → queue → composer`, with `todo` 0, `
 the meter and the composer, and the previously observed orphan band did not reproduce in any state. The full
 `meter → todo → goal → composer` stack was observed directly on the everyday instance; no queue card appeared as a
 child of `conversation.input.dock` in either instance, so the queue-containing combinations are supported by the slot
-contract plus the measured uniform gap rather than by direct observation.
+contract plus the measured uniform gap rather than by direct observation. Multi-session isolation was verified
+separately below.
 
 Production presentation cadence is `DEFAULT_PRESENTATION_REFRESH_MS = 50` with no diagnostic override present, and
 the browser confirms it: DOM write intervals on the TTFT counter and on the live pill measure p50 48.5–51.7 ms across
@@ -2084,7 +2085,30 @@ than patched, because a fix chosen without establishing the intended semantics w
 contract. The suite is deliberately left green: the honest artefact is a documented repro, not a red test asserting
 behaviour nobody has yet decided.
 
-### 3. Verification for this round
+### 3. Multi-session isolation
+
+Two conversations were driven through real turns in the fresh instance while an in-page poll sampled the DOM 5–7 times a
+second, recording the active session key, meter count, every meter's `data-kind`/`data-state`/`data-turn`/`data-session`,
+the `input.dock` child count, the rendered tool-row count and the plugin style-tag count. Session A ran a live turn (four
+sequential 30 s tools) while session B was created and settled its own turn 1.
+
+Session B's entire 19-sample history contains only its own states — an empty session with **no meter at all**, then
+`pending-first-token`, then `completed` — and none of A's signatures ever appeared under B's key. Across all 340 samples
+both sessions held exactly one `.dsh-tpm-root`, one `input.dock` child, one plugin style tag and one slot wrapper, so no
+meter, slot entry, style tag or subscription symptom was duplicated. Session B's rendered tool-row count stayed at 0
+throughout, so no tool label crossed over, and switching back to A restored A's card rather than B's.
+
+Timer behaviour under repeated switching was measured directly. Session B's settled card was byte-identical across a 12 s
+idle window, so a frozen card does not advance. After a 12.9 s absence, session A's turn had settled at `总用时 149.6s`
+with `工具 4 · 121.3s · 模型调用 5` — the four sequential 30 s tools plus the model calls, with the 12.9 s spent viewing
+session B contained inside that window rather than added twice. No reset and no double count on reattach.
+
+Two things were **not** exercised and are not claimed: two sessions streaming simultaneously (A was already in its tool
+phase when B's turn began), and a real session-window replace/reconnect, which needs DSH internals to reproduce
+deterministically. The controller tests remain the deterministic evidence for rebaseline reachability. Evidence is in
+`dev/screenshots/phase7b/phase7b-session-isolation.json`.
+
+### 4. Verification for this round
 
 `npm run build:client` rebuilt `client.js` and `lib/client.js` (372 739 bytes each, identical SHA-256) and
 `npm run verify` reports **538 tests, 538 pass, 0 fail** — the 535 of `331968d` plus three added here. Browser
