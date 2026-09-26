@@ -56,7 +56,8 @@ dsh-turn-performance-meter/
 │   │   ├── live-metrics.js           LiveMeter: rolling window, TTFT, tool phase
 │   │   ├── tool-timing.js            Sum and union tool durations
 │   │   ├── time-axis.js              Compressed model-attempt chart clock (two clocks per sample)
-│   │   ├── curve.js                  Per-attempt rolling series, phase runs, peak, downsampling
+│   │   ├── curve.js                  Attempt-local total rolling trace, phase-coloured runs, peak, downsampling
+│   │   ├── curve-source.js           The calibrated curve input: stored attempts joined with their reduction
 │   │   ├── aggregate-turn.js         Turn-level weighted final metrics + quality axes
 │   │   └── turn-state.js             Pure lifecycle state machine + turn/end mapping
 │   │
@@ -142,6 +143,11 @@ dsh-turn-performance-meter/
 │   ├── mid-turn-reload-recovery.test.js Phase 7: adoption, guards, authoritative upgrade, TTFT paths
 │   ├── curve-peak-priority.test.js    Phase 7A.1: retention priority across every run length (BLOCKER A)
 │   ├── rebaseline-generation.test.js  Phase 7A.1: window generations and session-scoped store reset (BLOCKER B)
+│   ├── curve-calibration.test.js      Phase 7C: the calibrated-magnitude counterexample + the Phase 7B reproduction
+│   ├── curve-source.test.js           Phase 7C: the positional, verified join and its whole-join degradation
+│   ├── curve-total-rolling.test.js    Phase 7C: the cross-phase counterexample + the live/completed contract
+│   ├── curve-trace-matrix.test.js     Phase 7C: fourteen named scenarios for the total trace
+│   ├── curve-long-agent-visual.test.js Phase 7C: the 24-call visual regression and the rejected geometry's cost
 │   └── completed-format.test.js       Formatter edge cases (no NaN/Infinity/-0 in UI)
 │
 └── scripts/
@@ -160,11 +166,13 @@ test/          — landed in Phase 5 as curve-view-model.test.js and completed-i
                  Phase 6 added curve-attempt-boundary, curve-regression-matrix, curve-quality,
                  cadence-contract and runtime-robustness; Phase 7 added curve-reference-window,
                  curve-episode-opening, curve-render-budget and mid-turn-reload-recovery; Phase 7A.1
-                 added curve-peak-priority and rebaseline-generation
+                 added curve-peak-priority and rebaseline-generation; Phase 7C added curve-calibration,
+                 curve-source, curve-total-rolling, curve-trace-matrix and curve-long-agent-visual
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
                  JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
                  Phase 6 verified the *served* client bundle in the live page instead of taking
-                 pixels, and TEST_PLAN.md §3 states that gap explicitly.
+                 pixels, and TEST_PLAN.md §3 states that gap explicitly. Phase 7C captured the
+                 completed curve in a clean-started host under dev/screenshots/phase7c/.
 ```
 
 Do not create parallel copies of the same metric formula in host and client. Pure formulas remain in `src/core` and are reused wherever the final build pipeline permits. `scripts/verify-structure.mjs` fails when a `src/core` module has no matching test.

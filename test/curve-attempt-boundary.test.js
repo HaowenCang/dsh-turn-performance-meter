@@ -10,8 +10,8 @@
  *
  * The completed curve must agree. Before Phase 6, `settle()` in
  * `src/host/telemetry-design.js` fed the whole concatenated sample list into one
- * call of `rollingTpsSeries`, which filters on `activeTimeMs` and `phase` and
- * never reads `attemptId`. Two consequences followed:
+ * call of `rollingTpsSeries`, which filtered on `activeTimeMs` and `phase` and
+ * never read `attemptId`. Two consequences followed:
  *
  *   - the opening points of attempt B were computed from a window that still held
  *     attempt A's trailing tokens, so the completed curve credited B with A's
@@ -22,6 +22,15 @@
  * `legacyCompletedSeries` below is the old pipeline verbatim, kept as an
  * executable counterexample: it must fail the assertion the corrected pipeline
  * passes.
+ *
+ * ## Phase 7C: the counterexample's own magnitudes
+ *
+ * The same file previously also measured **one phase at a time**, because that is
+ * what production did. The counterexample below therefore calibrates its samples to
+ * the same provider totals production calibrates to and then sums them phase by
+ * phase, so the only difference left between it and the corrected pipeline is the
+ * attempt partition this file exists to test. The cross-phase defect has its own
+ * counterexample in `test/curve-total-rolling.test.js`.
  */
 
 import test from 'node:test'
@@ -33,7 +42,6 @@ import {
   DEFAULT_WINDOW_MS,
   downsampleSeries,
   peakTps,
-  rollingTpsSeries,
 } from '../src/core/curve.js'
 
 function outputChunk(text) {
@@ -44,29 +52,41 @@ function outputChunk(text) {
  * The rejected implementation, kept as an executable counterexample.
  *
  * This is what the shipped code did: concatenate every attempt's samples onto the
- * turn-compressed clock and roll **one** window across the whole list. The window
- * convention below is the verified metric contract — half-open on the left,
- * `(t - windowMs, t]`, as `SlidingWindowMeter` implements and
- * `docs/METRICS_SPEC.md` §8.1 specifies — so this reproduction differs from the
- * corrected pipeline in exactly one respect: its samples are never partitioned by
- * attempt. That isolation is what makes the comparison a measurement of the
- * boundary defect rather than of two different window definitions.
+ * turn-compressed clock and roll **one** window across the whole list, then read
+ * each phase out of that bridged series separately. The window convention below is
+ * the verified metric contract — half-open on the left, `(t - windowMs, t]`, as
+ * `SlidingWindowMeter` implements and `docs/METRICS_SPEC.md` §8.1 specifies — so
+ * this reproduction differs from the corrected pipeline in exactly two respects:
+ * its samples are never partitioned by attempt, and its rates are per phase. The
+ * first is the defect this file measures; the second is the defect
+ * `test/curve-total-rolling.test.js` measures.
  *
- * The grid is anchored at the attempt's own start with a tail shifted past the
- * last sample, matching `rollingTpsSeries`.
+ * The grid is anchored at the turn's start with a tail shifted past the last
+ * sample, matching the corrected sampler.
  */
 function legacyCompletedSeries(record, phase, windowMs = DEFAULT_WINDOW_MS) {
   const samples = []
-  const segments = []
   let offsetMs = 0
   for (const attempt of record.attempts) {
     if (!Array.isArray(attempt.samples) || attempt.samples.length === 0) continue
     const first = attempt.samples[0].timeMs
     const last = attempt.samples[attempt.samples.length - 1].timeMs
+    /**
+     * One common scale per attempt, which is the whole-attempt branch of
+     * `calibrateAttemptSamples`. Reproducing production's magnitudes is what keeps
+     * the comparison a measurement of the partition and not of two scales.
+     */
+    const rawTotal = attempt.samples.reduce((sum, sample) => sum + (sample.weight ?? 0), 0)
+    const scale = rawTotal > 0 && Number.isFinite(attempt.usage?.outputTokens)
+      ? attempt.usage.outputTokens / rawTotal
+      : 1
     for (const sample of attempt.samples) {
-      samples.push({ ...sample, attemptId: attempt.attemptId, activeTimeMs: offsetMs + (sample.timeMs - first) })
+      samples.push({
+        ...sample,
+        tokens: (sample.weight ?? 0) * scale,
+        activeTimeMs: offsetMs + (sample.timeMs - first),
+      })
     }
-    segments.push({ attemptId: attempt.attemptId, startMs: offsetMs, endMs: offsetMs + (last - first) })
     offsetMs += last - first
   }
   const sampleEndMs = offsetMs
@@ -93,7 +113,17 @@ function legacyCompletedSeries(record, phase, windowMs = DEFAULT_WINDOW_MS) {
     }
     return { timeMs: t, tps: total * 1000 / windowMs }
   })
-  return { durationMs: offsetMs, segments, series }
+  return { durationMs: offsetMs, segments: [], series }
+}
+
+/** Every vertex of every attempt's trace, with the attempt identity attached. */
+function verticesOf(curve) {
+  return curve.attempts.flatMap(attempt => attempt.points)
+}
+
+/** One attempt's trace, by id. */
+function attemptOf(curve, id) {
+  return curve.attempts.find(candidate => candidate.attemptId === id)
 }
 
 /**
@@ -156,8 +186,6 @@ test('the completed rolling window is reset at an attempt boundary, not bridged 
    * total. B never ran at 120; its own ceiling is 20.
    */
   const legacy = legacyCompletedSeries(record, 'output')
-  assert.deepEqual(legacy.segments.map(s => [s.startMs, s.endMs]), [[0, 500], [500, 1000]],
-    'the old compressed clock was already continuous; only its window was wrong')
   assert.deepEqual(legacy.series.map(p => `${p.timeMs}:${p.tps}`).join(' '),
     '0:100 250:100 500:210 750:210 1000:120 1250:120 1500:10 1750:10 2000:0',
     'the rejected pipeline really does bridge the boundary; this is the regression, not a hypothetical')
@@ -172,38 +200,35 @@ test('the completed rolling window is reset at an attempt boundary, not bridged 
   ])
 
   /**
-   * The corrected curve: per-attempt windows on concatenated coordinates.
+   * The corrected curve: a rolling window per attempt on concatenated coordinates.
    *
-   * Each run is sampled on its own 250 ms grid over `(t - 1000, t]` and stops where
+   * Each trace is sampled on its own 250 ms grid over `(t - 1000, t]` and stops where
    * its own attempt stops, so A covers [0, 500] and B covers [500, 1000]. A's two
-   * measurements are half a second apart, so both fit at t=500 and A reads 200
-   * tokens/s there; B's are half a second apart too, so B reads 20 at t=1000.
+   * measurements are half a second apart, so the window at t=500 is `(500-1000, 500]`
+   * and holds both: 200 tokens/s. B's are half a second apart too, so B reaches 20.
    */
-  const output = curve.series.find(series => series.key === 'output')
-  assert.deepEqual(output.runs.map(run => run.attemptId), ['attempt-a', 'attempt-b'],
-    'one run per attempt, in turn order')
-
-  const [runA, runB] = output.runs
-  assert.deepEqual(runA.points.map(p => p.timeMs), [0, 250, 500])
-  assert.deepEqual(runA.points.map(p => p.tps), [100, 100, 200],
+  const traceA = attemptOf(curve, 'attempt-a')
+  const traceB = attemptOf(curve, 'attempt-b')
+  assert.deepEqual(traceA.points.map(p => p.timeMs), [0, 250, 500])
+  assert.deepEqual(traceA.points.map(p => p.tps), [100, 100, 200],
     'attempt A reads only its own measurements and reaches 200 tokens/s at its own end')
 
-  assert.equal(runB.points[0].timeMs, 500, 'attempt B opens at the shared compressed coordinate')
-  assert.deepEqual(runB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0],
+  assert.equal(traceB.points[0].timeMs, 500, 'attempt B opens at the shared compressed coordinate')
+  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0],
     'B climbs on its own evidence alone and never borrows A\'s 100')
 
   /**
-   * The decisive comparison. The two runs meet at one compressed coordinate — A's
+   * The decisive comparison. The two traces meet at one compressed coordinate — A's
    * last vertex and B's first are both at 500 — and they report different numbers
    * computed from different samples: A's own 200 from its two measurements, B's own
-   * 10 from the single delta it had produced by then. The rejected pipeline
-   * produced one value for that coordinate, 210, for an attempt whose entire output
-   * was 20 tokens, and still reported 120 at 1000 against B's honest 20.
+   * 10 from the single delta it had produced by then. The rejected pipeline produced
+   * one value for that coordinate, 210, for an attempt whose entire output was 20
+   * tokens, and still reported 120 at 1000 against B's honest 20.
    */
-  assert.equal(runA.points.at(-1).tps, 200)
-  assert.equal(runB.points[0].tps, 10)
-  assert.equal(runB.peak, 20)
-  assert.equal(runB.points.at(-1).tps, 0,
+  assert.equal(traceA.points.at(-1).tps, 200)
+  assert.equal(traceB.points[0].tps, 10)
+  assert.equal(curve.series.find(series => series.key === 'output').runs[1].peak, 20)
+  assert.equal(traceB.points.at(-1).tps, 0,
     'B\'s own decay is drawn, and it is B\'s: the tail is not clamped to a shorter axis')
   assert.equal(legacy.series.find(p => p.timeMs === 500).tps, 210,
     'the bridged pipeline adds the two calls together at the coordinate they share')
@@ -211,8 +236,7 @@ test('the completed rolling window is reset at an attempt boundary, not bridged 
     'and it is still 100 tokens/s above B\'s own reading one window into the new call')
 
   assert.equal(curve.peakTps, 200,
-    'the turn peak is the max over per-attempt series, never a sum across the boundary')
-  assert.equal(runPeak(curve, 'output'), 200)
+    'the turn peak is the max over per-attempt traces, never a sum across the boundary')
 })
 
 test('no sampling instant carries a rate the owning attempt cannot support', () => {
@@ -220,37 +244,33 @@ test('no sampling instant carries a rate the owning attempt cannot support', () 
   const { settled } = driveToolSeparatedTurn(store)
 
   /**
-   * Independent upper bound. Within one attempt a trailing one-second window can
-   * hold at most everything that attempt ever produced, so
-   * `tps <= attemptTokens * 1000 / windowMs` must hold at every vertex. Only a
-   * window fed by a neighbouring attempt can exceed it.
+   * Independent upper bound. Within one attempt a trailing one-second window can hold
+   * at most everything that attempt ever produced, so `tps <= attemptTokens * 1000 /
+   * windowMs` must hold at every vertex. Only a window fed by a neighbouring attempt
+   * can exceed it.
    */
-  for (const series of settled.curve.series) {
-    const expectedTotal = series.key === 'output' ? { 'attempt-a': 200, 'attempt-b': 20 } : null
-    if (expectedTotal === null) {
-      /**
-       * This turn contains no reasoning delta at all, so the reasoning series has
-       * no run. A phase with no evidence must not be drawn as a flat zero line:
-       * "never reasoned here" is not "reasoning throughput fell to zero".
-       */
-      assert.deepEqual(series.runs, [], 'a phase with no evidence produces no run')
-      assert.equal(series.present, false)
-      continue
+  const expectedTotal = { 'attempt-a': 200, 'attempt-b': 20 }
+  for (const attempt of settled.curve.attempts) {
+    const bound = expectedTotal[attempt.attemptId] * 1000 / DEFAULT_WINDOW_MS
+    assert.equal(attempt.tokens, expectedTotal[attempt.attemptId],
+      `${attempt.attemptId} reports only its own token total`)
+    /** No vertex may claim more than the attempt's whole output in one window. */
+    for (const point of attempt.points) {
+      assert.ok(point.tps <= bound + 1e-9,
+        `${attempt.attemptId} point ${point.localMs} claims ${point.tps} tokens/s from at most ${attempt.tokens} tokens`)
     }
-    assert.deepEqual(series.runs.map(run => run.attemptId), ['attempt-a', 'attempt-b'])
-    for (const run of series.runs) {
-      assert.equal(run.attemptTokens, expectedTotal[run.attemptId],
-        `${run.attemptId}/${series.key} reports only its own token total`)
-      /** No vertex may claim more than the attempt's whole output in one window. */
-      const bound = run.attemptTokens * 1000 / DEFAULT_WINDOW_MS
-      for (const point of run.points) {
-        assert.ok(point.tps <= bound + 1e-9,
-          `${run.attemptId}/${series.key} point ${point.timeMs} claims ${point.tps} tokens/s from at most ${run.attemptTokens} tokens`)
-      }
-      assert.equal(run.peak, Math.max(...run.points.map(p => p.tps)),
+    for (const run of attempt.runs) {
+      assert.equal(run.peak, peakTps(run.points),
         'a run\'s reported peak is the maximum of its own vertices')
     }
   }
+  /**
+   * A phase with no evidence must not be drawn as a flat zero line: "never reasoned
+   * here" is not "reasoning throughput fell to zero".
+   */
+  const reasoning = settled.curve.series.find(series => series.key === 'reasoning')
+  assert.deepEqual(reasoning.runs, [], 'this turn contains no reasoning delta at all')
+  assert.equal(reasoning.present, false)
 })
 
 test('the bound is broken by the bridged pipeline and respected by the corrected one', () => {
@@ -259,7 +279,7 @@ test('the bound is broken by the bridged pipeline and respected by the corrected
 
   /**
    * Independent check on the counterexample: attempt B produced 20 tokens in total
-   * and its own run lasts half a second, so no honest rate attributed to it can
+   * and its own trace lasts half a second, so no honest rate attributed to it can
    * exceed 20 tokens/s. The rejected pipeline's vertex at 1000 is 120.
    */
   const boundB = 20 * 1000 / DEFAULT_WINDOW_MS
@@ -270,10 +290,10 @@ test('the bound is broken by the bridged pipeline and respected by the corrected
   assert.ok(legacy.series.find(p => p.timeMs === 1000).tps > boundB,
     'the rejected vertex attributed to attempt B exceeds what B produced')
 
-  const runB = settled.curve.series.find(series => series.key === 'output').runs[1]
-  for (const point of runB.points) {
+  const traceB = attemptOf(settled.curve, 'attempt-b')
+  for (const point of traceB.points) {
     assert.ok(point.tps <= boundB + 1e-9,
-      `corrected run ${runB.attemptId} stays within ${boundB} tokens/s at ${point.timeMs}`)
+      `corrected trace ${traceB.attemptId} stays within ${boundB} tokens/s at ${point.localMs}`)
   }
 })
 
@@ -307,18 +327,18 @@ test('a retry is a hard window reset for the completed curve too', () => {
   })
 
   const curve = store.endTurn(record, { timeMs: 1200, status: 'completed' }).curve
-  const runs = curve.series.find(series => series.key === 'output').runs
-  assert.deepEqual(runs.map(run => run.attemptId), ['retry-1', 'retry-2'])
-  assert.equal(runs[1].startMs, 500,
+  const first = attemptOf(curve, 'retry-1')
+  const second = attemptOf(curve, 'retry-2')
+  assert.equal(second.startMs, 500,
     'the retry opens at the abandoned attempt\'s last coordinate, as the compressed clock requires')
 
-  assert.deepEqual(runs[0].points.map(p => p.tps), [200, 200, 400],
+  assert.deepEqual(first.points.map(p => p.tps), [200, 200, 400],
     'the abandoned attempt keeps its own 200 tokens per measurement')
-  assert.deepEqual(runs[1].points.map(p => p.tps), [20, 20, 40, 40, 20, 20, 0],
+  assert.deepEqual(second.points.map(p => p.tps), [20, 20, 40, 40, 20, 20, 0],
     'a retry resets the measurement window: the abandoned prefix may not seed it')
-  assert.equal(runs[1].points[0].timeMs, 500,
-    'and the retry\'s first vertex sits at the shared coordinate, where it reads its own 20 and not 220')
-  assert.equal(runs[1].peak, 40)
+  assert.equal(second.points[0].timeMs, 500,
+    'and the retry\'s first vertex sits at the shared coordinate, where it reads its own 20 and not 420')
+  assert.equal(curve.series.find(series => series.key === 'output').runs[1].peak, 40)
 
   assert.equal(curve.peakTps, 400,
     'the abandoned attempt still owns its own 400 tokens/s measurement')
@@ -347,20 +367,21 @@ test('a retry whose abandoned prefix produced one delta shares the coordinate wi
   })
 
   const curve = store.endTurn(record, { timeMs: 300, status: 'completed' }).curve
-  const runs = curve.series.find(series => series.key === 'output').runs
-  assert.deepEqual(runs.map(run => run.attemptId), ['retry-1', 'retry-2'])
-  assert.equal(runs[0].endMs, 0, 'a single delta is a zero-length attempt')
-  assert.equal(runs[1].startMs, 0, 'so both attempts occupy the coordinate zero')
-  assert.deepEqual(runs[0].points.map(p => p.tps), [500],
+  const first = attemptOf(curve, 'retry-1')
+  const second = attemptOf(curve, 'retry-2')
+
+  assert.equal(first.endMs, 0, 'a single delta is a zero-length attempt')
+  assert.equal(second.startMs, 0, 'so both attempts occupy the coordinate zero')
+  assert.deepEqual(first.points.map(p => p.tps), [500],
     'the abandoned attempt is one measurement, drawn as one vertex')
-  assert.deepEqual(runs[1].points.map(p => p.tps), [10, 10, 10, 10, 0],
-    'and the retry is its own series, never 510')
+  assert.deepEqual(second.points.map(p => p.tps), [10, 10, 10, 10, 0],
+    'and the retry is its own trace, never 510')
   /**
    * Two attempts on one coordinate is the sharpest form of the invariant: the
    * compressed axis cannot separate them at all, so only a per-attempt window can
    * keep their samples apart.
    */
-  assert.equal(runs[0].drawnToMs, 0, 'the first attempt owns no coordinate to decay over')
+  assert.equal(first.points.at(-1).timeMs, 0, 'the first attempt owns no coordinate to decay over')
   assert.equal(curve.peakTps, 500)
 })
 
@@ -372,19 +393,20 @@ test('each attempt is sampled on the same 250 ms grid, over one window of 1000 m
   assert.equal(curve.windowMs, DEFAULT_WINDOW_MS)
   assert.equal(curve.sampleEveryMs, DEFAULT_SAMPLE_EVERY_MS)
 
-  const [runA, runB] = curve.series.find(series => series.key === 'output').runs
+  const traceA = attemptOf(curve, 'attempt-a')
+  const traceB = attemptOf(curve, 'attempt-b')
   /**
-   * A run is sampled on its own 250 ms grid, from its own local zero out to its
+   * A trace is sampled on its own 250 ms grid, from its own local zero out to its
    * decay limit. A's limit is B's start, because B begins exactly where A ends.
    */
-  assert.deepEqual(runA.points.map(p => p.timeMs), [0, 250, 500],
+  assert.deepEqual(traceA.points.map(p => p.timeMs), [0, 250, 500],
     'the first attempt is sampled on the same grid the single-attempt case always used')
-  assert.deepEqual(runB.points.map(p => p.timeMs), [500, 750, 1000, 1250, 1500, 1750, 2000],
+  assert.deepEqual(traceB.points.map(p => p.timeMs), [500, 750, 1000, 1250, 1500, 1750, 2000],
     'A stops at the boundary; B is re-based to its own start and re-offset to the shared clock')
-  assert.equal(runA.points.map(p => p.localMs).at(-1), 500)
-  assert.equal(runB.localDurationMs, 500, 'a run reports its own width for the sampler')
-  assert.equal(runB.points[0].localMs, 0, 'its first vertex is local zero, not the shared coordinate')
-  assert.equal(runB.points[0].timeMs, 500, 'and it is drawn at the shared coordinate')
+  assert.equal(traceA.points.at(-1).localMs, 500)
+  assert.equal(traceB.localEndMs, 500, 'an attempt reports its own width for the sampler')
+  assert.equal(traceB.points[0].localMs, 0, 'its first vertex is local zero, not the shared coordinate')
+  assert.equal(traceB.points[0].timeMs, 500, 'and it is drawn at the shared coordinate')
 })
 
 test('an attempt\'s decay tail is drawn, clamped to the next attempt rather than to its own end', () => {
@@ -398,43 +420,36 @@ test('an attempt\'s decay tail is drawn, clamped to the next attempt rather than
   store.settleAttempt(a, { settledAtMs: 3050, settlementKind: 'message', surfaceCommitted: true, attemptOutcome: 'committed' })
 
   const curve = store.endTurn(record, { timeMs: 3100, status: 'completed' }).curve
-  const runs = curve.series.find(series => series.key === 'output').runs
+  const trace = attemptOf(curve, 'tail-a')
 
   /**
-   * A 3 s silence is three windows long, so it is two evidence episodes rather than
-   * one interval spanning the gap. Each episode nevertheless keeps its own
-   * one-second decay: the reader watches the rate hold and then fall to zero instead
-   * of the curve stopping dead on the last delta.
-   *
-   * The tail vertices sit on a grid anchored at the episode's last delta
-   * (`last + k*250`) rather than at zero, so each of their windows is a whole
-   * `(t - windowMs, t]` and the decay reaches a true zero rather than stopping on a
-   * truncated window.
+   * The 3 s silence is **drawn**, at full width, inside the one attempt that produced
+   * it. The previous revision instead split the evidence into two episodes and left a
+   * blank region between them; the region is now part of the trace, and what it says is
+   * that the trailing rate fell to zero and stayed there until the model resumed.
    */
-  assert.equal(runs.length, 2, 'the stall splits the episode')
-  assert.deepEqual(runs.map(run => [run.startMs, run.endMs]), [[0, 1000], [3000, 4000]])
-  assert.deepEqual(runs[0].points.map(p => p.timeMs), [0, 250, 500, 750, 1000])
-  assert.deepEqual(runs[0].points.map(p => p.tps), [100, 100, 100, 100, 0],
-    'the opening delta is measured for one window and then expires')
-  assert.deepEqual(runs[1].points.map(p => p.timeMs), [3000, 3250, 3500, 3750, 4000])
+  assert.deepEqual(trace.points.map(p => p.localMs), [
+    0, 250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750,
+    3000, 3250, 3500, 3750, 4000,
+  ])
+  assert.deepEqual(trace.points.map(p => p.tps), [
+    100, 100, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0,
+    100, 100, 100, 100, 0,
+  ], 'two bursts, one continuous trace, and a real zero between them')
   /**
-   * The second episode opens on its own delta, at 100 and not 200.
+   * The second burst opens on its own delta alone, at 100 and not 200.
    *
-   * This expectation previously read `[200, 100, 100, 100, 0]`: `rollingTpsSeries`
-   * clamped the lower bound to negative infinity whenever `localMs == fromMs`, which
-   * is true at **every** episode opening and not only at an attempt's first, so the
-   * second episode readmitted the sample from local zero that its `(2000, 3000]`
-   * window had already evicted. The independent Phase 7 audit found it and
-   * `test/curve-episode-opening.test.js` carries the standalone counterexample.
-   *
-   * Both episodes here belong to **one** attempt, so this is not an attempt-boundary
-   * effect: Section 6 of the Phase 6 fix remains correct and is what the rest of this
-   * file holds fixed, while the window definition itself is now uniform.
+   * This expectation previously read `[200, 100, 100, 100, 0]` for the second episode:
+   * `rollingTpsSeries` clamped the lower bound to negative infinity whenever
+   * `localMs == fromMs`, which is true at **every** episode opening and not only at an
+   * attempt's first, so the second episode readmitted the sample from local zero that
+   * its `(2000, 3000]` window had already evicted. The independent Phase 7 audit found
+   * it and `test/curve-episode-opening.test.js` carries the standalone counterexample.
    */
-  assert.deepEqual(runs[1].points.map(p => p.tps), [100, 100, 100, 100, 0],
+  assert.equal(trace.points.find(p => p.localMs === 3000).tps, 100,
     'the closing delta opens on its own measurement alone: expected 100, not 200')
   assert.equal(curve.peakTps, 100,
-    'no window ever holds both deltas three seconds apart, so neither the run peak nor the turn peak is 200')
+    'no window ever holds both deltas three seconds apart, so neither a run peak nor the turn peak is 200')
 })
 
 test('an intermediate attempt draws no decay tail, because the next call owns those coordinates', () => {
@@ -452,19 +467,20 @@ test('an intermediate attempt draws no decay tail, because the next call owns th
   store.settleAttempt(b, { settledAtMs: 650, settlementKind: 'message', surfaceCommitted: true, attemptOutcome: 'committed' })
 
   const curve = store.endTurn(record, { timeMs: 700, status: 'completed' }).curve
-  const [runA, runB] = curve.series.find(series => series.key === 'output').runs
+  const traceA = attemptOf(curve, 'a')
+  const traceB = attemptOf(curve, 'b')
 
   /**
    * A produced one delta, so A's own width is zero and B begins at the same
    * coordinate. A's single measurement is drawn as one vertex and stops there: the
    * tail it would otherwise draw belongs to coordinates B is about to use.
    */
-  assert.equal(runA.points.length, 1, 'no tail for an attempt whose coordinates are already taken')
-  assert.deepEqual(runA.points.map(p => p.tps), [100])
-  assert.equal(runA.drawnToMs, 0)
-  assert.deepEqual(runB.points.map(p => p.timeMs), [0, 250, 500, 750, 1000, 1250, 1500])
-  assert.deepEqual(runB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0])
-  assert.equal(runB.peak, 20)
+  assert.equal(traceA.points.length, 1, 'no tail for an attempt whose coordinates are already taken')
+  assert.deepEqual(traceA.points.map(p => p.tps), [100])
+  assert.equal(traceA.points.at(-1).timeMs, 0)
+  assert.deepEqual(traceB.points.map(p => p.timeMs), [0, 250, 500, 750, 1000, 1250, 1500])
+  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0])
+  assert.equal(curve.series.find(series => series.key === 'output').runs[1].peak, 20)
   assert.equal(curve.peakTps, 100)
 })
 
@@ -473,9 +489,9 @@ test('a rendering budget still cannot move the reported peak, whatever the attem
   const { settled } = driveToolSeparatedTurn(store)
   const curve = settled.curve
 
-  const full = seriesOf(curve, 'output')
+  const full = curve.attempts.map(attempt => attempt.points)
   assert.equal(curve.peakTps, peakTps(...full),
-    'the reported peak is the max over the full per-attempt series, evaluated before downsampling')
+    'the reported peak is the max over the full per-attempt traces, evaluated before downsampling')
 
   for (const series of curve.series) {
     for (const run of series.runs) {
@@ -485,45 +501,44 @@ test('a rendering budget still cannot move the reported peak, whatever the attem
   }
 
   /**
-   * The global maximum sits at the **end of the second attempt**, so the run list
-   * itself must carry it: a peak counted over the concatenated runs is still the
+   * The global maximum sits at the **end of the first attempt**, so the attempt list
+   * itself must carry it: a peak counted over the concatenated vertices is still the
    * peak, and no per-attempt averaging may dilute it.
    */
-  assert.equal(runPeak(curve, 'output'), 200,
-    'the strongest vertex is the second attempt\'s own end, not an average of the two')
+  assert.equal(peakTps(curve.attempts[0].points, curve.attempts[1].points), 200,
+    'the strongest vertex is attempt A\'s own end, not an average of the two')
 })
 
-/** Every full per-attempt series of one phase. */
-function seriesOf(curve, key) {
-  return curve.series.find(series => series.key === key).runs.map(run => run.points)
-}
-
-/** Highest rate any vertex of one phase's runs carries. */
-function runPeak(curve, key) {
-  return peakTps(...seriesOf(curve, key))
-}
-
 /**
- * Live-vs-completed equivalence.
+ * Live-vs-completed relationship after calibration.
  *
- * The live pane and the completed card are two renderings of one definition, so
- * for every attempt-local instant τ the completed reconstruction must report the
- * rate `LiveMeter` reported at the same instant for the same attempt. The check
- * that makes this worth stating is the one across a boundary: the live meter is
- * read during the run, before the turn has any durable settlement, and the curve
- * is rebuilt afterwards from the stored samples. If those two disagree, at least
- * one of them is not the frozen definition.
+ * The live pane and the completed card are two renderings of one **definition**, but
+ * they are not two renderings of one **magnitude** once provider usage exists. The live
+ * meter reads the heuristic shape weight, because that is all there is while the model
+ * is still streaming; the completed curve reads the calibrated allocation, because
+ * `aggregateTurn` has since anchored the shape to the provider's own total. A scale
+ * factor may therefore separate them, and demanding numeric equality would forbid the
+ * calibration the card's printed totals depend on.
+ *
+ * What must remain identical is the **shape**: which instants are sampled, where the
+ * attempts begin and end, which phase each vertex belongs to, and where the stalls and
+ * the phase transitions fall. That is what this test asserts, by driving the live meter
+ * and the settled curve from the same stream and comparing their normalised shapes
+ * rather than their numbers.
+ *
+ * `test/curve-total-rolling.test.js` asserts the numeric equality that **is** mandatory:
+ * when both sides are fed the same calibrated magnitudes, every vertex matches the live
+ * meter exactly.
  */
-test('the reconstructed per-attempt curve agrees with the live meter at the same attempt-local instants', () => {
+test('the completed curve preserves the live meter\'s shape, and rescales its magnitudes only when usage exists', () => {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
 
   const a = store.beginAttempt(record, { attemptId: 'attempt-a', step: 1, startedAtMs: 1000 })
   /**
-   * Read live at each vertex, with the chunk accepted first, and feed those
-   * readings back as the expected curve. Reading before acceptance would compare
-   * the curve against a meter that had not yet been told about the delta it is
-   * standing on. Sample pairs are half a window apart so the rate is non-trivial.
+   * Read live at each vertex, with the chunk accepted first, so the live side is a
+   * genuine measurement of the same stream the curve is later rebuilt from. Sample pairs
+   * are half a window apart so the rate is non-trivial.
    */
   const liveA = []
   for (const [timeMs, count] of [[1000, 400], [1250, 0], [1500, 400], [2000, 400]]) {
@@ -535,6 +550,8 @@ test('the reconstructed per-attempt curve agrees with the live meter at the same
     settlementKind: 'message',
     surfaceCommitted: true,
     attemptOutcome: 'committed',
+    /** An authoritative total, so the completed magnitudes are calibrated. */
+    usage: { outputTokens: 2500, reasoningTokens: 0 },
   })
 
   store.toolStarted(record, { callId: 'tool-1', name: 'pwsh', timeMs: 2100 })
@@ -558,34 +575,41 @@ test('the reconstructed per-attempt curve agrees with the live meter at the same
   })
 
   const curve = store.endTurn(record, { timeMs: 63_000, status: 'completed' }).curve
-  const runs = curve.series.find(series => series.key === 'output').runs
-  assert.deepEqual(runs.map(run => run.attemptId), ['attempt-a', 'attempt-b'])
+  const traceA = attemptOf(curve, 'attempt-a')
+  const traceB = attemptOf(curve, 'attempt-b')
 
-  for (const [index, live] of [liveA, liveB].entries()) {
-    const run = runs[index]
-    const offsetMs = run.points[0].timeMs
+  /** The timestamp shape is identical: every live instant is a sampled vertex. */
+  for (const [trace, live] of [[traceA, liveA], [traceB, liveB]]) {
     for (const reading of live) {
       if (!Number.isFinite(reading.tps)) continue
-      const point = run.points.find(p => p.timeMs === offsetMs + reading.localMs)
+      const point = trace.points.find(candidate => candidate.localMs === reading.localMs)
       assert.ok(point !== undefined,
-        `${run.attemptId} is sampled at local ${reading.localMs}`)
-      assert.equal(point.tps, reading.tps,
-        `${run.attemptId} at local ${reading.localMs}: live said ${reading.tps}, the reconstructed curve says ${point.tps}`)
+        `${trace.attemptId} is sampled at local ${reading.localMs}, where the live meter read ${reading.tps}`)
     }
   }
 
   /**
-   * Summary of the readings this test pins down.
+   * Attempt A: the live readings and the calibrated curve, side by side.
    *
-   * Attempt A: measurements at local 0, 500 and 1000, so the live meter reads
-   * 100, then 100, then 200 as the second measurement enters the window, and stays
-   * at 200 because the third arrives exactly as the first expires. Attempt B
-   * repeats that shape at a tenth of the magnitude: 10, 10, 20.
+   * The live shape is 100, 100, 200, 200 — the three deltas entering and leaving a
+   * one-second window. The calibrated curve is that shape multiplied by one common
+   * factor, because the heuristic weights were 100 + 100 + 100 = 300 raw units against
+   * an authoritative 2500. Attempt B, which reported no usage, is untouched.
    */
   assert.deepEqual(liveA.map(r => r.tps), [100, 100, 200, 200])
+  const scale = 2500 / 300
+  assert.deepEqual(traceA.points.slice(0, 4).map(p => p.tps), [100 * scale, 100 * scale, 200 * scale, 200 * scale],
+    'the completed curve is the live shape under one common calibrated scale')
+  assert.equal(traceA.calibratedTokens, 2500)
+  assert.equal(traceA.calibrated, true)
+
   assert.deepEqual(liveB.map(r => r.tps), [10, 10, 20])
-  assert.deepEqual(runs[0].points.map(p => p.tps), [100, 100, 200, 200, 200])
-  assert.deepEqual(runs[1].points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0])
-  assert.equal(runPeak({ series: [{ key: 'output', runs: [runs[1]] }] }, 'output'), 20,
-    'attempt B peaks on its own two measurements, ten times below attempt A')
+  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0],
+    'an attempt with no usage keeps the live magnitudes exactly')
+  assert.equal(traceB.calibratedTokens, null)
+  assert.equal(traceB.calibrated, false)
+
+  /** The shape that always survives calibration: the leading attempt still peaks first. */
+  assert.ok(peakTps(traceA.points) > peakTps(traceB.points))
+  assert.equal(curve.peakTps, peakTps(traceA.points))
 })

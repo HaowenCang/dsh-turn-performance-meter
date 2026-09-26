@@ -159,20 +159,44 @@ A tool may be parallel with another tool. State presentation can still say `tool
 
 Every `AssistantStreamFrame.start` / accepted new attempt resets the 1-second live meter. A later model call must not inherit tokens from a preceding call separated by a tool or retry.
 
-### The same rule applies to the completed curve (frozen in Phase 6)
+### The same rule applies to the completed curve (frozen in Phase 6, corrected in Phase 7C)
 
-The completed curve uses the compressed clock, which joins attempts end-to-start so tools consume no width. That joining is a **coordinate** operation; it is not a statement about the measurement window. Each attempt's completed series is therefore computed on its own local clock by `perAttemptSeries` and only then relabelled to the shared coordinate.
+The completed curve uses the compressed clock, which joins attempts end-to-start so tools consume no width. That joining is a **coordinate** operation; it is not a statement about the measurement window. Each attempt's completed trace is therefore computed on its own local clock by `attemptTrace` and only then relabelled to the shared coordinate.
 
 The two clocks a compressed sample carries are named explicitly for exactly this reason:
 
 | Field | Meaning | Used by |
 |---|---|---|
-| `activeTimeMs` | turn-compressed coordinate, continuous across attempts | the x-axis, and `phaseRuns`' intervals |
+| `activeTimeMs` | turn-compressed coordinate, continuous across attempts | the x-axis |
 | `attemptTimeMs` | attempt-local instant, zero at that attempt's first delta | the trailing-window measurement |
 
 Publishing only the first of the two is what allowed the rejected revision to roll a turn-global window while believing it was local. Anything that measures a rate reads `attemptTimeMs`; anything that draws a position reads `activeTimeMs`.
 
 One consequence is worth stating separately: an attempt's one-window decay tail is clamped at the coordinate the **following** attempt owns, because past that point the coordinate belongs to a different call. The final attempt keeps its tail. The clamp is published on the segment as `hasSuccessor` + `nextStartMs` — a single nullable number cannot distinguish "the next attempt starts here" from "this attempt ends at the axis end", and the two cases require different behaviour.
+
+### The trace is total, and phase is a colour (frozen in Phase 7C)
+
+Within one attempt the trailing window sums **every** generated sample, whatever its phase. That is what `LiveMeter` measures, and the two halves of the project must agree: a live pill and a completed vertex at the same attempt-local instant are one measurement.
+
+Phase therefore reaches the chart as a **label** on each vertex — `activePhase`, the phase of the latest generated sample at or before that instant, which is `streamingPhase` restated — and as the segmentation of the trace into phase-coloured runs by `visualRunsOf`. It is not a filter on the measurement:
+
+```
+raw samples (all phases)
+  -> compressAttempts           attempt-local + compressed clocks
+  -> curveSource                calibrated magnitudes from aggregate.attemptBreakdown
+  -> attemptTraces              one total rolling trace per attempt
+  -> visualRunsOf               phase-coloured cuts that share their seams
+  -> allocateRunBudgets         chart-wide 512-vertex bound
+  -> downsampleRun              per run, seams reserved
+```
+
+The rejected revision stopped at `perAttemptSeries(..., phase)`: two independent rolling series, one per phase, neither of which equalled the live reading whenever both phases were inside one window. The episode cut that went with it — one run per phase episode, with blank regions between them — is removed as well: a silence inside a call is a value on that call's own trace, drawn at full width.
+
+### Curve magnitude provenance (frozen in Phase 7C)
+
+`curveSource` joins `record.attempts` with `aggregate.attemptBreakdown[].calibration.samples`, which is the only place calibration happens. The raw evidence is not mutated and remains the provenance; the join is positional, verified on `attemptId`/`step`/sample count, and degrades **wholesale** to the raw shape if it cannot be trusted, reporting why in `curve.source.issues`.
+
+This is what makes the printed token total and the drawn curve one magnitude system: before it, `aggregateTurn` calibrated a copy of the samples for the metrics while `settle()` drew the curve from the uncalibrated originals.
 
 ## 7. Timing domains
 

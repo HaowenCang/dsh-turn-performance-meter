@@ -142,6 +142,12 @@ function plotTree(createElement, curveView, translate) {
    * same class channel the legend uses, and it does **not** count toward
    * `data-points`: a marker is not a vertex, and inflating the drawn count would make
    * the chart's own bound unmeasurable.
+   *
+   * `data-peak` is the one visual distinction between two markers. A chart of a long
+   * agent turn can hold many ordinary single-measurement stretches, and drawing every
+   * one of them at the peak's size made the trace read as a field of peaks; an
+   * ordinary marker is small and subdued, and only the measurement the card prints as
+   * the peak keeps the stronger marker. The measured instant is the same either way.
    */
   for (const [index, marker] of (Array.isArray(curveView.markers) ? curveView.markers : []).entries()) {
     area.push(createElement('span', {
@@ -150,6 +156,7 @@ function plotTree(createElement, curveView, translate) {
       'data-series': marker.series,
       'data-attempt': marker.attemptId === null ? '' : String(marker.attemptId),
       'data-tps': String(marker.tps),
+      'data-peak': marker.isPeak === true ? 'true' : 'false',
       'aria-hidden': 'true',
       style: {
         left: `${marker.x}%`,

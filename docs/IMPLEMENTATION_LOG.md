@@ -1698,16 +1698,18 @@ Keep this current. Every approximation that can affect displayed numbers belongs
     measurement is now placed as a point marker of its own series, so a card can no longer print a turn peak whose
     vertex has no position on the chart. A marker is not a path vertex, so it does not enter `drawnPoints`; Phase 7A.1
     established that it *is* an element of the plot all the same, and the quantity the chart-wide budget bounds is now
-    `renderBudget.elementPoints` = path vertices + markers (§"Phase 7A.1" below).
-14. **Open defect, found in the browser during Phase 7B.** The curve's published `peakTps` can be far below the same
-    snapshot's own mean rate. Turn 5 of the Phase 7B session settled at `generatedTokens: 365` over a 1530 ms curve span
-    — a mean of 238.6 tokens/s — while `peakTps` was 63.75, with the same card printing `reasoningTps 157.2` and
-    `outputTps 325.7` and the live pill observed at `≈326 tokens/s` in that turn's output phase. A maximum cannot fall
-    below its own mean, so either the curve's published peak or the span/calibration it is measured over is wrong. It
-    is a core-metric question — token accounting, rolling-window semantics or the shape/calibration path — so Phase 7B
-    recorded the reproduction without changing it (`dev/screenshots/phase7b/phase7b-measurements.json`,
-    §"Phase 7B" §2). It must be resolved before Phase 8; no test currently bounds `peakTps` against the mean, the phase
-    totals or the live series.
+    `renderBudget.elementPoints` = path vertices + markers (§"Phase 7A.1" below). Since Phase 7C an ordinary marker is
+    deliberately small and subdued, and only a singleton that *is* the published peak keeps the strong marker, because
+    a structural change removed most of the singleton runs the old geometry invented (see §"Phase 7C" §3).
+14. **Closed in Phase 7C — the curve's peak could fall below the turn's own mean rate.** Found in the browser during
+    Phase 7B: turn 5 settled at `generatedTokens: 365` over a 1530 ms curve span — a mean of 238.6 tokens/s — while
+    `peakTps` was 63.75, with the same card printing `reasoningTps 157.2` and `outputTps 325.7` and the live pill
+    observed at `≈326 tokens/s` in that turn's output phase. The reproduction is preserved in
+    `dev/screenshots/phase7b/phase7b-measurements.json`, §"Phase 7B" §2, and the diagnosis, its counterexample and the
+    corrected pipeline are recorded in §"Phase 7C" below rather than deleted. Two independent defects produced that
+    number: the curve was measured in the **raw heuristic** magnitude system while every printed figure came from the
+    **calibrated** one, and it was measured **one phase at a time** while the live meter measured the total. It is
+    closed; the reduction is now a test (`test/curve-calibration.test.js`), not a report.
 
 ## Phase 7 — curve correctness, chart budget, dock placement (2026-09-26)
 
@@ -2124,3 +2126,234 @@ deterministically. The controller tests remain the deterministic evidence for re
 `npm run verify` reports **538 tests, 538 pass, 0 fail** — the 535 of `331968d` plus three added here. Browser
 evidence, including the layout/measurement JSON and the screenshots, is kept under `dev/screenshots/phase7b/`, which
 is gitignored.
+
+## Phase 7C — Curve metric and rendering repair (2026-09-26)
+
+An external audit of `b7bda66` found three defects in the completed curve. They are recorded here in the order the
+audit stated them, each with the counterexample that establishes it, because in all three cases the shipped behaviour
+looked plausible: the chart drew *a* curve, and the arithmetic that produced it was wrong.
+
+### 1. The completed curve was drawn in the raw magnitude system (Finding A)
+
+Two magnitude systems live in this project. `sampleFromChunk` attaches a raw **shape weight** to every streamed delta —
+`heuristicTokenWeight`, 0.25 per Latin code point and 1 per CJK one, a documented coarse prior that is explicitly *not*
+a tokenizer. `calibrateAttemptSamples` replaces those weights with a **calibrated** per-delta allocation once
+authoritative usage is known, whose integral over an attempt equals that attempt's `outputTokens` exactly.
+
+`aggregateTurn` builds every published number from the second: `generatedTokens`, the per-phase token counts,
+`reasoningTps`, `outputTps`. `settle()` built the curve from the first, because it called
+`compressAttempts(record.attempts)` — the raw evidence — while the calibration lived on a *copy* of the same samples in
+`attemptBreakdown[].calibration.samples`. A card could therefore print `Generated Tokens: 900` beside a curve whose
+whole integrated area was 200, and the `≈` peak was read off the smaller of the two systems.
+
+Counterexample, frozen in `test/curve-calibration.test.js` and observed failing against `b7bda66`: one attempt, two
+400-character deltas at attempt-local 0 ms and 500 ms, settled with `outputTokens: 900, reasoningTokens: 0`.
+
+| Quantity | Value |
+|---|---|
+| raw shape sum | 200 |
+| provider `outputTokens` | 900 |
+| calibrated samples | `[450, 450]` |
+| old `peakTps` | **200** |
+| expected calibrated peak | **900** |
+
+The failure message on the old commit was `the peak is the calibrated total-window rate: 900 tokens/s, not 200 —
+200 !== 900`.
+
+**The corrected pipeline.** A new module, `src/core/curve-source.js`, is the join and nothing else: it takes
+`record.attempts` and `aggregate.attemptBreakdown`, returns the attempts with `calibration.samples` substituted for the
+raw ones, and performs **no** scaling of its own. A second calibration algorithm inside `settle()` would be free to
+drift from the one the printed totals use, which is the defect being removed. The join is positional — the breakdown is
+`attempts.filter(isContributingAttempt).map(reduceAttempt)` — and it is verified wherever both sides publish an
+`attemptId` or a `step`, plus a sample-count check. A disagreement degrades the **whole** join to the raw shape and
+reports every symptom in `curve.source.issues`, rather than attaching one attempt's calibration to another, because a
+partial join would leave the curve measured in two systems with nothing on screen to say which vertex belonged to
+which. The raw samples are never mutated: they remain the provenance.
+
+Invariants now asserted in `test/curve-source.test.js` and `test/curve-calibration.test.js`: with usage, the calibrated
+samples sum to `outputTokens`; with an exact split, the reasoning samples sum to `reasoningTokens` and the rest to
+`outputTokens - reasoningTokens`; with `outputTokens` alone, one common scale is applied, the split stays `estimated`
+and the combined samples still sum to the provider total; with no usage, the magnitudes stay the raw shape and
+`calibratedForCurve` is `false`, inventing nothing.
+
+### 2. Live and completed curves measured different rates (Finding B)
+
+`LiveMeter` holds **one** `SlidingWindowMeter` per active attempt and feeds it every generated sample — reasoning
+deltas, text deltas and tool-call argument deltas alike. `streamingPhase` only *labels* the newest sample. The live TPS
+is therefore the total generated tokens of the active attempt whose timestamps lie in `(t - 1000, t]`.
+
+The completed curve built `perAttemptSeries(..., phase: 'reasoning')` and `perAttemptSeries(..., phase: 'output')`
+separately. At a reasoning→output transition the live window held `reasoning + output` while the reasoning line held
+`reasoning` and the output line held `output`; neither drawn line equalled the live measurement, and `peakTps` took the
+larger of two partial rates — structurally below the rate the same session displayed live.
+
+Counterexample, frozen in `test/curve-total-rolling.test.js`: 400 calibrated reasoning tokens at attempt-local 0 ms and
+400 calibrated output tokens at 500 ms, against a 800-token provider total.
+
+| Quantity | Value |
+|---|---|
+| live / corrected total window at 500 ms | `400 + 400 = 800` tokens/s |
+| old reasoning-only line at 500 ms | 500 |
+| old output-only line at 500 ms | 500 |
+| old published peak | **500** |
+| corrected published peak | **800** |
+
+**The corrected pipeline.** `perAttemptSeries` and its `phase` filter are gone. `attemptTrace` builds one
+attempt-local trace per call with `totalRollingTpsSeries`, which sums every sample of the attempt whatever its phase
+and labels each vertex with `activePhase` — the phase of the latest generated sample at or before that instant, which
+is exactly `LiveMeter.streamingPhase`. A phase is now a **colour** of one measurement, never a second rate. The
+half-open window, the shifted tail grid and the per-attempt clamp are unchanged from Phase 6/7; the total sum and the
+label are what changed.
+
+`test/curve-reference-window.test.js` was rewritten around the total window: the independent reference is the literal
+definition over all phases, with the body ladder plus the one-step-shifted tail ladder and **no** episode partition,
+compared vertex by vertex in both directions.
+
+### 3. The trace was fragmented, and so was the drawing of it (Finding C)
+
+The user-facing symptom was a chart, not a number. The real screenshot showed dozens of disconnected short gray/orange
+traces, repeated saw-tooth restarts and many large orange singleton dots near the baseline, against a reference that
+reads as one throughput trace whose tone changes by phase.
+
+The structural cause was that the drawing unit was the **phase episode**. Each phase's samples were partitioned into
+episodes by the rule "a gap longer than one window separates them", every episode became its own run with its own
+one-window tail, and each run was measured separately. A turn of `n` calls with `k` phase alternations produced on the
+order of `n × k` short traces instead of `n` traces; a silence inside a call became a **blank region** between two runs
+rather than a decay to zero; and every episode holding a single grid vertex became a large marker.
+
+**The corrected geometry.** The attempt's trace is the statistics; the phase segmentation is applied to it afterwards:
+
+```
+attemptTraces        one total rolling trace per attempt
+  -> visualRunsOf    phase-coloured cuts, seams shared
+  -> allocateRunBudgets   chart-wide 512-vertex bound
+  -> downsampleRun   per run, both seams reserved
+```
+
+`visualRunsOf` cuts at the **midpoint** of each label change, rounded down. Cutting at the first vertex of the new
+label would leave the runs separated by exactly the silence — a visible hole on the 250 ms grid — and cutting at the
+last vertex of the old label would paint a four-second silence entirely in the outgoing tone. The midpoint does neither:
+the outgoing run keeps the earlier half and the incoming run the later half, and the two meet on **one shared vertex**,
+one object emitted by both subpaths. A phase change with no silence between its samples — the ordinary case — still
+produces adjacent runs sharing the transition vertex. The invariants are
+`runs[i].endIndex === runs[i + 1].startIndex` and
+`sum(runs[i].pointCount) === points.length + (runs.length - 1)`, both asserted. `downsampleRun` reserves a run's two
+endpoints so thinning can never drop the shared seam and reopen the gap it exists to close.
+
+Once the singleton runs stopped being manufactured by the geometry, the marker sizing became the remaining half of the
+visual defect. Ordinary single-measurement markers are now `0.24 × font` at opacity `0.75`; a singleton that *is* the
+published peak keeps `0.42 × font` at full opacity, so it coincides exactly with the peak dot instead of leaving a ring
+of the larger circle behind it. `data-peak` carries the distinction.
+
+`test/curve-long-agent-visual.test.js` replays a 24-call, 23-tool turn with a four-second stall inside every fourth
+call and measures the chart a reader experiences: two subpaths per call sharing their seam, the stall adding no
+subpath, **zero** singleton markers on the corrected chart, the same evidence producing 18 markers and strictly more
+subpaths under the rejected rule, and the whole chart inside `MAX_RENDER_POINTS_TOTAL`.
+
+### 4. The live/completed equivalence contract was too strong
+
+Phase 6 asserted that the live pane and the completed card report numerically identical TPS at every attempt-local
+instant. That was true while both read the same shape weights, and it became false the moment the completed curve was
+calibrated: live uses the heuristic shape because nothing else exists while the model is still streaming, and completed
+uses the provider-anchored allocation. Demanding equality would forbid the calibration the printed totals depend on.
+
+The contract is now stated in two parts. Numeric equality is mandatory when no authoritative usage exists, or when the
+calibration scale happens to be 1 — asserted in `test/curve-total-rolling.test.js`, which feeds both sides the same
+calibrated magnitudes and requires every vertex to match. Otherwise a common scale may separate them, and what must
+remain identical is the **shape**: which instants are sampled, where attempts begin and end, the one-second window,
+where phase transitions fall and where stalls fall. `test/curve-attempt-boundary.test.js` asserts that part directly,
+by driving the live meter and the completed curve from one stream and comparing the normalised shapes together with the
+exact scale factor.
+
+### 5. The "peak ≥ mean" reading is withdrawn
+
+The Phase 7B report observed `peakTps` below `generatedTokens / curveSpan` and argued that a maximum cannot fall below
+its own mean. The observation was correct and the generalisation is not: a one-second rolling rate is normalised to a
+fixed window, a phase average uses a different active-duration denominator, a very short attempt can have a phase
+average above its own one-second-window rate, and combined token totals and phase-specific denominators are not
+interchangeable. The invariant is **not** frozen as a test. What replaced it is the independent brute-force reference:
+for every instant on every attempt's reference grid, sum the calibrated tokens strictly inside `(t - 1000, t]` across
+all phases, reset at every attempt, and take the maximum; `curve.peakTps` must equal it, and the production sampler is
+used on neither side of that comparison.
+
+The Phase 7B reproduction itself is kept as a diagnostic test (`test/curve-calibration.test.js`), on a scenario that
+reproduces the contradiction rather than the provider timings:
+
+| Quantity | Value |
+|---|---|
+| raw heuristic sample sum | 200 |
+| provider `outputTokens` | 365 |
+| calibrated sample sum | 365 |
+| calibration scale | 1.825 |
+| old per-phase raw peak | **100** (each phase's share; the total would have been 200) |
+| new calibrated total-window peak | **365.2** |
+| turn mean rate (`generatedTokens / curveSpan`) | 291.8 |
+
+The old peak sat below the turn's own mean, which is the contradiction; the corrected peak is the trailing-window total
+and equals the independent reference.
+
+### 6. Summary rate formulas are unchanged
+
+This round did **not** redefine the four summary metrics. Reasoning TPS is still `sum(reasoning tokens) /
+sum(reasoning active generation duration)` and output TPS is still `sum(non-reasoning output tokens) / sum(output
+active generation duration)`; they are phase **averages**, and the curve is a different diagnostic — an attempt-local
+trailing-one-second total throughput trace, colour-coded by active phase. The distinction is now stated in
+`docs/METRICS_SPEC.md` §8.2 and `docs/UI_SPEC.md` §6.2 because the two were being read as one number. TTFT, the
+toolWall/toolWork split, the 50 ms presentation cadence, `SLOT_ORDER = -10`, the `conversation.input.dock` seat,
+turn-level token semantics, tool-call argument inclusion, `rebaselineSession` and session isolation are all untouched.
+
+### 7. Browser validation on a clean host
+
+A second `dsh web` was started at `127.0.0.1:50003` through the normal path
+(`dsh web --port 50003 --no-open`) — no `dev_reload_package`, no hot reload — and three turns were driven
+from that page's own composer. The plugin's bundle entry on that page was
+`/plugins/??dsh-turn-performance-meter/client.js&rev=64b948490bb1b69a-47`, the live pill rendered on the first
+turn, and no `dsh-tpm` console error occurred in any of them. Every reading below comes from the DOM of that
+live page; the captures and the full measurement table are under `dev/screenshots/phase7c/`, which is gitignored.
+
+| Turn | Calls / tools | `generatedTokens` | `peakTps` | Paths | Path vertices | Singleton markers |
+|---|---|---|---|---|---|---|
+| long-agent-1 (sparse recording) | 10 / 9 | 1 007 | 141 | 2 | 10 | 8 at 3.11 px |
+| long-agent-2 (`curve-long-agent.jpg`) | 11 / 10 | 6 406 | 370 | 19 | 152 | 0 |
+| simple-1 (`curve-simple.jpg`) | 1 / 0 | 2 517 | 413 | 2 | 56 | 0 |
+
+Three readings matter and each closes one of the findings.
+
+**The chart is one trace per call, tone-segmented.** The 11-call turn drew 19 subpaths — nine reasoning stretches
+and ten tool-call-argument stretches, one pair per call — meeting on shared vertices, with the resets falling only
+at real attempt boundaries. The screenshot reads as a throughput trace whose tone changes, which is the reference's
+shape, and the bead field is gone: **zero** singleton markers, against the 18 the rejected episode-based geometry
+produces on the same evidence in `test/curve-long-agent-visual.test.js`.
+
+**The peak is above the turn's own mean.** `peakTps` was 370 against a mean rate of 168.2 tokens/s over the same
+call, where the Phase 7B turn had 63.75 against a mean of 238.6. This is an observation about one turn, not a frozen
+invariant — §5 above states why — but it is the reading that opened the phase.
+
+**A genuinely sparse recording still draws, and now draws quietly.** `long-agent-1` is an unusual stream in which
+nine of ten calls produced a single grid instant, so eight of its ten measurements are singleton runs. They are
+drawn at 3.11 px with opacity 0.75 — the ordinary marker size, a third of the peak's — and the turn's own peak is
+carried by a path vertex rather than by a bead. That is the two-level marker policy working on the case it exists
+for, and it is the honest outcome: a one-measurement attempt *is* one point, and hiding it would be worse than
+drawing it small.
+
+One apparent anomaly was investigated rather than reported: the corrected chart's runs hold far fewer vertices than
+a 250 ms grid over their spans would suggest. It is not a defect. The completed card is rebuilt from the durable
+compact stream, whose `dt` gaps are the original delta boundaries, and a burst of tool-call arguments really does
+arrive within a few milliseconds — so an attempt whose deltas share an instant has almost no width and honestly
+draws two vertices. `test/curve-render-budget.test.js` now asserts the accounting around it
+(`lineVertices + markers === elementPoints <= allocated <= total`), which is the pair a reader of the chart cannot
+see.
+
+### 8. Verification for this round
+
+`npm run build:client` rebuilt `client.js` and `lib/client.js` and `npm run verify` reports **586 tests, 586 pass,
+0 fail**. The 538 of `b7bda66` are retained apart from the expectations that encoded the superseded geometry; every
+changed expectation carries its old contract in a comment beside it, and the reasons are §1–§3 above. Both defect files
+were observed failing before the production change. The browser pass that closes the visual half is recorded under
+`dev/screenshots/phase7c/`, which is gitignored.
+
+One defect was found *while* fixing Finding C and is worth recording because it was invisible until the geometry
+changed: `totalRollingTpsSeries` sorted its samples by `activeTimeMs` alone, so when a reasoning delta and a text delta
+shared an instant the vertex's `activePhase` depended on the sort's stability — that is, on which chunk the transport
+delivered first. The tie is now broken by phase (`output` after `reasoning`), and `test/curve.test.js` asserts that
+arrival order cannot change the series.

@@ -1,85 +1,190 @@
+/**
+ * The rolling-window sampler and the render-time reducer, as pure functions.
+ *
+ * This file is the unit-level half of the curve contract; the scenario half lives in
+ * `test/curve-reference-window.test.js` (an independent brute-force reference),
+ * `test/curve-regression-matrix.test.js` (one named scenario per frozen semantic) and
+ * `test/curve-attempt-boundary.test.js` (the cross-attempt counterexample).
+ *
+ * Two functions carry the whole definition:
+ *
+ *   - `totalRollingTpsSeries` rolls **one** trailing window over one attempt's samples,
+ *     counting every phase, and labels each vertex with the phase of the newest sample at
+ *     or before it. It has no notion of an attempt, which is why it must never be called
+ *     across a boundary;
+ *   - `downsampleSeries` reduces a series for rendering without ever being able to delete
+ *     the global peak.
+ */
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DEFAULT_MAX_POINTS,
   MIN_MAX_POINTS,
+  attemptTrace,
+  downsampleRun,
   downsampleSeries,
   peakTps,
-  perAttemptSeries,
   phaseRuns,
   phaseSpans,
-  rollingTpsSeries,
+  totalRollingTpsSeries,
+  visualRunsOf,
 } from '../src/core/curve.js'
 
-test('rolling curve operates on active-time samples', () => {
-  const series = rollingTpsSeries([
-    { activeTimeMs: 0, phase: 'output', tokens: 10 },
-    { activeTimeMs: 500, phase: 'output', tokens: 20 },
-    { activeTimeMs: 1500, phase: 'output', tokens: 30 },
-  ], { phase: 'output', windowMs: 1000, sampleEveryMs: 500, durationMs: 1500 })
-  assert.equal(series.find(p => p.timeMs === 500).tps, 30)
-  assert.equal(series.find(p => p.timeMs === 1500).tps, 30)
-  assert.equal(peakTps(series), 30)
+test('the total rolling series counts every phase in one window', () => {
+  const samples = [
+    { activeTimeMs: 0, phase: 'reasoning', tokens: 600 },
+    { activeTimeMs: 500, phase: 'output', tokens: 400 },
+  ]
+  const series = totalRollingTpsSeries(samples, { sampleEveryMs: 500, durationMs: 1500 })
+  assert.equal(series.find(p => p.localMs === 0).tps, 600,
+    'the opening vertex measures the reasoning delta alone')
+  assert.equal(series.find(p => p.localMs === 500).tps, 1000,
+    'at the transition the window holds 600 reasoning + 400 output')
+  assert.equal(series.find(p => p.localMs === 1000).tps, 400,
+    'one window later the reasoning delta has expired')
+  assert.equal(peakTps(series), 1000)
 })
 
-test('each phase series contains only its own samples', () => {
+test('the phase is a label on a vertex, never a filter of the series', () => {
   const samples = [
     { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
-    { activeTimeMs: 0, phase: 'output', tokens: 40 },
-    { activeTimeMs: 1000, phase: 'output', tokens: 40 },
+    { activeTimeMs: 750, phase: 'output', tokens: 90 },
   ]
-  const reasoning = rollingTpsSeries(samples, { phase: 'reasoning', sampleEveryMs: 500, durationMs: 1000 })
-  const output = rollingTpsSeries(samples, { phase: 'output', sampleEveryMs: 500, durationMs: 1000 })
-  // Reasoning has a single sample, so the window holds 10 tokens => 10 tokens/s.
-  assert.equal(peakTps(reasoning), 10)
-  assert.equal(reasoning.find(p => p.timeMs === 1000).tps, 0, 'the reasoning sample has left the window')
-  // Output holds 40 tokens in every window, so the series is flat at 40 tokens/s.
-  assert.equal(peakTps(output), 40)
-  assert.equal(output.find(p => p.timeMs === 1000).tps, 40)
-  assert.equal(peakTps(reasoning, output), 40, 'peak is taken over both rendered series')
+  const series = totalRollingTpsSeries(samples, { sampleEveryMs: 250, durationMs: 1750 })
+  assert.deepEqual(series.map(p => [p.localMs, p.activePhase]), [
+    [0, 'reasoning'], [250, 'reasoning'], [500, 'reasoning'], [750, 'output'],
+    [1000, 'output'], [1250, 'output'], [1500, 'output'], [1750, 'output'],
+  ], 'the label changes exactly where the newest sample does')
+  assert.deepEqual(series.map(p => p.tps), [10, 10, 10, 100, 90, 90, 90, 0],
+    'and the rate is one total: at 750 ms both samples are inside the window')
 })
 
-test('a stall inside one model stream appears as a local trough, not as removed width', () => {
-  const series = rollingTpsSeries([
+test('an empty window reads zero, and the trough of a stall is a real zero', () => {
+  const series = totalRollingTpsSeries([
     { activeTimeMs: 0, phase: 'output', tokens: 100 },
-    // 5 s of silence: a delivery stall, preserved on the compressed clock.
+    /** 5 s of silence: a delivery stall, preserved on the compressed clock. */
     { activeTimeMs: 5000, phase: 'output', tokens: 100 },
-  ], { phase: 'output', sampleEveryMs: 500, durationMs: 5000 })
+  ], { sampleEveryMs: 500, durationMs: 5000 })
 
-  assert.equal(series.find(p => p.timeMs === 500).tps, 100)
-  assert.equal(series.find(p => p.timeMs === 3000).tps, 0, 'the stall must be visible')
-  assert.equal(series.find(p => p.timeMs === 5000).tps, 100)
-  assert.equal(series.at(-1).timeMs, 5000)
+  assert.equal(series.find(p => p.localMs === 500).tps, 100)
+  assert.equal(series.find(p => p.localMs === 3000).tps, 0, 'the stall must be visible')
+  assert.equal(series.find(p => p.localMs === 5000).tps, 100)
+  assert.equal(series.at(-1).localMs, 5000)
+})
+
+test('simultaneous samples of two phases resolve to one deterministic label', () => {
+  /**
+   * A reasoning delta and a text delta can share a timestamp. The vertex's label is read off
+   * the newest sample at or before it, so with a time-only sort that choice fell to the
+   * sort's stability — the same evidence could label the same vertex `reasoning` or `output`
+   * depending on which chunk the transport delivered first. The tie is now broken by phase,
+   * and `output` wins because it sorts later.
+   */
+  const reasoningFirst = totalRollingTpsSeries([
+    { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
+    { activeTimeMs: 0, phase: 'output', tokens: 20 },
+  ], { sampleEveryMs: 250, durationMs: 0 })
+  const outputFirst = totalRollingTpsSeries([
+    { activeTimeMs: 0, phase: 'output', tokens: 20 },
+    { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
+  ], { sampleEveryMs: 250, durationMs: 0 })
+  assert.deepEqual(reasoningFirst, outputFirst, 'arrival order cannot change the series')
+  assert.equal(reasoningFirst[0].activePhase, 'output', 'and the tie resolves to the later phase')
+  assert.equal(reasoningFirst[0].tps, 30, 'both deltas are inside the window regardless')
+
+  /** The same rule reaches the attempt trace, which sorts its own samples. */
+  const trace = attemptTrace(
+    { attemptId: 'a', startMs: 0, endMs: 0 },
+    [
+      { attemptId: 'a', attemptTimeMs: 0, activeTimeMs: 0, phase: 'output', tokens: 20 },
+      { attemptId: 'a', attemptTimeMs: 0, activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
+    ],
+  )
+  assert.equal(trace.points[0].activePhase, 'output')
+  assert.deepEqual(trace.visualRuns.map(run => run.phase), ['output'])
 })
 
 test('tool time contributes no curve width at all', () => {
-  // Same model samples, one with a 60 s tool gap between two attempts.
-  const shortGap = rollingTpsSeries([
+  /**
+   * The sampler never sees wall time: it is fed attempt-local coordinates, and
+   * `compressAttempts` is what removes tool width before it gets here. Two identical
+   * local scripts therefore produce identical series whatever separated them in wall
+   * time, which is the whole of the "zero x width" guarantee at this layer.
+   */
+  const local = [
     { activeTimeMs: 0, phase: 'output', tokens: 50 },
     { activeTimeMs: 1000, phase: 'output', tokens: 50 },
-  ], { phase: 'output', sampleEveryMs: 250, durationMs: 1000 })
-  const longGap = rollingTpsSeries([
-    { activeTimeMs: 0, phase: 'output', tokens: 50 },
-    { activeTimeMs: 1000, phase: 'output', tokens: 50 },
-  ], { phase: 'output', sampleEveryMs: 250, durationMs: 1000 })
-  assert.deepEqual(shortGap, longGap)
+  ]
+  assert.deepEqual(
+    totalRollingTpsSeries(local, { sampleEveryMs: 250, durationMs: 1000 }),
+    totalRollingTpsSeries(local.map(s => ({ ...s })), { sampleEveryMs: 250, durationMs: 1000 }),
+  )
 })
 
 test('series sampling is bounded and covers the whole duration', () => {
-  const series = rollingTpsSeries([{ activeTimeMs: 0, phase: 'output', tokens: 1 }], {
-    phase: 'output',
+  const series = totalRollingTpsSeries([{ activeTimeMs: 0, phase: 'output', tokens: 1 }], {
     sampleEveryMs: 250,
     durationMs: 60_000,
   })
   assert.equal(series.length, 241)
-  assert.equal(series[0].timeMs, 0)
-  assert.equal(series.at(-1).timeMs, 60_000)
+  assert.equal(series[0].localMs, 0)
+  assert.equal(series.at(-1).localMs, 60_000)
 })
 
 test('invalid window or cadence is rejected instead of producing infinite TPS', () => {
-  assert.throws(() => rollingTpsSeries([], { windowMs: 0 }), TypeError)
-  assert.throws(() => rollingTpsSeries([], { sampleEveryMs: 0 }), TypeError)
-  assert.throws(() => rollingTpsSeries([], { windowMs: Number.NaN }), TypeError)
+  assert.throws(() => totalRollingTpsSeries([], { windowMs: 0 }), TypeError)
+  assert.throws(() => totalRollingTpsSeries([], { sampleEveryMs: 0 }), TypeError)
+  assert.throws(() => totalRollingTpsSeries([], { windowMs: Number.NaN }), TypeError)
+})
+
+test('visual runs share their boundary vertex and cover the grid exactly once', () => {
+  const points = [
+    { timeMs: 0, activePhase: 'reasoning' },
+    { timeMs: 250, activePhase: 'reasoning' },
+    { timeMs: 500, activePhase: 'output' },
+    { timeMs: 750, activePhase: 'output' },
+    { timeMs: 1000, activePhase: 'reasoning' },
+  ]
+  const runs = visualRunsOf(points)
+  assert.deepEqual(runs.map(run => [run.phase, run.startIndex, run.endIndex]), [
+    ['reasoning', 0, 1],
+    ['output', 1, 3],
+    ['reasoning', 3, 4],
+  ], 'each run ends on the vertex the next one opens on, and the boundary is the midpoint '
+    + 'between the last vertex of the old label and the first of the new one')
+  assert.equal(runs.reduce((sum, run) => sum + run.pointCount, 0), points.length + runs.length - 1,
+    'the shared seams are the only duplication')
+  assert.deepEqual(visualRunsOf([]), [], 'no points, no runs')
+  assert.deepEqual(visualRunsOf([{ timeMs: 0, activePhase: null }]).map(run => run.phase), [null],
+    'a vertex with no sample at or before it opens its own run rather than being merged away')
+  /**
+   * A silence between the two labels moves the seam into the middle of it, so neither tone is
+   * painted over a stretch its own phase did not produce, and the two still meet.
+   */
+  const gapped = visualRunsOf([
+    { timeMs: 0, activePhase: 'reasoning' },
+    { timeMs: 250, activePhase: 'reasoning' },
+    { timeMs: 500, activePhase: 'reasoning' },
+    { timeMs: 3000, activePhase: 'output' },
+    { timeMs: 3250, activePhase: 'output' },
+  ])
+  assert.deepEqual(gapped.map(run => [run.phase, run.startIndex, run.endIndex]),
+    [['reasoning', 0, 2], ['output', 2, 4]],
+    'the seam lands on the last vertex still labelled reasoning, which is also the first the '
+    + 'output run can open on: the midpoint of the silence')
+})
+
+test('a phase with no run is absent, never a flat zero line', () => {
+  const trace = attemptTrace(
+    { attemptId: 'a', startMs: 0, endMs: 1000 },
+    [{ attemptId: 'a', attemptTimeMs: 500, activeTimeMs: 500, phase: 'output', tokens: 10 }],
+    { sampleEveryMs: 250 },
+  )
+  const reasons = phaseRuns([trace])
+  assert.deepEqual(reasons.reasoning, [], 'absent phase, no run')
+  assert.equal(reasons.output.length, 1)
+  assert.deepEqual(phaseSpans([]), { reasoning: null, output: null })
 })
 
 test('downsampling bounds the rendered point count and keeps extrema and endpoints', () => {
@@ -184,6 +289,45 @@ test('a three-point budget honours the three hard guarantees and yields the trou
     'the recommended trough is what gives way when the budget cannot hold four anchors')
 })
 
+test('a required seam survives a budget that has no room for anything else', () => {
+  /**
+   * The seam is a structural obligation, not a shape preference: a run's first and last
+   * vertex are what keep a phase transition continuous. A budget of exactly three holds
+   * the two endpoints and the peak, and `required` can only ever name indices among them
+   * — which is why the reserve cannot starve the peak it is seated after.
+   */
+  const series = extremumSaturatedSeries(400, 200, 9000, 100, 1)
+  const required = new Set([0, series.length - 1])
+  const reduced = downsampleSeries(series, MIN_MAX_POINTS, { required })
+  assert.equal(reduced.length, 3)
+  assert.equal(reduced[0], series[0], 'the opening seam vertex survives')
+  assert.equal(reduced.at(-1), series.at(-1), 'and the closing one')
+  assert.equal(peakTps(reduced), 9000, 'and the peak is still guaranteed')
+})
+
+test('downsampleRun protects the boundary vertex of a phase transition', () => {
+  /**
+   * A visual run is a slice of its attempt's grid, and at a phase transition it shares its
+   * first or last vertex with the neighbouring run. Thinning each run independently would
+   * be free to drop exactly that shared vertex, reopening as a blank horizontal gap a tone
+   * change that is not a stall — so `downsampleRun` reserves both ends.
+   */
+  const slice = Array.from({ length: 200 }, (_, i) => ({ timeMs: i * 250, tps: i === 137 ? 4000 : 100 }))
+  for (const budget of [MIN_MAX_POINTS, 4, 8, 64]) {
+    const reduced = downsampleRun(slice, budget)
+    assert.ok(reduced.length <= budget, `budget ${budget} respected`)
+    assert.equal(reduced[0], slice[0], 'the outgoing seam vertex survives every budget')
+    assert.equal(reduced.at(-1), slice[slice.length - 1], 'and so does the incoming one')
+    assert.equal(peakTps(reduced), 4000, 'and the run\'s own maximum')
+  }
+  assert.throws(() => downsampleRun(slice, MIN_MAX_POINTS - 1), TypeError)
+})
+
+test('a short run is returned whole rather than thinned', () => {
+  const slice = [{ timeMs: 0, tps: 1 }, { timeMs: 250, tps: 2 }]
+  assert.deepEqual(downsampleRun(slice, MIN_MAX_POINTS), slice)
+})
+
 test('downsampling never invents a peak the full series does not have', () => {
   const series = extremumSaturatedSeries(1200, 200, 900, 800, 3)
   const reduced = downsampleSeries(series, 32)
@@ -219,157 +363,37 @@ test('a budget that cannot hold the mandatory anchors is refused rather than sil
   assert.doesNotThrow(() => downsampleSeries(series, MIN_MAX_POINTS))
 })
 
-/**
- * One compressed segment, with the two fields `phaseRuns` reads: where the attempt
- * ends and whether a later call owns the coordinates after it. `hasSuccessor:
- * false` is what lets the final attempt draw its one-window decay, so it is stated
- * explicitly rather than inferred from `nextStartMs`, which equals `endMs` in both
- * cases.
- */
-function segment(attemptId, startMs, endMs, { hasSuccessor = false } = {}) {
-  return { attemptId, startMs, endMs, localEndMs: endMs - startMs, nextStartMs: endMs, hasSuccessor }
-}
-
-test('a phase run marks where a series means something, not where it happens to read zero', () => {
-  const segments = [segment('a', 0, 12_000)]
-  const samples = [
-    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
-    { activeTimeMs: 3000, phase: 'reasoning', attemptId: 'a' },
-    { activeTimeMs: 9000, phase: 'output', attemptId: 'a' },
-    { activeTimeMs: 12_000, phase: 'output', attemptId: 'a' },
-  ]
-  const runs = phaseRuns(samples, segments, 1000)
-
-  /**
-   * Two reasoning samples three seconds apart do not share a window, so they are
-   * two episodes rather than one interval covering the silence between them. Each
-   * episode still carries its own one-window tail, and this attempt is the last, so
-   * the tail is not capped by a following call.
-   */
-  assert.deepEqual(runs.reasoning.map(r => [r.startMs, r.endMs]), [[0, 1000], [3000, 4000]],
-    'each reasoning sample is evidenced for one window, and the silence splits them')
-  assert.deepEqual(runs.output.map(r => [r.startMs, r.endMs]), [[9000, 10_000], [12_000, 13_000]])
-  /**
-   * The region between reasoning's last evidence (4 s) and output's first (8 s) is
-   * where an output-only zero for reasoning would be a lie: reasoning had ended, it
-   * had not collapsed.
-   */
-  assert.ok(runs.reasoning.at(-1).endMs < runs.output[0].startMs)
-})
-
-test('phase runs are one interval per episode, so an absent stretch is never bridged', () => {
-  /**
-   * `Reasoning A -> Output A -> Reasoning B`: the previous single-span shape ran
-   * from the first reasoning sample to the last one plus a window, covering the
-   * output-only stretch in between. Drawing that shape emits a flat zero line
-   * exactly where reasoning was absent.
-   */
-  const segments = [segment('a', 0, 13_000)]
-  const samples = [
-    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
-    { activeTimeMs: 1000, phase: 'reasoning', attemptId: 'a' },
-    { activeTimeMs: 2000, phase: 'output', attemptId: 'a' },
-    { activeTimeMs: 8000, phase: 'output', attemptId: 'a' },
-    { activeTimeMs: 12_000, phase: 'reasoning', attemptId: 'a' },
-    { activeTimeMs: 13_000, phase: 'reasoning', attemptId: 'a' },
-  ]
-  const runs = phaseRuns(samples, segments, 1000)
-  assert.equal(runs.reasoning.length, 2, 'two episodes, two runs')
-  assert.deepEqual(runs.reasoning.map(r => [r.startMs, r.endMs]), [[0, 2000], [12_000, 14_000]])
-  assert.ok(runs.reasoning[0].endMs < runs.reasoning[1].startMs)
-  assert.equal(runs.output.length, 2, 'the output inside the gap is its own episode too')
-
-  /**
-   * The rejected single-span view can only report the outer bounds, and that
-   * interval covers the output-only stretch where reasoning had no evidence at all.
-   */
-  const outer = phaseSpans(samples, segments, 1000)
-  assert.deepEqual(outer.reasoning, { startMs: 0, endMs: 14_000 })
-  assert.ok(outer.reasoning.startMs < runs.output[0].startMs
-    && outer.reasoning.endMs > runs.output.at(-1).endMs,
-  'the single span covers the region where reasoning is absent')
-})
-
-test('same-phase episodes merge when the window never closed, and split when it did', () => {
-  const segments = [segment('a', 0, 20_000)]
-  /** A 1000 ms window: a gap of exactly one window leaves no absent stretch. */
-  const touching = [
-    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
-    { activeTimeMs: 1000, phase: 'reasoning', attemptId: 'a' },
-  ]
-  assert.equal(phaseRuns(touching, segments, 1000).reasoning.length, 1,
-    'the second episode begins where the first one\'s tail ends, so they are one run')
-
-  const split = [
-    { activeTimeMs: 0, phase: 'reasoning', attemptId: 'a' },
-    { activeTimeMs: 1001, phase: 'reasoning', attemptId: 'a' },
-  ]
-  assert.equal(phaseRuns(split, segments, 1000).reasoning.length, 2,
-    'one millisecond past the tail is a real absence and must split')
-})
-
-test('phase runs never merge across an attempt boundary, however small the gap', () => {
-  const samples = [
-    { activeTimeMs: 0, phase: 'output', attemptId: 'a' },
-    { activeTimeMs: 100, phase: 'output', attemptId: 'b' },
-  ]
-  /** Two attempts on adjacent coordinates: the tails would overlap if merged. */
-  const runs = phaseRuns(samples, [
-    segment('a', 0, 100, { hasSuccessor: true }),
-    segment('b', 100, 200),
-  ], 1000)
-  assert.equal(runs.output.length, 2, 'a change of attemptId splits unconditionally')
-  assert.deepEqual(runs.output.map(r => r.attemptId), ['a', 'b'])
-  assert.deepEqual(runs.output.map(r => [r.startMs, r.endMs]), [[0, 100], [100, 1100]],
-    'the first attempt is cut at the boundary; the last one keeps its own tail')
-})
-
-test('a run tail belongs to the attempt that produced it', () => {
-  const segments = [
-    segment('a', 0, 500, { hasSuccessor: true }),
-    segment('b', 500, 1000),
-  ]
-  const samples = [
-    { activeTimeMs: 0, phase: 'output', attemptId: 'a' },
-    { activeTimeMs: 500, phase: 'output', attemptId: 'b' },
-  ]
-  const runs = phaseRuns(samples, segments, 1000)
-  assert.deepEqual(runs.output.map(r => [r.startMs, r.endMs]), [[0, 500], [500, 1500]],
-    'the first attempt\'s one-second tail is cut at its own end rather than drawn over the next call')
-  assert.equal(runs.output[0].endMs, segments[0].endMs,
-    'it stops exactly where the attempt that follows begins')
-})
-
-test('a phase with no samples has no runs', () => {
-  const segments = [{ attemptId: 'a', startMs: 0, endMs: 1000 }]
-  const runs = phaseRuns([{ activeTimeMs: 500, phase: 'output', attemptId: 'a' }], segments, 1000)
-  assert.deepEqual(runs.reasoning, [], 'absent phase, no run — never a zero line')
-  assert.equal(runs.output.length, 1)
-  assert.deepEqual(phaseRuns([], [], 1000), { reasoning: [], output: [] })
-  assert.deepEqual(phaseRuns(null, null, 1000), { reasoning: [], output: [] })
-})
-
-test('a late sample cannot open a second run for an attempt that already has one', () => {
-  /** Deliberately out of order: the run structure follows segments, not arrival. */
-  const samples = [
-    { activeTimeMs: 900, phase: 'output', attemptId: 'a' },
-    { activeTimeMs: 100, phase: 'output', attemptId: 'a' },
-  ]
-  const runs = phaseRuns(samples, [{ attemptId: 'a', startMs: 0, endMs: 1000 }], 1000)
-  assert.equal(runs.output.length, 1)
-  assert.equal(runs.output[0].startMs, 100)
-  assert.equal(runs.output[0].sampleCount, 2)
-})
-
 test('the rendered series stays bounded for a real turn shape', () => {
   const samples = []
   for (let t = 0; t <= 600_000; t += 40) {
     samples.push({ activeTimeMs: t, phase: t < 200_000 ? 'reasoning' : 'output', tokens: 3 })
   }
-  const series = rollingTpsSeries(samples, { phase: 'output', durationMs: 600_000, sampleEveryMs: 250 })
+  const series = totalRollingTpsSeries(samples, { durationMs: 600_000, sampleEveryMs: 250 })
   assert.equal(series.length, 2401)
   const reduced = downsampleSeries(series)
-  assert.ok(reduced.length <= DEFAULT_MAX_POINTS, `250 ms sampling of a 10-minute turn still fits the budget`)
+  assert.ok(reduced.length <= DEFAULT_MAX_POINTS, '250 ms sampling of a 10-minute turn still fits the budget')
   assert.equal(reduced[0], series[0])
   assert.equal(reduced.at(-1), series.at(-1))
+})
+
+test('an attempt trace measures its own clock and relabels onto the compressed one', () => {
+  const segment = { attemptId: 'b', startMs: 5000, endMs: 5500, hasSuccessor: false }
+  const trace = attemptTrace(segment, [
+    { attemptId: 'b', attemptTimeMs: 0, activeTimeMs: 5000, phase: 'output', tokens: 100 },
+    { attemptId: 'b', attemptTimeMs: 500, activeTimeMs: 5500, phase: 'output', tokens: 100 },
+  ], { sampleEveryMs: 250 })
+  assert.deepEqual(trace.points.map(point => point.localMs), [0, 250, 500, 750, 1000, 1250, 1500])
+  assert.deepEqual(trace.points.map(point => point.timeMs), [5000, 5250, 5500, 5750, 6000, 6250, 6500],
+    'the drawn coordinate is the local one shifted by the segment start')
+  assert.deepEqual(trace.points.map(point => point.tps), [100, 100, 200, 200, 100, 100, 0])
+  assert.equal(trace.tokens, 200)
+  assert.equal(trace.calibratedTokens, null, 'an estimated magnitude is never reported as calibrated')
+})
+
+test('an attempt with no samples produces no trace', () => {
+  const trace = attemptTrace({ attemptId: 'a', startMs: 0, endMs: 0 }, [])
+  assert.deepEqual(trace.points, [])
+  assert.deepEqual(trace.visualRuns, [])
+  assert.equal(trace.sampleCount, 0)
+  assert.equal(trace.durationMs, 0)
 })

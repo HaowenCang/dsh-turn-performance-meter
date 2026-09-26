@@ -111,17 +111,22 @@ Levels per axis: `exact` · `calibrated` · `reconstructed` · `partial` · `est
 
 See `docs/METRICS_SPEC.md` §11 for the complete contract, and §13 for the durable/transient evidence rules.
 
-The curve's own quality is the **temporal-shape axis and nothing else** (§8.4), and the curve is built from one rolling
-window **per model attempt**: the compressed x-axis joins attempts so tools consume no width, but the one-second
-measurement window never crosses an attempt boundary, and each phase's evidence is a list of episodes so a phase
-present in two disjoint stretches is drawn as two paths with a gap between them rather than one line through the
-stretch where it was absent.
+The curve's own quality is the **temporal-shape axis and nothing else** (§8.4), and the curve is one **attempt-local
+trailing-one-second total throughput trace per model attempt**: a vertex at attempt-local `t` sums every generated
+sample of that attempt inside `(t - 1000, t]`, whatever its phase, which is exactly what the live pill measures. The
+compressed x-axis joins attempts so tools consume no width, but the measurement window never crosses an attempt
+boundary, and a silence *inside* a call is drawn at full width as a decay to zero. Reasoning and output are **colours**
+of that one measurement — the trace is cut into phase-coloured runs whose seams are shared vertices — not two rate
+definitions. The curve's magnitudes are the provider-calibrated per-delta allocation whenever authoritative usage
+exists, so the drawn curve and the printed token total are one magnitude system.
 
 完整口径见 `docs/METRICS_SPEC.md` §11；durable/transient 两类证据的规则见 §13。
 
-曲线质量仅由**时间形状轴**决定（§8.4）；曲线的滑动窗口**按 attempt 独立计算**：压缩横轴将各 attempt 首尾相接（工具时间为零宽度），
-但 1 秒测量窗口绝不跨 attempt 边界；每个 phase 的证据是 episode 列表，因此分为两段的 phase 会画成两条路径并在其间留出空隙，
-而不会用一条线穿过它缺席的区段。
+曲线质量仅由**时间形状轴**决定（§8.4）；曲线是**每个 model attempt 各一条 attempt 局部、1 秒滑动窗口的总吞吐轨迹**：
+局部时刻 `t` 的取值汇总该 attempt 在 `(t - 1000, t]` 内的全部生成样本（不区分 phase），与实时指示器口径完全一致。
+压缩横轴把各 attempt 首尾相接（工具时间为零宽度），但测量窗口绝不跨 attempt 边界；attempt **内部**的静默按完整宽度绘出，
+表现为衰减到零。reasoning 与 output 是同一次测量的两种**颜色**（轨迹按 phase 切分为若干子路径，接缝共享同一顶点），
+而不是两套速率定义。当存在权威 usage 时，曲线量级采用 provider 校准后的逐 delta 分配，因此曲线与卡片打印的 token 总数属于同一量级体系。
 
 ## 4. Repository map / 项目结构
 

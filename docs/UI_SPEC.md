@@ -228,22 +228,40 @@ two views at every width and host font size — measured identical in both views
 ## 6. Curve behavior
 
 - mandatory in completed hover/focus mode;
-- two series: reasoning and output;
-- reasoning uses a subdued neutral line; output uses one accent color;
+- **one throughput trace per model attempt**, whose **tone** changes by active phase: reasoning uses a subdued neutral
+  line, output uses the one accent colour. There are not two measured series; a phase is a colour of one measurement
+  (`docs/METRICS_SPEC.md` §8.2);
 - tool execution consumes zero x-axis width;
 - next model invocation starts immediately where previous attempt's chart segment ends;
 - **attempt boundaries break the path rather than joining it.** An attempt's one-window decay is clamped at the
-  coordinate the next attempt owns, and the two attempts are separate runs; a single line across the boundary would
+  coordinate the next attempt owns, and the two attempts are separate subpaths; a single line across the boundary would
   interpolate between two calls' measurements. No marker is drawn — the break is the whole signal, and `attemptId`
   stays on every run for diagnostics;
 - optional attempt/tool boundary markers are disabled by default;
 - one horizontal guide/scale label is sufficient; avoid a dense chart grid;
-- peak label is computed from the **full** per-attempt rolling series, before downsampling, and is rendered with `≈`;
-- preserve intra-model stream stalls because those are relevant to throughput stability;
-- a phase is drawn only over the intervals where it has evidence (`curve.phaseRuns[...]`, one entry per episode);
-  outside those intervals the series reads zero because the phase is absent, not because its throughput collapsed, so
-  no zero plateau is drawn and the legend marks the series absent instead. A phase present in two episodes yields two
-  paths with a visible gap rather than one interval spanning the stretch between them.
+- peak label is computed from the **full** per-attempt total trace, before downsampling, and is rendered with `≈`;
+- preserve intra-model stream stalls because those are relevant to throughput stability: a silence inside one call is a
+  stretch of that call's trace on which the rate decays to zero, and it is **drawn at full width**, not cut out. A phase
+  transition, by contrast, is a tone change on a shared vertex and never a blank gap;
+- a phase that produced nothing in an attempt has no run. Outside its runs the trace is simply not that tone: the
+  legend marks the phase absent rather than the chart drawing a zero plateau for it;
+- **marker sizing is a statement about prominence, not about measurement.** An ordinary one-vertex run is a small,
+  subdued dot; only a singleton that *is* the published peak keeps the strong marker and sits under the peak dot. A
+  long agent turn must read as a throughput trace with tone changes, never as a field of beads.
+
+### 6.1 Phase transitions
+
+At a reasoning→output change the two coloured runs meet on **one shared vertex** — the same instant, the same measured
+rate, emitted by both subpaths. Where the change is separated by a silence, the boundary is the midpoint of that
+silence, so neither tone is painted over a stretch its own phase did not produce and the two still meet. No horizontal
+blank is introduced at a tone change, and no vertex is duplicated: the shared vertex is one measurement, charged to
+both subpaths by the render budget.
+
+### 6.2 What the curve is not
+
+The four summary metrics are unchanged by any of this. Reasoning TPS and output TPS are **phase averages** — a phase's
+token total over that phase's measured active generation time — and the curve is an attempt-local trailing one-second
+throughput trace. They are different diagnostics and are documented as such in `docs/METRICS_SPEC.md` §7 and §8.2.
 
 ## 7. Responsive behavior
 

@@ -338,8 +338,10 @@ test('a retry before a tool resets the window on both sides of the boundary', ()
   })
   const runs = settled.curve.series.find(series => series.key === 'output').runs
   assert.deepEqual(runs.map(run => run.attemptId), ['first', 'second'])
+  const traces = settled.curve.attempts
+  assert.deepEqual(traces.map(trace => trace.attemptId), ['first', 'second'])
   /**
-   * The abandoned attempt's own series is measured on its own window, and the
+   * The abandoned attempt's own trace is measured on its own window, and the
    * replacement's on its own. Both attempts carry the same *shape* — one measurement
    * at local zero and one half a window later — so the relationship between them is
    * the assertion: each of the replacement's vertices is a tenth of the abandoned
@@ -348,26 +350,26 @@ test('a retry before a tool resets the window on both sides of the boundary', ()
    * A bridged window would put `firstTokens + secondTokens` in the replacement's
    * opening vertex and break that ratio at the first vertex.
    */
-  const ratio = runs[0].attemptTokens / runs[1].attemptTokens
+  const ratio = traces[0].tokens / traces[1].tokens
   assert.ok(ratio >= 9.5, `the two attempts differ by ${ratio.toFixed(2)}×`)
-  assert.equal(runs[1].points.length, runs[0].points.length + 4,
+  assert.equal(traces[1].points.length, traces[0].points.length + 4,
     'the replacement owns the axis tail, so it carries four more vertices')
-  for (let index = 0; index < runs[0].points.length; index += 1) {
-    const mine = runs[1].points[index]
-    const theirs = runs[0].points[index]
-    assert.equal(mine.timeMs - runs[1].startMs, theirs.timeMs - runs[0].startMs,
-      'the two series are sampled at the same attempt-local instants')
+  for (let index = 0; index < traces[0].points.length; index += 1) {
+    const mine = traces[1].points[index]
+    const theirs = traces[0].points[index]
+    assert.equal(mine.timeMs - traces[1].startMs, theirs.timeMs - traces[0].startMs,
+      'the two traces are sampled at the same attempt-local instants')
     assert.ok(Math.abs(mine.tps * ratio - theirs.tps) < 1e-9,
-      `local ${theirs.timeMs - runs[0].startMs}: ${mine.tps} × ${ratio.toFixed(2)} ≠ ${theirs.tps}`)
+      `local ${theirs.localMs}: ${mine.tps} × ${ratio.toFixed(2)} ≠ ${theirs.tps}`)
   }
-  assert.ok(runs[1].attemptTokens < runs[0].attemptTokens / 9, 'the replacement generated far less')
+  assert.ok(traces[1].tokens < traces[0].tokens / 9, 'the replacement generated far less')
   /**
    * The decisive check: the abandoned attempt's tokens never appear in the
-   * replacement's series. A bridged window would put `firstTokens + secondTokens` in
+   * replacement's trace. A bridged window would put `firstTokens + secondTokens` in
    * the replacement's opening vertex, which would break the tenfold ratio at the
    * first vertex rather than merely shifting it.
    */
-  assert.ok(runs[1].points.every(point => point.tps <= runs[1].attemptTokens * 1000 / 1000 + 1e-9),
+  assert.ok(traces[1].points.every(point => point.tps <= traces[1].tokens * 1000 / 1000 + 1e-9),
     'every vertex of the retry is bounded by the retry\'s own tokens')
   assert.equal(settled.attemptBreakdown.map(a => a.attemptOutcome).join(','), 'retried,committed')
   assert.equal(settled.curve.quality, QualityLevel.ESTIMATED,
@@ -539,11 +541,11 @@ test('a late frame for a superseded attempt lands in the completed curve but nev
   const runs = settled.curve.series.find(series => series.key === 'output').runs
   assert.deepEqual(runs.map(run => run.attemptId), ['a', 'b'],
     'the late frame extends the attempt that owns it, not the one that was streaming')
-  const runB = runs[1]
-  assert.ok(runB.points.every(point => point.tps <= runB.attemptTokens * 1000 / 1000 + 1e-9),
+  const traceB = settled.curve.attempts.find(attempt => attempt.attemptId === 'b')
+  assert.ok(traceB.points.every(point => point.tps <= traceB.tokens * 1000 / 1000 + 1e-9),
     'and it never inflates the newer attempt\'s ceiling')
-  const runA = runs.find(run => run.attemptId === 'a')
-  assert.ok(runA.attemptTokens > 1000, 'attempt A owns all three of its deltas')
+  const traceA = settled.curve.attempts.find(attempt => attempt.attemptId === 'a')
+  assert.ok(traceA.tokens > 1000, 'attempt A owns all three of its deltas')
 })
 
 test('a transient row naming an untracked turn adopts the boundary instead of dropping the turn', () => {
@@ -687,15 +689,22 @@ test('every recorded turn survives the full settle path under both readings', ()
       const { settled, record } = view
       const where = `${name}/${path}`
       assert.ok(settled.attemptCount > 0 || settled.status === null, `${where} has attempts`)
-      for (const series of settled.curve.series) {
-        for (const run of series.runs) {
-          const attempt = record.attempts.find(candidate => candidate.attemptId === run.attemptId)
-          if (attempt === undefined) continue
-          const ceiling = attempt.samples.reduce((sum, sample) => sum + sample.tokens, 0)
+      /**
+       * The ceiling is taken from the **attempt's own curve trace**, not from the stored
+       * raw samples. Since Phase 7C the drawn magnitudes are the calibrated allocation
+       * when authoritative usage exists, so `record.attempts[].samples` is a different
+       * magnitude system from the vertices: comparing against it would either pass
+       * vacuously (when calibration scales the curve down) or fail wrongly (when it scales
+       * it up). `trace.tokens` is the sum the window actually read, which is the only
+       * quantity a vertex can be bounded by.
+       */
+      for (const trace of settled.curve.attempts) {
+        const ceiling = trace.tokens
+        for (const run of trace.runs) {
           for (const point of run.points) {
-            assert.ok(Number.isFinite(point.tps), `${where} ${run.attemptId} has a finite rate`)
+            assert.ok(Number.isFinite(point.tps), `${where} ${trace.attemptId} has a finite rate`)
             assert.ok(point.tps <= ceiling + 1e-6,
-              `${where} ${run.attemptId} at ${point.timeMs} claims ${point.tps} from ${ceiling} tokens`)
+              `${where} ${trace.attemptId} at ${point.timeMs} claims ${point.tps} from ${ceiling} tokens`)
           }
           assert.equal(run.peak, Math.max(...run.points.map(p => p.tps)), `${where} run peak`)
         }

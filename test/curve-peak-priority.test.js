@@ -352,8 +352,8 @@ const STRETCH_SPAN_MS = 2000
 const STRETCH_GAP_MS = 2000
 const DELTA_CHARS = 400
 const DELTA_TOKENS = 100
-/** Four 100-token deltas inside a one-second window: the rate every long run carries. */
-const LONG_RUN_TPS = 400
+/** Two 100-token deltas inside a one-second window: the rate every long run carries. */
+const LONG_RUN_TPS = 200
 /**
  * The three single-vertex attempts are driven as `tokens` because at a one-second window a
  * one-delta attempt's rate *is* its token weight. The last of them is the chart's maximum,
@@ -380,17 +380,20 @@ function chunkWeighing(tokens) {
 /**
  * A saturated turn ending in a **singleton global peak**.
  *
- * `STRETCHES` output stretches and `STRETCHES` reasoning stretches, each its own episode
- * because they are separated by more than one rolling window, produce `2 x STRETCHES` runs
- * of a dozen vertices: 400 runs against a 512-vertex chart budget, which is saturation.
+ * The heavy attempt interleaves an output delta and a reasoning delta at every 250 ms step
+ * across `STRETCHES` two-second stretches, separated by gaps longer than one window. Since
+ * Phase 7C a phase change is a **colour boundary**, not a new run per silence, so the run
+ * count is driven by the alternation rather than by the gaps — which is the very behaviour
+ * that keeps a long agent turn's chart from fragmenting. It produces several thousand runs
+ * of a dozen vertices against a 512-vertex chart budget, so the chart is saturated by an
+ * order of magnitude rather than marginally.
  *
  * Three single-vertex attempts follow. `singletonTps` exists so the peak can be placed
  * behind two weaker short runs, which is the input order the old two-pass allocation walked
  * straight through the counterexample in. A fourth, trailing attempt is required by the
  * clock rather than by the scenario: `compressAttempts` gives an attempt zero width when it
- * produced a single delta, so the peak attempt is capped by its successor at its own
- * coordinate and its episode collapses to that one instant — an attempt with a successor is
- * the only way to obtain a genuine one-vertex run through the real pipeline.
+ * produced a single delta, so an attempt with a successor is its own one-vertex trace — and
+ * an attempt that never changes phase has exactly one run.
  */
 function driveSaturatedSingletonPeak({ singletonTps = SINGLETON_TPS } = {}) {
   const store = new TurnTelemetryStore()
@@ -399,13 +402,22 @@ function driveSaturatedSingletonPeak({ singletonTps = SINGLETON_TPS } = {}) {
   let at = 0
   let last = 0
   for (let stretch = 0; stretch < STRETCHES; stretch += 1) {
-    for (let offset = 0; offset < STRETCH_SPAN_MS; offset += STEP_MS) {
-      const timeMs = at + offset
-      store.acceptChunk(record, heavy, { timeMs, chunk: textDelta('x'.repeat(DELTA_CHARS)) })
-      store.acceptChunk(record, heavy, { timeMs, chunk: reasoningDelta('x'.repeat(DELTA_CHARS)) })
-      last = timeMs
+    /**
+     * Each stretch streams four output deltas and then four reasoning deltas, half a second
+     * apart inside each phase, and is followed by a gap longer than one window. The phases
+     * are contiguous rather than simultaneous: a reasoning delta and a text delta at the same
+     * instant are legal but pathological, and the chart a reader sees for them is a stack of
+     * one-vertex colour runs rather than a throughput trace.
+     */
+    for (const [kind, chunk] of [['output', textDelta], ['reasoning', reasoningDelta]]) {
+      for (let index = 0; index < 4; index += 1) {
+        const timeMs = at + index * 500
+        store.acceptChunk(record, heavy, { timeMs, chunk: chunk('x'.repeat(DELTA_CHARS)) })
+        last = Math.max(last, timeMs)
+      }
+      at += 2000
     }
-    at += STRETCH_SPAN_MS + STRETCH_GAP_MS
+    at += STRETCH_GAP_MS
   }
   store.settleAttempt(heavy, {
     settledAtMs: last + 1,
@@ -450,7 +462,7 @@ test('a saturated chart keeps a singleton global peak and the budget that bounds
   assert.ok(runs.length > 400, `expected a saturated chart, found ${runs.length} runs`)
   assert.equal(curve.renderBudget.total, MAX_RENDER_POINTS_TOTAL)
 
-  const sampled = runs.filter(run => run.points.length === 1)
+  const sampled = runs.filter(run => run.points.length === 1 && run.attemptId.startsWith('short-'))
   assert.equal(sampled.length, 3, 'the three one-delta attempts each contribute a one-vertex run')
   assert.deepEqual(sampled.map(run => run.points[0].tps), SINGLETON_TPS,
     'and each still carries the measurement it was created with')

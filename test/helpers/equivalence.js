@@ -35,7 +35,7 @@ import { compressAttempts } from '../../src/core/time-axis.js'
 import {
   DEFAULT_SAMPLE_EVERY_MS,
   DEFAULT_WINDOW_MS,
-  perAttemptSeries,
+  attemptTraces,
   peakTps,
 } from '../../src/core/curve.js'
 
@@ -258,27 +258,40 @@ function textOf(chunk) {
 }
 
 /**
- * Compressed chart coordinates plus both per-attempt rolling series and their peak.
+ * Compressed chart coordinates plus the attempt-local total traces and their peak.
  *
- * The series is built the way the shipped curve builds it — **one window per
- * attempt** — rather than by rolling a single window over the concatenated
- * samples. A harness that reproduced the old bridged arithmetic would keep
- * agreeing with itself while disagreeing with the product, which is exactly the
- * failure this helper was rewritten to stop hiding.
+ * The trace is built the way the shipped curve builds it — **one trailing window per
+ * attempt**, over every generated sample of that attempt whatever its phase — rather
+ * than by rolling a single window over the concatenated samples, and rather than by
+ * measuring each phase separately. A harness that reproduced either of those
+ * arithmetic errors would keep agreeing with itself while disagreeing with the
+ * product, which is exactly the failure this helper was rewritten to stop hiding.
+ *
+ * The phase-keyed lists below are **views** of the total traces, cut on `activePhase`
+ * exactly as the renderer cuts them, so a path whose phase labelling drifts from the
+ * other path's still fails here.
  */
 export function chartView(attempts) {
   const compressed = compressAttempts(attempts)
-  const seriesOf = phase => perAttemptSeries(compressed.segments, compressed.samples, {
-    phase,
+  const traces = attemptTraces(compressed.segments, compressed.samples, {
     windowMs: DEFAULT_WINDOW_MS,
     sampleEveryMs: DEFAULT_SAMPLE_EVERY_MS,
-    durationMs: compressed.durationMs,
   })
-  const reasoningRuns = seriesOf('reasoning')
-  const outputRuns = seriesOf('output')
+  const runsOf = phase => traces.flatMap(trace => (
+    trace.visualRuns
+      .filter(run => run.phase === phase)
+      .map(run => ({
+        attemptId: trace.attemptId,
+        phase,
+        points: trace.points.slice(run.startIndex, run.endIndex + 1),
+      }))
+  ))
+  const reasoningRuns = runsOf('reasoning')
+  const outputRuns = runsOf('output')
   return {
     durationMs: compressed.durationMs,
     segments: compressed.segments,
+    traces,
     coordinates: compressed.samples.map(sample => ({
       activeTimeMs: sample.activeTimeMs,
       phase: sample.phase,
@@ -295,10 +308,7 @@ export function chartView(attempts) {
     output: outputRuns.flatMap(run => run.points),
     reasoningRuns,
     outputRuns,
-    peakTps: peakTps(
-      ...reasoningRuns.map(run => run.points),
-      ...outputRuns.map(run => run.points),
-    ),
+    peakTps: peakTps(...traces.map(trace => trace.points)),
   }
 }
 

@@ -116,68 +116,94 @@ test('the curve is compressed: tool waits and next-call TTFT contribute no width
   assert.ok(settled.curve.peakTps > 0)
 })
 
-test('the completed curve is a per-attempt run list, not one array spanning every call', () => {
+test('the completed curve is an attempt trace list with phase-coloured runs, not one array spanning every call', () => {
   const store = new TurnTelemetryStore()
   const { settled } = driveMultiCallTurn(store)
   const curve = settled.curve
 
   assert.deepEqual(curve.series.map(s => s.key), ['reasoning', 'output'],
     'the legend order is fixed')
+
   /**
-   * One run per attempt **episode** that produced that phase. Two facts show up
-   * here and both are the point of the Phase 6 structure: attempt `c1` emitted
-   * output only, so the reasoning series has fewer runs than the output series —
-   * the structure reports what happened rather than padding a missing phase with
-   * zeros; and attempt `b1`'s two reasoning samples are three seconds apart, which
-   * is longer than the one-second window, so they are two reasoning episodes rather
-   * than one interval spanning the silence between them.
+   * One trace per model call, and the trace is the total rolling measurement: every phase
+   * counted, one window per attempt, reset at every call.
+   */
+  assert.deepEqual(curve.attempts.map(attempt => attempt.attemptId), ['a1', 'b1', 'c1'],
+    'one trace per attempt, in turn order')
+  assert.deepEqual(curve.attempts.map(attempt => attempt.startMs), [0, 2000, 8000])
+
+  /**
+   * The runs are the **colour segmentation** of those traces, one per contiguous phase
+   * stretch. Attempt `a1` reasons twice and then emits tool-call arguments, which are model
+   * output; `b1` reasons and then writes; `c1` emits output only. The reasoning series
+   * therefore has fewer runs than the output series, and that is the structure reporting what
+   * happened rather than padding a missing phase with zeros.
+   *
+   * The previous expectation read `['a1', 'b1', 'b1']` for reasoning and
+   * `['a1', 'b1', 'b1', 'c1', 'c1']` for output, because each phase's evidence was cut into
+   * **episodes** whenever it fell silent for more than one window: one call could appear as
+   * several disconnected traces. Phase 7C removed that cut, because the stall it encoded is a
+   * value on the attempt's own trace rather than a gap between two runs.
    */
   assert.deepEqual(
     curve.series.find(s => s.key === 'reasoning').runs.map(run => run.attemptId),
-    ['a1', 'b1', 'b1'],
+    ['a1', 'b1'],
+    'one reasoning stretch in a1 and one in b1; c1 never reasoned at all',
   )
   assert.deepEqual(
     curve.series.find(s => s.key === 'output').runs.map(run => run.attemptId),
-    ['a1', 'b1', 'b1', 'c1', 'c1'],
-    'attempt b1 and c1 each produce two output episodes, four and three seconds apart',
+    ['a1', 'b1', 'c1'],
+    'a1\'s tool-call arguments, b1\'s text output and c1\'s two deltas',
   )
 
   /**
-   * `attemptTokens` is the attempt's total for **that phase**, so every run of one
-   * attempt in one series reports the same figure — the phase's shape total, which
-   * `calibrateAttemptSamples` anchors to the authoritative usage. It is a property
-   * of the attempt, not of the run, so episodes cannot dilute it.
+   * The token magnitude is the attempt's **whole** curve-source sum, calibrated to its
+   * authoritative usage. It is a property of the attempt rather than of a run, so every run
+   * cut from one attempt reports the same total and no colour boundary can dilute it.
    */
-  const totalsBySeriesAndAttempt = new Map()
+  const totalsByAttempt = new Map()
   for (const series of curve.series) {
     for (const run of series.runs) {
-      const key = `${series.key}:${run.attemptId}`
-      const seen = totalsBySeriesAndAttempt.get(key)
-      if (seen === undefined) totalsBySeriesAndAttempt.set(key, run.attemptTokens)
-      else assert.equal(run.attemptTokens, seen, `${key} reports one token total`)
+      const trace = curve.attempts.find(attempt => attempt.attemptId === run.attemptId)
+      assert.ok(trace !== undefined, `${run.attemptId} names a real attempt`)
+      const seen = totalsByAttempt.get(run.attemptId)
+      if (seen === undefined) totalsByAttempt.set(run.attemptId, trace.tokens)
+      else assert.equal(trace.tokens, seen, `${run.attemptId} reports one token total`)
     }
   }
+  assert.deepEqual(curve.attempts.map(attempt => attempt.calibratedTokens), [100, 900, 500],
+    'each attempt\'s curve magnitudes are anchored to its own provider total')
+
   for (const series of curve.series) {
     for (const run of series.runs) {
       assert.equal(run.phase, series.key)
       /**
-       * Every vertex carries both clocks: the shared compressed coordinate it is
-       * drawn at, and the attempt-local instant the window was measured on. An
-       * episode that is not the attempt's first therefore opens at a local offset,
-       * which is exactly the distinction the single-clock revision lost.
+       * Every vertex carries both clocks: the shared compressed coordinate it is drawn at,
+       * and the attempt-local instant the window was measured on. A run that is not its
+       * attempt's colour opener therefore starts at a non-zero local offset, which is exactly
+       * the distinction a single-clock curve loses.
        */
       assert.equal(run.points[0].timeMs, run.startMs, 'the first vertex sits at the run\'s own start')
       assert.ok(run.points[0].localMs >= 0)
-      assert.equal(run.points.at(-1).timeMs, run.drawnToMs, 'and the last vertex at the run\'s draw limit')
-      assert.ok(run.points.at(-1).timeMs <= run.endMs)
-      assert.ok(run.attemptTokens > 0)
+      assert.equal(run.points.at(-1).timeMs, run.endMs, 'and the last at the tone change or the trace end')
       assert.equal(run.peak, peakTps(run.points))
     }
   }
 
   /**
-   * The flat arrays remain for callers that want one list, and they carry the
-   * attempt identity on every point so a renderer can still segment them.
+   * A colour change is a shared vertex, not a gap: the runs of one attempt meet exactly, so
+   * the two subpaths are continuous and no horizontal blank appears between them.
+   */
+  for (const trace of curve.attempts) {
+    for (let index = 1; index < trace.runs.length; index += 1) {
+      assert.equal(trace.runs[index - 1].points.at(-1).timeMs, trace.runs[index].points[0].timeMs,
+        `${trace.attemptId}: a phase transition shares its boundary vertex`)
+    }
+  }
+
+  /**
+   * The flat arrays remain for callers that want one list, and they carry the attempt
+   * identity on every point so a renderer can still segment them.
    */
   assert.equal(curve.output.length, curve.series[1].runs.reduce((n, run) => n + run.points.length, 0))
   for (const point of curve.output) assert.ok(typeof point.attemptId === 'string')

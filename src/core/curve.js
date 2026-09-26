@@ -1,10 +1,17 @@
 /**
- * Completed-turn TPS curve: a trailing one-second rolling series sampled on the
- * compressed active clock, plus the peak of the full series.
+ * Completed-turn TPS curve: one attempt-local trailing-one-second **total**
+ * throughput trace per model attempt, segmented into visual phases.
  *
- * The window and cadence are deliberately the same conceptual window the live
- * meter uses (docs/METRICS_SPEC.md §8.2), so a point read off the curve at time
- * `t` means the same thing as the live pill did at that instant.
+ * The window and cadence are the same the live meter uses
+ * (docs/METRICS_SPEC.md §8.2): a curve vertex at attempt-local `t` reports
+ *
+ *     sum of every generated sample of that attempt with timestamp in (t - 1000 ms, t]
+ *
+ * across **all** phases — reasoning deltas, text deltas and tool-call argument
+ * deltas alike. That is exactly what `LiveMeter` measures: it holds one
+ * `SlidingWindowMeter` per active attempt and feeds it every generated sample,
+ * using `streamingPhase` only to *label* the newest one. Reasoning and output are
+ * therefore visual phases of one measurement, never two rate definitions.
  *
  * Two different milliseconds live in this module and must not be conflated:
  *
@@ -16,8 +23,8 @@
  *     at 20 Hz does not make a one-second window any shorter, and a finer curve
  *     grid is a separate, separately-argued decision.
  *
- * Curve points are `estimated` before provider usage arrives and `calibrated`
- * afterwards; they are never `exact`. `peakTps` is the peak of the **full**
+ * Curve magnitudes are `estimated` before provider usage arrives and `calibrated`
+ * afterwards; they are never `exact`. `peakTps` is the maximum of the **full**
  * rolling series — computed before any downsampling — and it must still be
  * labelled as an estimate, because a series sample is not a provider-certified
  * maximum (docs/METRICS_SPEC.md §9).
@@ -41,8 +48,8 @@ export const DEFAULT_MAX_POINTS = 512
 export const MAX_RENDER_POINTS_TOTAL = 512
 
 /**
- * Smallest budget that can hold the guaranteed anchors: the first point, the
- * last point and the global maximum are three distinct indices in the worst case.
+ * Smallest budget that can hold the guaranteed anchors: the first point, the last
+ * point and the global maximum are three distinct indices in the worst case.
  * A smaller budget is unsatisfiable rather than merely tight.
  */
 export const MIN_MAX_POINTS = 3
@@ -52,76 +59,99 @@ function assertPositive(value, label) {
 }
 
 /**
- * Build one phase's rolling TPS series on a single, continuous clock.
+ * Total order over the two content phases, so a tie between simultaneous samples resolves the
+ * same way whatever order the transport delivered them in.
  *
- * The window is half-open, `(t - windowMs, t]`: a sample exactly one window old
- * has left the measurement and a sample exactly at `t` is in it
- * (`docs/METRICS_SPEC.md` §8.1/§8.2). That is the convention
- * `SlidingWindowMeter` implements for the live pill, which is what makes a curve
- * vertex and a live reading comparable at the same attempt-local instant.
+ * The order itself is arbitrary; that it exists is not. `output` sorts **after**
+ * `reasoning`, and since a vertex takes the label of the newest sample at or before it, an
+ * attempt that produces a reasoning delta and a text delta at the same instant is labelled
+ * with the output one — the phase the attempt is moving into, which is also what
+ * `LiveMeter.streamingPhase` reports, because its last accepted sample of the batch is
+ * whichever arrived last and the two halves of the project must agree on the tie.
+ */
+function comparePhase(left, right) {
+  const rank = phase => (phase === 'reasoning' ? 0 : (phase === 'output' ? 1 : 2))
+  return rank(left) - rank(right)
+}
+
+/**
+ * Rolling TPS trace of one attempt, over **every** generated sample of that attempt.
+ *
+ * The window is half-open, `(t - windowMs, t]`: a sample exactly one window old has
+ * left the measurement and a sample exactly at `t` is in it
+ * (`docs/METRICS_SPEC.md` §8.1/§8.2). That is the convention `SlidingWindowMeter`
+ * implements for the live pill, which is what makes a curve vertex and a live
+ * reading comparable at the same attempt-local instant.
  *
  * **Every vertex uses one bound, including an opening vertex.** An attempt's local
  * zero *is* its first delta, so a reader may expect an opening vertex to need
  * rescuing from an empty window. It does not: at `localMs = 0` the ordinary bound
  * is `-windowMs`, and a sample at zero lies inside `(-windowMs, 0]`. The opening
  * delta is therefore included by the arithmetic rather than by a special case.
+ * Phase 6 briefly carried a special case —
+ * `localMs <= fromMs ? -Infinity : localMs - windowMs` — and Phase 7 removed it:
+ * `fromMs` is an *episode* bound, the clamp fired at every episode opening, and it
+ * readmitted samples the trailing definition had already evicted.
  *
- * Phase 6 briefly carried such a special case —
- * `localMs <= fromMs ? -Infinity : localMs - windowMs` — and it was wrong for the
- * reason that makes it worth stating here: `fromMs` is the **episode** bound, so
- * `localMs == fromMs` holds at every episode's opening vertex. Under
- * `perAttemptSeries` a same-attempt phase that falls silent for more than one
- * window splits into two episodes, and the second episode's opening vertex reopened
- * the window to negative infinity and read back samples the trailing definition had
- * already evicted. The counterexample is frozen in
- * `test/curve-episode-opening.test.js`: samples at attempt-local 0 ms and 3000 ms
- * with a 1000 ms window are episodes `0 -> 1000` and `3000 -> 4000`, and the second
- * opening measures `(2000, 3000]` — 100 tokens/s, not the 200 the clamp reported.
+ * **A phase is never filtered out.** The `phase` option the previous revision took
+ * was the cross-phase defect: filtering by phase produced two partial rates where
+ * the live meter produced one total. What a phase contributes here is the
+ * `activePhase` **label** on each vertex — the phase of the latest generated sample
+ * at or before that instant, which is `LiveMeter.streamingPhase` restated. The
+ * label changes where the tone changes; it never changes the number.
  *
  * **A trailing run is sampled on a shifted grid.** The decay past a run's last
- * sample is sampled at `localEnd + sampleEveryMs`, `localEnd + 2 *
- * sampleEveryMs`, … rather than on the grid anchored at the run's start. Both grids
- * place every vertex on a multiple of `sampleEveryMs`, but only the shifted one
- * keeps every window inside `(last − windowMs, last]`: anchoring the grid at the
- * start makes the final vertex a truncated half-window and reports a rate no
- * definition produces. The shift is the smallest one that leaves the tail
- * on-spec, and it is applied only to that tail — the run's own body is
- * sampled from its start.
+ * sample is sampled at `localEnd + sampleEveryMs`, `localEnd + 2 * sampleEveryMs`,
+ * … rather than on the grid anchored at the run's start. Both grids place every
+ * vertex on a multiple of `sampleEveryMs`, but only the shifted one keeps every
+ * window inside `(last − windowMs, last]`: anchoring the grid at the start makes
+ * the final vertex a truncated half-window and reports a rate no definition
+ * produces.
  *
- * **One clock, one window.** This function has no notion of an attempt, so
- * calling it across an attempt boundary bridges two model calls — the exact
- * defect Phase 6 removed. Completed curves go through `perAttemptSeries`, which
- * calls this once per attempt; the concatenating overload here exists for callers
- * that genuinely hold a single uninterrupted stream.
+ * **One clock, one window.** This function has no notion of an attempt, so calling
+ * it across an attempt boundary bridges two model calls — the exact defect Phase 6
+ * removed. Completed curves go through `attemptTraces`, which calls it once per
+ * attempt; the concatenating overload here exists for callers that genuinely hold a
+ * single uninterrupted stream.
  *
  * `fromMs`/`toMs`/`offsetMs` express "sample a bounded stretch of one attempt's
  * local clock" without weakening the above: the window is always measured on the
  * same coordinate the samples carry, and `offsetMs` only relabels the emitted
  * `timeMs`. A bounded call therefore never reaches outside `[fromMs, toMs]`.
  *
- * @param {readonly object[]} samples compressed samples carrying `activeTimeMs`
+ * @param {readonly object[]} samples samples carrying `activeTimeMs`, `phase` and `tokens`/`weight`
  * @param {{
- *   phase?:string|null,
  *   windowMs?:number,
  *   sampleEveryMs?:number,
  *   durationMs?:number,
  *   fromMs?:number,
  *   toMs?:number,
  *   offsetMs?:number,
+ *   sampleEndMs?:number,
  * }} [options]
- * @returns {{timeMs:number, tps:number, localMs:number}[]}
+ * @returns {{
+ *   timeMs:number, localMs:number, tps:number,
+ *   activePhase:string|null, attemptId:string|null,
+ * }[]}
  */
-export function rollingTpsSeries(samples, options = {}) {
+export function totalRollingTpsSeries(samples, options = {}) {
   const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS
   const sampleEveryMs = options.sampleEveryMs ?? DEFAULT_SAMPLE_EVERY_MS
   assertPositive(windowMs, 'windowMs')
   assertPositive(sampleEveryMs, 'sampleEveryMs')
 
-  const phase = options.phase ?? null
   const filtered = (Array.isArray(samples) ? samples : [])
-    .filter(s => s && (phase === null || s.phase === phase) && Number.isFinite(s.activeTimeMs))
+    .filter(sample => sample && Number.isFinite(sample.activeTimeMs))
     .slice()
-    .sort((a, b) => a.activeTimeMs - b.activeTimeMs)
+    /**
+     * Ascending instant, then phase. The second key is load-bearing rather than cosmetic:
+     * a reasoning delta and a text delta can share a timestamp, and the vertex's label is
+     * read off the newest sample at or before it. Ordering by time alone left that choice to
+     * the sort's stability, so the same evidence could label the same vertex `reasoning` or
+     * `output` depending on which chunk the transport happened to deliver first — and a
+     * phase-coloured chart whose colours depend on arrival order is not reproducible.
+     */
+    .sort((a, b) => a.activeTimeMs - b.activeTimeMs || comparePhase(a.phase, b.phase))
 
   const offsetMs = Number.isFinite(options.offsetMs) ? options.offsetMs : 0
   const sampleEnd = Math.max(0, filtered.length > 0 ? filtered[filtered.length - 1].activeTimeMs : 0)
@@ -129,10 +159,10 @@ export function rollingTpsSeries(samples, options = {}) {
     : (Number.isFinite(options.durationMs) ? Math.max(0, options.durationMs) : sampleEnd)
   const fromMs = Number.isFinite(options.fromMs) ? Math.max(0, options.fromMs) : 0
   /**
-   * Where the attempt stops producing in this phase. Past that instant the tail
-   * grid takes over, so the vertices before it sit on the attempt's own 250 ms
-   * grid and the vertices after it sit one step further out — which is what keeps
-   * every window a whole `(t - windowMs, t]`.
+   * Where the attempt stops producing. Past that instant the tail grid takes over,
+   * so the vertices before it sit on the attempt's own 250 ms grid and the vertices
+   * after it sit one step further out — which is what keeps every window a whole
+   * `(t - windowMs, t]`.
    */
   const sampleEndMs = Number.isFinite(options.sampleEndMs)
     ? Math.max(0, options.sampleEndMs)
@@ -144,12 +174,12 @@ export function rollingTpsSeries(samples, options = {}) {
   let total = 0
   /**
    * Vertex instants, built explicitly rather than by accumulating `+= every`:
-   * floating-point error over a ten-minute turn would otherwise put the last
-   * vertex off the grid it claims to be on.
+   * floating-point error over a ten-minute turn would otherwise put the last vertex
+   * off the grid it claims to be on.
    *
-   * The body grid always starts at `fromMs`, so a run's opening vertex is
-   * drawn even when it produced a single delta; the tail grid starts one step past
-   * the last sample, so it never repeats a vertex the body already drew.
+   * The body grid always starts at `fromMs`, so a run's opening vertex is drawn even
+   * when it produced a single delta; the tail grid starts one step past the last
+   * sample, so it never repeats a vertex the body already drew.
    */
   const instants = []
   const bodyEndMs = Math.max(fromMs, Math.min(sampleEndMs, toMs))
@@ -164,9 +194,13 @@ export function rollingTpsSeries(samples, options = {}) {
     instants.push(at)
   }
 
+  /** Index into `filtered` of the newest sample at or before `localMs`, or `-1`. */
+  let newest = -1
+
   for (const localMs of instants) {
     while (right < filtered.length && filtered[right].activeTimeMs <= localMs) {
       total += filtered[right].tokens ?? filtered[right].weight ?? 0
+      newest = right
       right += 1
     }
     /**
@@ -177,165 +211,281 @@ export function rollingTpsSeries(samples, options = {}) {
      * The removed clamp read `localMs <= fromMs ? -Infinity : localMs - windowMs`.
      * It was written to keep an attempt's *first* vertex from reporting `0 tokens/s`
      * on the delta the call opened with, on the reasoning that local zero is the
-     * attempt's opening delta and `(-windowMs, 0]` contains nothing. That reasoning
-     * is sound about the attempt and wrong about the coordinate: `localMs == fromMs`
-     * is true at **every** episode's first vertex, not only the attempt's, because
-     * `fromMs` is the episode bound. An attempt that falls silent for longer than one
-     * window produces a second episode, and at that episode's opening instant the
-     * bound collapsed to negative infinity and readmitted samples the trailing window
-     * had already evicted (docs/METRICS_SPEC.md §8.2).
+     * attempt's opening delta and `(-windowMs, 0]` contains nothing. That reasoning is
+     * sound about the attempt and wrong about the coordinate: `localMs == fromMs` is
+     * true at **every** episode's first vertex, because `fromMs` is the episode bound.
+     * An attempt that fell silent for longer than one window produced a second
+     * episode, and at that episode's opening instant the bound collapsed to negative
+     * infinity and readmitted samples the trailing window had already evicted
+     * (docs/METRICS_SPEC.md §8.2). The clamp was also unnecessary for the case it was
+     * written for: at an attempt's local zero, `localMs - windowMs` is `-windowMs`, and
+     * a sample at zero lies inside `(-windowMs, 0]`.
      *
-     * The clamp was also unnecessary for the case it was written for. At an attempt's
-     * local zero, `localMs - windowMs` is `-windowMs`, and a sample at zero lies
-     * inside `(-windowMs, 0]`, so the opening delta is included by the ordinary
-     * arithmetic. `test/curve-episode-opening.test.js` pins both halves: the later
-     * episode opening measures its own window alone, and the first opening still
-     * reports its first sample.
-     *
-     * Both bounds are expressed on the **same** clock the samples carry:
-     * `offsetMs` relabels the emitted `timeMs` and must not enter this comparison,
-     * because folding it into the bound while the cursors stayed local is what once
-     * left a claim of 100 tokens/s on an instant whose only sample had already been
-     * evicted.
+     * Both bounds are expressed on the **same** clock the samples carry: `offsetMs`
+     * relabels the emitted `timeMs` and must not enter this comparison, because
+     * folding it into the bound while the cursors stayed local is what once left a
+     * claim of 100 tokens/s on an instant whose only sample had already been evicted.
      */
     const lowerExclusive = localMs - windowMs
     while (left < right && filtered[left].activeTimeMs <= lowerExclusive) {
       total -= filtered[left].tokens ?? filtered[left].weight ?? 0
       left += 1
     }
-    result.push({ timeMs: offsetMs + localMs, localMs, tps: Math.max(0, total) * 1000 / windowMs })
+    /**
+     * The label comes from the newest sample at or before this instant, which is the
+     * same rule `LiveMeter.streamingPhase` applies. It is never evicted by the left
+     * cursor: a sample at or before `localMs` is strictly newer than
+     * `localMs - windowMs`, so it is inside the window whenever it exists.
+     */
+    result.push({
+      timeMs: offsetMs + localMs,
+      localMs,
+      tps: Math.max(0, total) * 1000 / windowMs,
+      activePhase: newest >= 0 ? (filtered[newest].phase ?? null) : null,
+      attemptId: newest >= 0 ? (filtered[newest].attemptId ?? null) : null,
+    })
   }
   return result
 }
 
 /**
- * Per-attempt rolling series: the completed curve's actual construction.
+ * One attempt's total throughput trace, measured on its own clock and relabelled.
  *
- * Each segment is measured on its **own** local clock and only then relabelled to
- * the turn's compressed coordinate by `segment.startMs`. Two attempts that share
- * the compressed coordinate `x` therefore share no window: the last vertex of A
- * and the first vertex of B are computed from disjoint sample sets, whatever the
- * x distance between them happens to be.
+ * Each attempt is measured on its **own** local clock and only then relabelled to
+ * the turn's compressed coordinate by `attemptTimeMs + segment.startMs`. Two
+ * attempts that share the compressed coordinate `x` therefore share no window: the
+ * last vertex of A and the first vertex of B are computed from disjoint sample sets,
+ * whatever the x distance between them happens to be.
  *
- * A run is sampled over `[0, localEnd + windowMs]` so the trailing decay of an
- * attempt's final tokens is drawn: those tokens really do contribute to the rate
- * for one window after they arrive, and `phaseRuns` marks exactly that stretch as
- * evidenced. That decay is then clamped by the **earlier of two** limits, and both
- * are needed:
+ * A trace is sampled over the attempt's own body and then one window of tail, so the
+ * trailing decay of its final tokens is drawn: those tokens really do contribute to
+ * the rate for one window after they arrive. The tail is clamped by the **earlier of
+ * two** limits, and both are needed:
  *
  *   - `segment.nextStartMs`, the compressed coordinate at which the next attempt
- *     begins. A window is a per-attempt measurement, so an attempt's decay may not
- *     be drawn across the next call — including the degenerate case where the two
+ *     begins. A window is a per-attempt measurement, so an attempt's decay may not be
+ *     drawn across the next call — including the degenerate case where the two
  *     attempts share a coordinate, which is what a retry whose abandoned prefix
  *     produced a single delta looks like;
  *   - `localEnd + windowMs`, for the last attempt, which owns its own tail.
  *
- * `attemptTokens` is the sum this attempt ever produced in this phase. It is
- * carried so that a caller — or a test — can account for every vertex without
- * re-deriving it.
+ * `hasSuccessor` is what distinguishes the two: without it an attempt that happens to
+ * end exactly at the axis end is indistinguishable from one followed by another call.
  *
- * @param {readonly {
- *   attemptId?:string|null, startMs:number, endMs?:number,
- *   localEndMs?:number, nextStartMs?:number,
- * }[]} segments
+ * A real stall **inside** the attempt is preserved in full: the grid runs across it
+ * and the trailing rate decays to zero, because a model that stops delivering for
+ * more than a window is a throughput fact the chart exists to show. That is
+ * different from a tool wait or an inter-attempt wait, which own no coordinate at
+ * all and are the reason the grid stops at the attempt's own bound.
+ *
+ * @param {{attemptId?:string|null, step?:number|null, startMs:number, endMs?:number,
+ *   localEndMs?:number, nextStartMs?:number, hasSuccessor?:boolean}} segment
  * @param {readonly object[]} samples compressed samples carrying `attemptId` and `activeTimeMs`
- * @param {{phase:string, windowMs?:number, sampleEveryMs?:number}} options
- * @returns {object[]} one run per segment that produced evidence in this phase
+ * @param {{
+ *   windowMs?:number, sampleEveryMs?:number, attemptId?:string|null, calibrated?:boolean,
+ * }} [options]
+ * @returns {{
+ *   attemptId:string|null, startMs:number, endMs:number, localEndMs:number,
+ *   durationMs:number, sampleCount:number, tokens:number, calibratedTokens:number|null,
+ *   calibrated:boolean, samples:object[], points:object[], visualRuns:object[],
+ * }}
  */
-export function perAttemptSeries(segments, samples, options = {}) {
-  const phase = options.phase
-  if (typeof phase !== 'string') throw new TypeError('phase is required')
+export function attemptTrace(segment, samples, options = {}) {
   const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS
   const sampleEveryMs = options.sampleEveryMs ?? DEFAULT_SAMPLE_EVERY_MS
+  const attemptId = options.attemptId ?? segment?.attemptId ?? null
+  const startMs = Number.isFinite(segment?.startMs) ? segment.startMs : 0
+  const endMs = Number.isFinite(segment?.endMs) ? segment.endMs : startMs
 
-  const allSamples = Array.isArray(samples) ? samples : []
   /**
-   * Episode structure comes from `phaseRuns`, so the drawable vertices and the
-   * availability intervals are the same object graph rather than two independent
-   * derivations that can drift apart.
+   * Every sample of the attempt is retained, whatever its phase: a window opened
+   * before a phase's first sample can legitimately reach back into the other phase,
+   * and excluding those samples would measure a window against a truncated history.
    */
-  const episodes = phaseRuns(allSamples, segments, windowMs, options.durationMs)[phase] ?? []
+  const perAttempt = (Array.isArray(samples) ? samples : [])
+    .filter(sample => (
+      sample
+      && (sample.attemptId ?? null) === attemptId
+      && Number.isFinite(sample.activeTimeMs)
+    ))
+    .map(sample => ({
+      ...sample,
+      activeTimeMs: Number.isFinite(sample.attemptTimeMs)
+        ? Math.max(0, sample.attemptTimeMs)
+        : Math.max(0, (sample.activeTimeMs ?? 0) - startMs),
+    }))
+    /** The same deterministic tie-break `totalRollingTpsSeries` applies, so the two agree. */
+    .sort((a, b) => a.activeTimeMs - b.activeTimeMs || comparePhase(a.phase, b.phase))
+
+  let tokens = 0
+  let calibratedTokens = null
+  for (const sample of perAttempt) {
+    const value = sample.tokens ?? sample.weight ?? 0
+    tokens += value
+    if (sample.quality === 'calibrated') calibratedTokens = (calibratedTokens ?? 0) + value
+  }
+
+  if (perAttempt.length === 0) {
+    return {
+      attemptId,
+      startMs,
+      endMs,
+      localEndMs: Math.max(0, endMs - startMs),
+      durationMs: 0,
+      sampleCount: 0,
+      tokens: 0,
+      calibratedTokens,
+      calibrated: options.calibrated === true,
+      samples: [],
+      points: [],
+      visualRuns: [],
+    }
+  }
+
+  const lastSampleMs = perAttempt[perAttempt.length - 1].activeTimeMs
+  const boundedEndMs = Math.max(0, endMs - startMs)
+  const bodyEndMs = Math.max(0, Math.min(lastSampleMs, boundedEndMs))
+  const tailLimitMs = segment?.hasSuccessor === true && Number.isFinite(segment?.nextStartMs)
+    ? Math.max(bodyEndMs, segment.nextStartMs - startMs)
+    : bodyEndMs + windowMs
+  const toMs = Math.max(bodyEndMs, tailLimitMs)
+
+  const points = totalRollingTpsSeries(perAttempt, {
+    windowMs,
+    sampleEveryMs,
+    offsetMs: startMs,
+    fromMs: 0,
+    toMs,
+    sampleEndMs: bodyEndMs,
+  })
+
+  return {
+    attemptId,
+    startMs,
+    endMs,
+    localEndMs: boundedEndMs,
+    durationMs: toMs,
+    sampleCount: perAttempt.length,
+    tokens,
+    calibratedTokens,
+    calibrated: options.calibrated === true,
+    samples: perAttempt,
+    points,
+    visualRuns: visualRunsOf(points),
+  }
+}
+
+/**
+ * One attempt's trace, cut into phase stretches that meet at a shared boundary vertex.
+ *
+ * This is the whole of the colour model. Each vertex carries the phase of the latest generated
+ * sample at or before it, and the trace is cut where that label changes.
+ *
+ * ## Where the cut goes, and why it is not simply "where the label changes"
+ *
+ * Two facts pull in opposite directions. A tone change must **not** be drawn as a blank
+ * horizontal gap, so consecutive runs have to meet; and a run must not claim coordinates its
+ * own phase did not produce, or a long silence inside one phase would be painted with the
+ * *wrong* tone for its whole length.
+ *
+ * Cutting at the first vertex of the new label satisfies the first and fails the second: an
+ * attempt that reasons, falls silent for four seconds and then writes a tool call has a
+ * four-second stretch of measured zero that would be attributed entirely to reasoning. Cutting
+ * at the last vertex of the old label fails the first: the runs would then be separated by
+ * exactly the silence, which on the 250 ms grid is a visible hole in an otherwise continuous
+ * polyline — the defect this structure exists to remove.
+ *
+ * The boundary is therefore the **midpoint** of the change, rounded down: the outgoing run
+ * keeps the earlier half of the silence and the incoming run the later half, and the two meet
+ * on one shared vertex. A phase change with no silence between its samples — the ordinary
+ * case, because a call reasons and then writes — still produces exactly adjacent runs sharing
+ * the transition vertex, so nothing about the common shape changes.
+ *
+ * The invariants this produces, and the ones the renderer and its tests rely on:
+ *
+ *     runs[i].endIndex === runs[i + 1].startIndex
+ *     sum(runs[i].pointCount) === points.length + (runs.length - 1)
+ *
+ * Statistics come first; colour segmentation is applied to them afterwards, and a vertex with
+ * no sample at or before it (`activePhase === null`, which cannot occur for a non-empty trace)
+ * opens a run of its own rather than being merged away.
+ *
+ * @param {readonly {activePhase?:string|null}[]} points
+ * @returns {{phase:string|null, startIndex:number, endIndex:number, pointCount:number}[]}
+ */
+export function visualRunsOf(points) {
+  const list = Array.isArray(points) ? points : []
+  if (list.length === 0) return []
+  const labelAt = index => list[index]?.activePhase ?? null
+
+  /** Maximal stretches of one label, before any boundary is shared. */
+  const stretches = []
+  let start = 0
+  while (start < list.length) {
+    const phase = labelAt(start)
+    let last = start
+    while (last + 1 < list.length && labelAt(last + 1) === phase) last += 1
+    stretches.push({ phase, first: start, last })
+    start = last + 1
+  }
+
   const runs = []
-  for (const episode of episodes) {
-    const segment = (Array.isArray(segments) ? segments : []).find(
-      candidate => (candidate?.attemptId ?? null) === episode.attemptId && Number.isFinite(candidate?.startMs),
-    )
-    const segmentStartMs = Number.isFinite(segment?.startMs) ? segment.startMs : 0
+  for (const [index, stretch] of stretches.entries()) {
+    const previous = runs[runs.length - 1]
     /**
-     * The episode's bounds, expressed on the attempt's own clock. The window this
-     * function measures must be on the same clock the samples are read on:
-     * `activeTimeMs` is a turn-compressed coordinate, and only the first attempt's
-     * happens to coincide with its local one.
+     * A run opens on the vertex the previous one closed on, so the two subpaths meet there.
+     * That vertex is shared, not duplicated: it is one index in the trace's own grid, emitted
+     * by both paths and charged to both by the render budget.
      */
-    const fromMs = Math.max(0, episode.startMs - segmentStartMs)
-    /**
-     * The body grid runs from the episode's first sample to its **last
-     * token-producing** sample; past that the tail grid takes over. Using the
-     * episode's bounded end here instead would start the tail one window too early
-     * and drop the sample the episode ends on.
-     */
-    const bodyEndMs = Number.isFinite(episode.lastSampleMs)
-      ? Math.max(fromMs, episode.lastSampleMs - segmentStartMs)
-      : Math.max(fromMs, episode.endMs - segmentStartMs)
-    /**
-     * The episode's bounded end, which already includes its one-window tail. The
-     * body grid stops at the last delta and the tail grid continues from there, so
-     * the two grids meet without repeating a vertex and every window stays a whole
-     * `(t - windowMs, t]`.
-     */
-    const toMs = Math.max(bodyEndMs, episode.endMs - segmentStartMs)
-    /**
-     * Each attempt's samples are re-based to its own clock, and every sample of the
-     * attempt is retained: a window opened before the episode's first sample can
-     * legitimately reach back past it, and excluding those samples would measure a
-     * window against a truncated history.
-     */
-    const perAttempt = allSamples
-      .filter(sample => (
-        sample
-        && (sample.attemptId ?? null) === episode.attemptId
-        && sample.phase === phase
-      ))
-      .map(sample => ({
-        ...sample,
-        activeTimeMs: Number.isFinite(sample.attemptTimeMs)
-          ? Math.max(0, sample.attemptTimeMs)
-          : Math.max(0, (sample.activeTimeMs ?? 0) - segmentStartMs),
-      }))
-      .sort((a, b) => a.activeTimeMs - b.activeTimeMs)
-    const points = rollingTpsSeries(perAttempt, {
-      phase,
-      windowMs,
-      sampleEveryMs,
-      offsetMs: segmentStartMs,
-      fromMs,
-      toMs,
-      /** Past this episode's last delta the tail grid takes over. */
-      sampleEndMs: bodyEndMs,
-    })
-    let attemptTokens = 0
-    for (const sample of perAttempt) attemptTokens += sample.tokens ?? sample.weight ?? 0
-    const own = perAttempt.filter(sample => sample.activeTimeMs <= bodyEndMs + 1e-9)
-    runs.push({
-      attemptId: episode.attemptId,
-      phase,
-      startMs: episode.startMs,
-      endMs: episode.endMs,
-      /** Compressed coordinate the run's last vertex is drawn at, inclusive. */
-      drawnToMs: points.length > 0 ? points[points.length - 1].timeMs : episode.startMs,
-      localDurationMs: bodyEndMs,
-      sampleCount: own.length,
-      attemptTokens,
+    const from = previous === undefined ? stretch.first : previous.endIndex
+    const next = stretches[index + 1]
+    const to = next === undefined
+      ? stretch.last
       /**
-       * Every vertex carries its attempt identity. A caller that concatenates the
-       * runs into one flat list — as the settled snapshot does for compatibility —
-       * can therefore still recover the segmentation it needs, instead of having to
-       * treat the list as one bridged series.
+       * The shared vertex: the last one still labelled with this stretch's phase when the
+       * silence is even, and the first one labelled with the next phase when it is not. It is
+       * the same index either way, which is what makes the two subpaths meet.
        */
-      points: points.map(point => ({ ...point, attemptId: episode.attemptId })),
-    })
+      : Math.floor((stretch.last + next.first) / 2)
+    runs.push({ phase: stretch.phase, startIndex: from, endIndex: to, pointCount: to - from + 1 })
+  }
+  /**
+   * The final run must reach the trace's last vertex. A trailing silence whose midpoint falls
+   * before the end would otherwise leave the closing zeros undrawn.
+   */
+  const final = runs[runs.length - 1]
+  if (final !== undefined && final.endIndex < list.length - 1) {
+    final.endIndex = list.length - 1
+    final.pointCount = final.endIndex - final.startIndex + 1
   }
   return runs
+}
+
+/**
+ * The per-attempt trace list the completed curve is drawn from, in turn order.
+ *
+ * @param {readonly object[]} segments `compressAttempts` segments, in turn order
+ * @param {readonly object[]} samples `compressAttempts` samples
+ * @param {{windowMs?:number, sampleEveryMs?:number,
+ *   calibratedAttemptIds?:ReadonlySet<string|null>}} [options]
+ * @returns {object[]} one trace per segment that produced evidence
+ */
+export function attemptTraces(segments, samples, options = {}) {
+  const ordered = (Array.isArray(segments) ? segments : []).filter(
+    segment => segment && typeof segment === 'object' && Number.isFinite(segment.startMs),
+  )
+  const calibrated = options.calibratedAttemptIds
+  const traces = []
+  for (const segment of ordered) {
+    const trace = attemptTrace(segment, samples, {
+      windowMs: options.windowMs,
+      sampleEveryMs: options.sampleEveryMs,
+      calibrated: calibrated instanceof Set ? calibrated.has(segment.attemptId ?? null) : false,
+    })
+    if (trace.points.length === 0) continue
+    traces.push(trace)
+  }
+  return traces
 }
 
 /**
@@ -360,162 +510,56 @@ export function peakTps(...seriesList) {
 }
 
 /**
- * Evidence intervals of each phase on the compressed clock — one per episode.
+ * Colour segmentation of the attempt traces, keyed by phase.
  *
- * A rolling series is defined for every sampled instant, but a phase that has not
- * started yet and a phase that has finished both read as zero. Those zeros are
- * arithmetically correct and visually misleading: a renderer that draws the
- * reasoning series across an output-only stretch is not showing "reasoning
- * throughput collapsed", it is showing "reasoning is over" — two different facts,
- * and only one of them is a throughput statement.
+ * This is the phase-keyed view of the same runs `attemptTrace().visualRuns` publishes
+ * per attempt, and it exists because two callers want different keys for one fact:
+ * the chart draws per attempt, and a diagnostic or a test asks "where does reasoning
+ * have evidence at all". Deriving both from one `visualRunsOf` pass is what keeps
+ * them from drifting apart.
  *
- * The previous revision returned **one** interval per phase, from the first
- * sample to the last sample plus a window. That cannot describe a real turn.
- * `Reasoning A -> Output A -> Tool -> Reasoning B` puts two reasoning episodes on
- * one curve, and the single interval spanned the output-only stretch between
- * them; drawing that interval emits a flat zero line straight through a region
- * where reasoning was simply absent, which is the same lie in a new place.
+ * A phase that produced nothing has no run. That is an absence of evidence, and it is
+ * never drawn as a flat zero line: "never reasoned here" and "reasoning throughput
+ * fell to zero" are different facts.
  *
- * The unit here is therefore an **episode**, with three rules that follow from how
- * a rolling window behaves:
- *
- *   1. an episode starts at its first token-producing sample. Before that the
- *      phase produced nothing to measure;
- *   2. an episode ends one rolling window after its last token-producing sample,
- *      because those tokens keep contributing to the rate for exactly that long
- *      and the decay is a readable part of the series. The tail is clamped to the
- *      attempt's own end, so it can never reach into the next call;
- *   3. two same-phase episodes of one attempt merge when the second begins at or
- *      before the first one's tail: the window between them never reached zero, so
- *      there is no absent stretch to preserve. A longer silence splits them, and a
- *      change of `attemptId` splits them unconditionally.
- *
- * A phase with no samples has no runs. Series values are never altered; this is
- * availability metadata.
- *
- * @param {readonly {activeTimeMs?:number, phase?:string|null, attemptId?:string|null}[]} samples
- * @param {readonly {attemptId?:string|null, startMs:number, endMs?:number, nextStartMs?:number}[]} segments
- *   the compressed segment each attempt occupies, in turn order
- * @param {number} [windowMs] rolling window an episode's tail is extended by
- * @param {number|null} [durationMs] the axis end, so the final attempt's tail is
- *   bounded exactly where its drawn series is
- * @returns {{reasoning: object[], output: object[]}} runs in ascending `startMs`
+ * @param {readonly object[]} traces `attemptTraces` output
+ * @returns {{reasoning: object[], output: object[]}} runs in draw order
  */
-export function phaseRuns(samples, segments, windowMs = DEFAULT_WINDOW_MS, durationMs = null) {
-  const tail = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 0
-  const all = Array.isArray(samples) ? samples : []
-  const ordered = (Array.isArray(segments) ? segments : []).filter(
-    segment => segment && typeof segment === 'object' && Number.isFinite(segment.startMs),
-  )
-
-  const runsFor = (phase) => {
-    const runs = []
-    /**
-     * The coordinate at which each open episode stopped accepting samples. Kept
-     * beside the run list rather than on the returned object, because it is a
-     * merge bookkeeping detail and not part of the run's published meaning.
-     */
-    const runClosedAt = new Map()
-    /**
-     * Segment order, not sample order: an out-of-order or late sample must not be
-     * able to open a second run for an attempt that already has one.
-     */
-    for (const segment of ordered) {
-      const attemptId = segment.attemptId ?? null
-      const local = all
-        .filter(sample => (
-          sample
-          && sample.phase === phase
-          && (sample.attemptId ?? null) === attemptId
-          && Number.isFinite(sample.activeTimeMs)
-        ))
-        .sort((a, b) => a.activeTimeMs - b.activeTimeMs)
-      if (local.length === 0) continue
-      const attemptEndMs = Number.isFinite(segment.endMs) ? segment.endMs : segment.startMs
-      /**
-       * The interval is bounded exactly where the drawable series is bounded, so
-       * the availability metadata and the vertices cannot disagree.
-       *
-       * An attempt capped by a following call is cut at the coordinate that call
-       * owns. The final attempt has no such cap: it keeps the ordinary
-       * `lastSample + windowMs` interval, which is what shows its last tokens
-       * expiring rather than the curve stopping dead on the final delta.
-       */
-      const cappedMs = segment.hasSuccessor === true && Number.isFinite(segment.nextStartMs)
-        ? segment.nextStartMs
-        : null
-      const tailLimitMs = cappedMs === null
-        ? attemptEndMs + tail
-        : cappedMs
-      const boundMs = Math.max(attemptEndMs, Math.min(attemptEndMs + tail, tailLimitMs))
-      for (const sample of local) {
-        const at = Math.max(0, sample.activeTimeMs)
-        const endMs = Math.min(at + tail, boundMs)
-        const current = runs.length > 0 ? runs[runs.length - 1] : null
-        /**
-         * Merge only when the new sample genuinely falls inside the episode already
-         * open **and the episode has not been closed by an attempt boundary**. The
-         * attempt test is not redundant with the `attemptId` equality below: a
-         * later attempt receives coordinates its predecessor still owned, so
-         * without it two attempts that share a coordinate would merge into one run
-         * no matter how different their samples are.
-         */
-        const closedAtMs = current === null ? null : runClosedAt.get(current)
-        const mergeable = current !== null
-          && current.attemptId === attemptId
-          && (closedAtMs === null || at <= closedAtMs)
-          && at <= current.endMs
-        if (mergeable) {
-          /**
-           * The tail is extended, never shortened. A merged episode's evidence
-           * window is the union of its samples' contributions, and the second
-           * sample of a pair can be *earlier* than the first one's tail — an output
-           * sample at 8 s inside a window opened at 2 s must not retract the
-           * interval back to 3 s and drop the four seconds in between.
-           */
-          current.endMs = Math.max(current.endMs, endMs)
-          current.lastSampleMs = Math.max(current.lastSampleMs, at)
-          current.sampleCount += 1
-        } else {
-          const opened = {
-            attemptId,
-            phase,
-            startMs: at,
-            endMs: Math.max(at, endMs),
-            firstSampleMs: at,
-            lastSampleMs: at,
-            sampleCount: 1,
-          }
-          runs.push(opened)
-          /**
-           * The coordinate at which this attempt stopped being able to extend an
-           * episode. Samples of the same attempt are non-decreasing, so they all
-           * sit at or below it; a later attempt's samples sit above it whenever
-           * that attempt owns a distinct coordinate.
-           */
-          runClosedAt.set(opened, attemptEndMs)
-        }
-      }
+export function phaseRuns(traces) {
+  const out = { reasoning: [], output: [] }
+  for (const trace of Array.isArray(traces) ? traces : []) {
+    for (const run of trace?.visualRuns ?? []) {
+      if (run.phase !== 'reasoning' && run.phase !== 'output') continue
+      const points = (trace.points ?? []).slice(run.startIndex, run.endIndex + 1)
+      if (points.length === 0) continue
+      out[run.phase].push({
+        attemptId: trace.attemptId ?? null,
+        phase: run.phase,
+        startMs: points[0].timeMs,
+        endMs: points[points.length - 1].timeMs,
+        startIndex: run.startIndex,
+        endIndex: run.endIndex,
+        pointCount: points.length,
+        points,
+      })
     }
-    return runs
   }
-
-  return { reasoning: runsFor('reasoning'), output: runsFor('output') }
+  return out
 }
 
 /**
  * Single-interval evidence view, retained for callers that only ask when a phase
  * began and ended.
  *
- * It is derived from `phaseRuns`, so it can never disagree with the multi-episode
- * structure. It must not be used to decide what to draw: between the first and
+ * It is derived from `phaseRuns`, so it can never disagree with the colour
+ * segmentation. It must not be used to decide what to draw: between the first and
  * last run of a phase there may be stretches where the phase is absent, and this
  * shape cannot express that.
  *
- * @deprecated for rendering — use `phaseRuns`.
+ * @deprecated for rendering — use `phaseRuns` or `attemptTrace().visualRuns`.
  */
-export function phaseSpans(samples, segments, windowMs = DEFAULT_WINDOW_MS, durationMs = null) {
-  const runs = phaseRuns(samples, segments, windowMs, durationMs)
+export function phaseSpans(traces) {
+  const runs = phaseRuns(traces)
   const outer = list => (list.length === 0
     ? null
     : { startMs: list[0].startMs, endMs: list[list.length - 1].endMs })
@@ -602,8 +646,7 @@ export function minimumRunCost(length) {
  * applied per run. Flattening the runs into one series, downsampling that and
  * cutting it back apart is the one construction this module forbids: the cut points
  * would not fall on run boundaries, so a bridged line could appear across a stretch
- * where the phase produced nothing — the defect `perAttemptSeries` and `phaseRuns`
- * exist to prevent.
+ * where the phase produced nothing.
  *
  * Degradation policy when even the anchors do not fit: runs are refused in reverse
  * priority order, so the peak-bearing run is the last to be refused, and a run
@@ -616,7 +659,7 @@ export function minimumRunCost(length) {
  * budget — unreachable at `MAX_RENDER_POINTS_TOTAL` (512), where the cost is at most
  * `MIN_MAX_POINTS` — and it exists so that corner cannot be reported as a preservation.
  *
- * @param {readonly {points?: readonly unknown[]}[]} runs in draw order
+ * @param {readonly {points?: readonly unknown[], length?: number}[]} runs in draw order
  * @param {number} [totalBudget] chart-wide vertex budget
  * @returns {{
  *   budgets:number[], total:number, allocated:number, degraded:number[],
@@ -629,7 +672,16 @@ export function minimumRunCost(length) {
 export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) {
   const list = Array.isArray(runs) ? runs : []
   const budget = Number.isFinite(totalBudget) && totalBudget > 0 ? Math.floor(totalBudget) : 0
-  const lengths = list.map(run => (Array.isArray(run?.points) ? run.points.length : 0))
+  /**
+   * A run's length, from its own `points` or from the explicit `length` a caller may
+   * publish instead. The second form exists because a visual run is a slice of its
+   * attempt's grid rather than a copy of it, and the allocation only ever needs the
+   * count.
+   */
+  const lengths = list.map(run => (
+    Number.isFinite(run?.length) ? Math.max(0, Math.floor(run.length))
+      : (Array.isArray(run?.points) ? run.points.length : 0)
+  ))
   const budgets = lengths.map(() => 0)
   if (list.length === 0 || budget <= 0) {
     return {
@@ -652,7 +704,7 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
   let peakIndex = -1
   let peakValue = Number.NEGATIVE_INFINITY
   for (let i = 0; i < lengths.length; i += 1) {
-    for (const point of list[i].points) {
+    for (const point of (Array.isArray(list[i].points) ? list[i].points : [])) {
       const rate = rateOf(point)
       if (rate !== null && rate > peakValue) {
         peakValue = rate
@@ -758,7 +810,8 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
 }
 
 /** Index of the first finite global maximum (or minimum) of a series. */
-function extremeIndex(points, direction) {  let best = -1
+function extremeIndex(points, direction) {
+  let best = -1
   let bestValue = 0
   for (let i = 0; i < points.length; i += 1) {
     const value = points[i]?.tps
@@ -782,8 +835,8 @@ function extremeIndex(points, direction) {  let best = -1
  *   2. the global maximum — this is the point the card's `peak` refers to, and a
  *      rendering choice may never delete it;
  *   3. the global minimum — the trough a stall produces;
- *   4. the surviving local extrema, **ranked by prominence** when they do not
- *      all fit;
+ *   4. `required`, a set of indices the caller cannot afford to lose (a **rendering
+ *      seam**: a colour-transition vertex shared with the neighbouring run);
  *   5. uniform shape samples with whatever budget is left, so a long flat run
  *      still has vertices to be drawn with.
  *
@@ -794,16 +847,21 @@ function extremeIndex(points, direction) {  let best = -1
  * the trough unconditional; `test/curve.test.js` carries the counterexample that
  * defeats the old stride.
  *
+ * `required` sits between the trough and the shape samples because it is a
+ * structural obligation rather than a shape preference: dropping a seam vertex
+ * would reopen, as a blank horizontal gap, a tone change that is not a stall.
+ *
  * Determinism: ties in the global extreme resolve to the earliest index, and
  * ties in prominence resolve to the earliest index, so two runs over equal input
  * return equal output.
  *
  * @param {readonly {timeMs:number, tps:number}[]} series
  * @param {number} [maxPoints] budget; must be `>= MIN_MAX_POINTS`
+ * @param {{required?: ReadonlySet<number>}} [options]
  * @returns {{timeMs:number, tps:number}[]} at most `maxPoints` points, in
  *   non-decreasing `timeMs` order, drawn from the input objects themselves
  */
-export function downsampleSeries(series, maxPoints = DEFAULT_MAX_POINTS) {
+export function downsampleSeries(series, maxPoints = DEFAULT_MAX_POINTS, options = {}) {
   const points = Array.isArray(series) ? series : []
   if (!(Number.isFinite(maxPoints) && maxPoints >= MIN_MAX_POINTS)) {
     /**
@@ -831,7 +889,16 @@ export function downsampleSeries(series, maxPoints = DEFAULT_MAX_POINTS) {
   const troughIndex = extremeIndex(points, -1)
   if (troughIndex >= 0 && keep.size < maxPoints) keep.add(troughIndex)
 
-  /** 4. Local extrema, each with the prominence that ranks it. */
+  /** 4a. Seam vertices the caller requires, taken before any shape preference. */
+  const required = options.required
+  if (required instanceof Set) {
+    for (const index of [...required].sort((a, b) => a - b)) {
+      if (keep.size >= maxPoints) break
+      if (Number.isInteger(index) && index >= 0 && index < points.length) keep.add(index)
+    }
+  }
+
+  /** 4b. Local extrema, each with the prominence that ranks it. */
   const extrema = []
   for (let i = 1; i < lastIndex; i += 1) {
     const prev = points[i - 1]?.tps
@@ -866,6 +933,45 @@ export function downsampleSeries(series, maxPoints = DEFAULT_MAX_POINTS) {
     .filter(index => index >= 0 && index < points.length)
     .sort((a, b) => a - b)
   const selected = ordered.map(index => points[index])
+  selected.sort((left, right) => (
+    (Number.isFinite(left?.timeMs) ? left.timeMs : 0) - (Number.isFinite(right?.timeMs) ? right.timeMs : 0)
+  ))
+  return selected
+}
+
+/**
+ * Downsample one visual run without breaking the seams it shares with its neighbours.
+ *
+ * A visual run is a slice of its attempt's vertex grid, and at a phase transition it
+ * shares its first or last vertex with the neighbouring run. Downsampling each run
+ * independently would therefore be free to thin away **exactly** the vertex the two
+ * runs have in common — the reasoning subpath would stop at its own last surviving
+ * vertex and the output subpath would start at its own, leaving a blank horizontal
+ * gap that looks like a stall and is not one (docs/METRICS_SPEC.md §8.6).
+ *
+ * The seam is protected by reserving the slice's own endpoints, which is also what
+ * `downsampleSeries` does unconditionally for the first and last point: a run's
+ * opening and closing vertices are anchors of its own contract. The two ends and the
+ * four anchors fit in any budget of at least `MIN_MAX_POINTS`, because the reserve
+ * happens before the shape samples and prefers those same anchors.
+ *
+ * @param {readonly object[]} points the slice, ascending
+ * @param {number} budget at least `MIN_MAX_POINTS`, or the slice's own length
+ * @returns {object[]} at most `budget` points, endpoints preserved
+ */
+export function downsampleRun(points, budget) {
+  const list = Array.isArray(points) ? points : []
+  if (!(Number.isFinite(budget) && budget >= MIN_MAX_POINTS)) {
+    throw new TypeError(`budget must be a finite number >= ${MIN_MAX_POINTS}`)
+  }
+  if (list.length <= budget) return list.slice()
+  /**
+   * The seam is the slice's own two endpoints, so reserving them is exactly what
+   * keeps the tone change continuous. They are emitted in ascending `timeMs` order
+   * like every other returned series.
+   */
+  const required = new Set([0, list.length - 1])
+  const selected = downsampleSeries(list, budget, { required })
   selected.sort((left, right) => (
     (Number.isFinite(left?.timeMs) ? left.timeMs : 0) - (Number.isFinite(right?.timeMs) ? right.timeMs : 0)
   ))

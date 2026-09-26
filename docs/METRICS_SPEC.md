@@ -227,30 +227,60 @@ The curve is therefore a model-throughput diagnostic, not an end-to-end turn tim
 
 ### 8.2 Y-axis and window
 
-Use the same conceptual one-second trailing TPS window as the live meter, sampled for rendering every 250 ms. Implement rendering density independently from the underlying sample collection so the SVG remains bounded for long turns.
+The curve is **one attempt-local trailing-one-second total throughput trace per model attempt**, sampled for rendering every 250 ms.
 
-**The window is measured per attempt, and the compressed axis is a coordinate only (frozen in Phase 6).** Concatenating attempts onto one x-axis removes the width of tools, inter-attempt waits and next-call TTFT. It does **not** concatenate the measurement window: a trailing one-second rate is a property of one model call, so each attempt's series is computed on that attempt's own local clock and only then relabelled to the shared coordinate by its segment's `startMs`.
+A vertex at attempt-local `t` therefore reports:
+
+\[
+\text{tps}(t) = \frac{1000}{1000}\sum_{s \in A,\; t-1000 < s.t \le t} s.\text{tokens}
+\]
+
+where the sum runs over **every generated sample of that attempt, whatever its phase** — reasoning deltas, text deltas and tool-call argument deltas alike. That is exactly what `LiveMeter` measures: it holds one `SlidingWindowMeter` per active attempt and feeds it every generated sample, using `streamingPhase` only to *label* the newest one. A completed curve vertex and a live pill reading at the same attempt-local instant are the same measurement (frozen in Phase 7C).
+
+The window is half-open on the left, `(t - 1000, t]`: a sample exactly one window old has left the measurement and a sample exactly at `t` is in it.
+
+**The window is measured per attempt, and the compressed axis is a coordinate only (frozen in Phase 6).** Concatenating attempts onto one x-axis removes the width of tools, inter-attempt waits and next-call TTFT. It does **not** concatenate the measurement window: each attempt's trace is computed on that attempt's own local clock and only then relabelled to the shared coordinate by its segment's `startMs`.
 
 Two attempts that share a compressed coordinate therefore share no window. The rejected revision rolled one window across the concatenated sample list, so the opening vertices of each attempt counted the previous attempt's trailing tokens: with attempt A measuring 100 tokens/s at its end and a tool then separating it from attempt B measuring 10, B's opening vertex read 110 and the turn peak was inflated by tokens that belonged to a finished call. `test/curve-attempt-boundary.test.js` reproduces the rejected pipeline verbatim and fails it.
+
+**Phase is a colour, not a rate (frozen in Phase 7C).** An earlier revision built one rolling series **per phase**, so at a reasoning-to-output transition the live pill showed `reasoning + output` while the reasoning line showed `reasoning` and the output line showed `output`; neither drawn line equalled the live measurement, and `peakTps` took the larger of two partial rates. Each vertex now carries `activePhase` — the phase of the latest generated sample at or before that instant, which is `LiveMeter.streamingPhase` restated — and the trace is cut into phase-coloured subruns. The rate is never partitioned. `test/curve-total-rolling.test.js` carries the cross-phase counterexample.
 
 Three consequences are normative:
 
 1. **Compressed coordinate ≠ statistical window.** The axis is continuous across an attempt boundary; the window is not.
-2. **The opening vertex is measured at the attempt's own zero.** An attempt's local zero *is* its first delta, so a plain half-open window `(0 - 1000, 0]` would be empty and the curve would open on a fabricated `0 tokens/s`. The left edge is clamped at local zero for that one vertex; every later vertex is the plain window `(t - 1000, t]`.
-3. **Each attempt draws only its own coordinates.** An attempt's one-window decay tail is clamped at the coordinate the following attempt owns. The final attempt keeps its tail, because nothing follows it to compete for the axis. Evidence intervals (`phaseRuns`) are bounded identically, so the availability metadata and the drawable vertices cannot disagree.
+2. **The opening vertex is measured by the ordinary window.** An attempt's local zero *is* its first delta, so `(0 - 1000, 0]` contains it and no clamp is needed. Phase 6 briefly carried one and Phase 7 removed it: it fired at the opening of every *episode*, not only at an attempt's first, and readmitted samples the trailing definition had already evicted.
+3. **Each attempt draws only its own coordinates.** An attempt's one-window decay tail is clamped at the coordinate the following attempt owns. The final attempt keeps its tail, because nothing follows it to compete for the axis.
 
-### 8.2.1 Phase episodes, and why one interval per phase is not enough
+**Summary rates are a different metric.** Reasoning TPS (§7) and output TPS (§7) are phase **averages**: a phase's token total over that phase's measured active generation time. The curve is an attempt-local trailing one-second throughput trace, colour-coded by active phase. They are not two renderings of one number, and neither is derivable from the other.
 
-A phase can be present in several disjoint **episodes** inside one turn and even inside one attempt: `Reasoning A → Output A → Tool → Reasoning B` puts two reasoning episodes on one curve. A single interval per phase — first sample to last sample plus a window — spans the output-only stretch between them, and a renderer drawing that interval emits a flat zero line exactly where reasoning was absent. That is the same misstatement as drawing a zero through a finished phase, moved to a new location.
+### 8.2.1 An attempt is one trace, and a stall is a value on it (frozen in Phase 7C)
 
-The evidence structure is therefore a list of runs, one per episode:
+A model call is drawn as **one** continuous trace. A silence inside it — the model delivered nothing for longer than the window — is a stretch of that trace on which the trailing rate reads zero, and it is drawn at full width: an intra-attempt stall is a throughput fact the chart exists to show.
 
-- a run starts at its episode's first token-producing sample;
-- it ends one rolling window after that episode's last token-producing sample, clamped to the coordinates its own attempt owns;
-- two same-phase episodes of one attempt merge when the second begins at or before the first one's tail — the window between them never reached zero, so there is no absent stretch to preserve;
-- a longer silence splits them, and a change of attempt splits them unconditionally.
+The earlier revision instead partitioned each phase's samples into **episodes** by the rule "a gap longer than one window separates them", gave every episode its own run with its own one-window tail, and drew a blank region between them. That rule answers where a *phase* has evidence, and it was being applied to the *drawing*, with three consequences:
 
-The renderer receives one path per run and never joins two runs. A reader sees a gap, which is what happened. Attempt boundaries default to **no marker**: the break in the path is the whole signal, and `attemptId` is retained on every run for diagnostics rather than drawing.
+- a single model call could appear as several disconnected traces;
+- the stall was drawn as a hole rather than as a decay, so a reader saw "no data" where the data says "zero";
+- each run was measured over its own phase, which is the cross-phase defect of §8.2.
+
+**Tool waits and inter-attempt waits are different, and remain different.** They own no coordinate at all: the axis stops at the attempt's own bound and the next attempt begins at that same coordinate. Only a silence *inside* an attempt has width.
+
+A phase that produced nothing has no run. That is an absence of evidence, and it is never drawn as a flat zero line: "never reasoned here" and "reasoning throughput fell to zero" are different facts.
+
+### 8.2.2 Where a phase boundary is drawn (frozen in Phase 7C)
+
+A tone change must not be drawn as a blank horizontal gap, and a run must not claim coordinates its own phase did not produce — otherwise a long silence between two phases would be painted entirely in one of their tones.
+
+The cut is therefore the **midpoint** of the label change, rounded down: the outgoing run keeps the earlier half of the silence and the incoming run the later half, and the two meet on **one shared vertex** — the same instant, the same measured rate, one object emitted by both subpaths. A phase change with no silence between its samples (the ordinary case: a call reasons and then writes) still produces adjacent runs sharing the transition vertex.
+
+The invariants, asserted in `test/curve.test.js` and `test/curve-trace-matrix.test.js`:
+
+```
+runs[i].endIndex === runs[i + 1].startIndex
+sum(runs[i].pointCount) === points.length + (runs.length - 1)
+```
+
+The shared vertex is one measurement, not two: the rate had no phase partition to reset. It is charged to both subpaths by the render budget of §8.5, because both do emit it.
 
 ### 8.3 Calibration
 
@@ -259,9 +289,21 @@ Stream deltas do not generally expose exact per-delta token counts. Use a two-st
 1. capture timestamp + phase + a token-shape weight for every generated delta;
 2. when authoritative usage arrives, scale each phase's weights so the sum equals its exact phase token total.
 
-If an attempt reports `outputTokens` and `reasoningTokens`, reasoning and non-reasoning output curves can each be calibrated separately. The curve's local shape remains an estimate while its phase integral is anchored to exact aggregate counts; the axis that describes this is `temporalShapeQuality = reconstructed` (§11), and `curve.quality` carries that value.
+**The completed curve consumes the calibrated allocation, never the raw shape weights (frozen in Phase 7C).** `curveSource` joins the stored attempts with `aggregate.attemptBreakdown[].calibration.samples`, which is the one place calibration is performed; the raw evidence in `record.attempts[].samples` is not mutated and remains the provenance. A duplicate scaling rule inside `settle()` would be free to drift from the one the printed token totals use, which is exactly the defect this removed: the curve was drawn from raw heuristic magnitudes while `generatedTokens` and the phase rates were drawn from the calibrated ones, so one card could print `Generated Tokens: 900` beside a curve whose whole integrated area was 200.
 
-If `reasoningTokens` is absent, do not claim the reasoning/output split is exact. The whole-attempt integral is still anchored to the authoritative `outputTokens` by one common factor, so the curve shape remains usable; `phaseSplitQuality` in that case is `estimated`, and the two phase series must be presented as one approximate division of an exact total rather than as two measured curves.
+The join is **positional and verified**. `attemptBreakdown` is `record.attempts.filter(isContributingAttempt).map(reduceAttempt)`, so the two lists correspond in order; wherever both sides publish an `attemptId` and a `step`, they must agree, and a disagreement in either — or a sample-count mismatch — degrades the **whole** join to the raw shape rather than attaching one attempt's calibration to another. The degradation is reported in `curve.source.issues` and `curve.source.aligned`.
+
+| Evidence | Curve magnitudes | `curve.source.calibrated` |
+|---|---|---|
+| `outputTokens` + `reasoningTokens` | both phases anchored to their own counters | `true` |
+| `outputTokens` only | one common scale; the split stays `estimated` | `true` |
+| no usage | the raw shape weight, unchanged | `false` |
+
+If an attempt reports `outputTokens` and `reasoningTokens`, reasoning and non-reasoning output are each calibrated separately, and the attempt's curve samples sum to `outputTokens` exactly. The curve's local shape remains an estimate while its integral is anchored to exact aggregate counts; the axis that describes this is `temporalShapeQuality = reconstructed` (§11), and `curve.quality` carries that value.
+
+If `reasoningTokens` is absent, the reasoning/output split is never claimed exact. The whole-attempt integral is still anchored to the authoritative `outputTokens` by one common factor, so the curve shape remains usable; `phaseSplitQuality` in that case is `estimated`.
+
+**Provider usage anchors the aggregate magnitude only.** Individual vertices remain reconstructed allocations of an exact total, and `peakTps` remains approximate (§9).
 
 ### 8.4 Curve quality is the temporal-shape axis (frozen in Phase 6)
 
@@ -279,25 +321,33 @@ The token and split axes are not discarded — they govern the numbers printed b
 
 ### 8.5 Chart-wide render budget and peak retention (frozen in Phase 7A.1)
 
-The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_TOTAL` = 512, divided by `allocateRunBudgets` across every run of both phases. `DEFAULT_MAX_POINTS` (512) bounds one run; a chart is not one run, and a turn that alternates reasoning and output a hundred times would otherwise emit a hundred series of up to 512 vertices each. Downsampling is a drawing operation and never moves a reported statistic: `peakTps` is measured on the **full** series before any allowance is applied, and the axis is scaled by that value.
+The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_TOTAL` = 512, divided by `allocateRunBudgets` across every phase-coloured run of every attempt. `DEFAULT_MAX_POINTS` (512) bounds one run; a chart is not one run, and a long agent turn of dozens of calls with phase alternations would otherwise emit dozens of series of up to 512 vertices each. Downsampling is a drawing operation and never moves a reported statistic: `peakTps` is measured on the **full** trace before any allowance is applied, and the axis is scaled by that value.
+
+**A visual run is a slice of its attempt's trace, and the slice's endpoints are its seams.** `downsampleRun` reserves both ends, so thinning a run can never drop the vertex it shares with its neighbour — which would reopen, as a blank horizontal gap, a tone change that is not a stall. `downsampleSeries` takes an optional `required` index set for the same purpose.
 
 **Every run is denominated in its irreducible cost.** `minimumRunCost(length)` is `0` for an empty run, `1` or `2` for a run of one or two vertices, and `MIN_MAX_POINTS` (3) for anything longer. A one- or two-vertex run is already at full resolution: `downsampleSeries` refuses a budget below the minimum because it cannot honour the first, last and maximum anchors, and duplicating a vertex to reach three would draw a segment the data does not contain. An allowance is therefore `0` — an explicit refusal, reported in `degraded` — or at least the run's own irreducible cost; nothing between one and three is ever published for a longer run.
 
 **One priority order, and the peak is first in it whatever its length.** Runs are ranked by peak band, then by cost (so the greatest number of runs survives a tight budget), then by length, then by original index, which keeps the allocation a pure function of the input. The peak-bearing run — the run whose series carries the chart's maximum rate — is seated first and is the last run that could ever be refused. This is a whole-allocation property, not a stage: an earlier revision partitioned the seating into a long-run pass and a short-run pass, and the peak band existed only in the first, so a global maximum living in a one-vertex run was skipped for being short and then competed on index alone. Under a saturated budget two ordinary short runs ahead of it took the last two vertices and the peak was refused at `0`. The counterexample and both allocations are recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 7A.1 §1).
 
-**Degradation is explicit.** A run that cannot be seated is emptied (`points: []`, `degraded: true`) rather than handed an allowance its own anchors cannot honour, and a caller must render it as absent. `renderBudget.peakRetained` is `false` only when the peak-bearing run's irreducible cost exceeds the whole budget — unreachable at 512, where the cost is at most 3 — so the corner cannot be reported as a preservation. `renderBudget.peakRun` names the run carrying the maximum in `series.flatMap(entry => entry.runs)`, or `-1` when no run holds a finite rate.
+**Degradation is explicit.** A run that cannot be seated is emptied (`points: []`, `degraded: true`) rather than handed an allowance its own anchors cannot honour, and a caller must render it as absent. `renderBudget.peakRetained` is `false` only when the peak-bearing run's irreducible cost exceeds the whole budget — unreachable at 512, where the cost is at most 3 — so the corner cannot be reported as a preservation. `renderBudget.peakRun` names the run carrying the maximum in the allocation's own run order, or `-1` when no run holds a finite rate.
 
-**What the budget bounds is the plot's elements, not one of its two halves.** `curve.drawnPoints` is the allocator's accounting and counts every budgeted vertex, a one-vertex run included. `curveViewModel.drawnPoints` counts **path vertices only** — a one-vertex run is drawn as a point marker rather than as a vertex of a line — and the markers are published separately in `curveViewModel.markers`. The bounded quantity is their sum, published as `renderBudget.elementPoints` (with `lineVertices` and `markers` beside it) in the settled snapshot and as `renderElementPoints` in the view model. Asserting `drawnPoints <= 512` alone would leave every marker outside the bound.
+**What the budget bounds is the plot's elements, not one of its two halves.** `curve.drawnPoints` is the allocator's accounting and counts every budgeted vertex, a one-vertex run included, and it counts a shared phase-transition vertex once per subpath that emits it. `curveViewModel.drawnPoints` counts **path vertices only** — a one-vertex run is drawn as a point marker rather than as a vertex of a line — and the markers are published separately in `curveViewModel.markers`. The bounded quantity is their sum, published as `renderBudget.elementPoints` (with `lineVertices` and `markers` beside it) in the settled snapshot and as `renderElementPoints` in the view model. Asserting `drawnPoints <= 512` alone would leave every marker outside the bound.
+
+**Two marker levels, because a chart of beads is not a chart of peaks.** An ordinary one-vertex run — a genuine one-measurement attempt — is drawn as a small, subdued dot (`0.24 × font`, opacity `0.75`). Only a singleton that **is** the published peak keeps the stronger marker (`0.42 × font`, opacity `1`), which is also the size of the peak dot itself, so the two coincide exactly rather than leaving a ring. `data-peak` carries the distinction to the stylesheet, and both tones resolve through DSH aliases so light and dark themes follow the host.
 
 **The printed peak and the placed peak dot are one measurement.** `curveViewModel.peak.value` is the full-series maximum, but `peak.x`/`peak.y` are taken only from a vertex that survived onto the chart *and* carries that same rate; when the peak-bearing run is not drawable they are `null`. The rejected behaviour took the position from whichever series led the *drawn* points, which after a starved peak printed `≈9,999` and placed the dot on a 400 tokens/s vertex — two different measurements one pixel apart. A missing dot is visibly missing; a dot on a weaker vertex is a false claim about where the chart's maximum was.
 
 ## 9. Peak TPS
 
-`peakTps` is the maximum value of the **full** per-attempt rolling series across the reasoning and output phases, computed before any downsampling. It is the maximum over those series, never their sum and never their average: the turn's peak rate is the fastest any single call ran, not a quantity assembled from two calls.
+`peakTps` is the maximum value of the **full** attempt-local total rolling trace across every attempt, computed before any downsampling. It is the maximum over those traces, never their sum and never their average: the turn's peak rate is the fastest any single call ran, not a quantity assembled from two calls. It is never the maximum of a per-phase line, because no per-phase line exists (§8.2).
 
-Label it as the peak of the shape-estimated series, not as a provider-certified instantaneous maximum. Because every vertex is a shape weight, the peak inherits `temporalShapeQuality` and never exceeds `reconstructed`; it therefore renders with `≈` at every quality level.
+Label it as the peak of the shape-estimated series, not as a provider-certified instantaneous maximum. Per-delta allocation is reconstructed and, where usage exists, calibrated to an aggregate; a calibrated vertex is not a provider-exact local count. The peak therefore inherits `temporalShapeQuality` and never exceeds `reconstructed`, and it renders with `≈` at every quality level.
 
-The peak is a **number** and, when the chart is drawn, a **position**. The number is fixed by the series alone and no rendering decision may change it; the position exists only if the run carrying that number survived the chart-wide budget of §8.5, and it is then that very measurement rather than the strongest one that happened to be drawn. `peakRetained` and a `null` position are the two ways the chart says the maximum is not on it.
+The independent check is a test-only brute force (`test/curve-reference-window.test.js`): for every instant on every attempt's reference grid, sum the calibrated sample tokens strictly inside `(t - 1000, t]` across **all** phases, reset at every attempt, and take the maximum. `curve.peakTps` must equal it. The production sampler is not used on either side of that comparison.
+
+**`peak >= mean` is not an invariant.** An earlier phase's report used `generatedTokens / curveSpan` as a mean and argued the peak must exceed it. It must not be frozen as a test: a one-second rolling rate is normalised to a fixed window, a phase average uses a different active-duration denominator, a very short attempt can have a phase average above its own one-second-window rate, and combined token totals and phase-specific denominators are not interchangeable. The calibrated-sample reference above is the right check; the mean is at most a sanity observation on one turn.
+
+The peak is a **number** and, when the chart is drawn, a **position**. The number is fixed by the trace alone and no rendering decision may change it; the position exists only if the run carrying that number survived the chart-wide budget of §8.5, and it is then that very measurement rather than the strongest one that happened to be drawn. `peakRetained` and a `null` position are the two ways the chart says the maximum is not on it.
 
 ## 10. Total elapsed time
 

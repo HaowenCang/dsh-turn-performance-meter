@@ -145,9 +145,10 @@ robustness rows below rather than part of them: with a rounded curve the robustn
 about the wrong formula.
 
 - [x] **Blocking A** — the completed rolling TPS window is measured per attempt and never concatenated across an
-      attempt boundary, even though the compressed x-axis is continuous. `perAttemptSeries` measures each attempt on
-      its own clock; `compressAttempts` publishes both clocks (`activeTimeMs`, `attemptTimeMs`) so a caller cannot
-      mistake one for the other; the counterexample file reproduces the rejected pipeline and fails it.
+      attempt boundary, even though the compressed x-axis is continuous. `attemptTrace` (then `perAttemptSeries`)
+      measures each attempt on its own clock; `compressAttempts` publishes both clocks (`activeTimeMs`,
+      `attemptTimeMs`) so a caller cannot mistake one for the other; the counterexample file reproduces the rejected
+      pipeline and fails it.
 - [x] **Blocking B** — phase evidence is a list of episodes rather than one interval per phase, and the SVG emits one
       path per episode. A single interval spanning an output-only stretch drew a flat zero line through a region where
       the phase was simply absent.
@@ -230,6 +231,46 @@ counterexample, the behaviour that shipped and the invariant that replaces it.
 
 Acceptance gate: the turn-meter correctness gate is ready for external audit. Phase 7B (browser/E2E/visual matrix) is
 deliberately **not** started.
+
+## Phase 7C — Curve metric and rendering repair
+
+Opened on an external audit of `b7bda66` with three findings: the completed curve was drawn in the raw heuristic
+magnitude system while every printed number came from the calibrated one; the live meter and the completed curve were
+measuring different rates because the curve was split by phase; and the real screenshot showed a fragmented, bead-like
+trace rather than a throughput curve whose tone changes by phase. Each finding was reproduced by a test observed
+failing before the production change.
+
+- [x] **Finding A — the completed curve consumed raw heuristic magnitudes.** `settle()` called
+      `compressAttempts(record.attempts)` while `aggregateTurn` calibrated a copy of the same samples into
+      `attemptBreakdown[].calibration.samples`, so `Generated Tokens` and the curve's own area could differ by any
+      factor. Add `src/core/curve-source.js`: the curve input is the stored attempts joined with that calibration,
+      positionally and verified on `attemptId`/`step`/sample count, degrading **wholesale** to the raw shape when the
+      join cannot be trusted. No second calibration algorithm exists.
+- [x] **Finding B — live and completed curves measured different rates.** `LiveMeter` sums every generated sample of an
+      attempt in one trailing window; the completed curve built one series per phase, so neither line equalled the
+      live reading at a transition and `peakTps` was the larger of two partial rates. Replace `perAttemptSeries` with
+      `attemptTrace`/`totalRollingTpsSeries`: one attempt-local total trace per call, with `activePhase` as a **label**.
+- [x] **Finding C — the trace was fragmented.** The drawing unit was the phase episode, so one call could appear as
+      several disconnected traces with blank regions between them, and every short episode became a large marker.
+      Remove the episode cut; cut the attempt's trace into phase-coloured runs by `visualRunsOf`, whose seams are
+      shared vertices; reserve those seams in `downsampleRun`; and give ordinary singleton markers their own smaller,
+      subdued size so only the published peak keeps the strong one.
+- [x] An intra-attempt stall stays visible as a full-width decay to zero; a tool wait and an inter-attempt wait keep
+      zero x-axis width; an attempt boundary stays a hard window reset and a subpath break.
+- [x] Freeze the peak as the maximum over every attempt-local total vertex, checked against a test-only brute-force
+      reference over the calibrated samples. Retract the Phase 7B "peak ≥ mean" reading as a universal invariant.
+- [x] Correct the live/completed equivalence contract: numeric equality is mandatory only when no authoritative usage
+      exists or the calibration scale is 1; timestamps, attempt boundaries, window definition, phase-transition
+      locations and stall locations must always be identical.
+- [x] `npm run build:client` + `npm run verify`: 538 baseline tests retained apart from the expectations that encoded
+      the superseded geometry, **586 pass / 0 fail**, bundle fresh.
+- [x] Docs updated: `METRICS_SPEC.md` §8.2/§8.2.1/§8.2.2/§8.3/§8.5/§9, `ARCHITECTURE.md` §6, `UI_SPEC.md` §6,
+      `TEST_PLAN.md` §1, and Known Limitation #14 replaced by its root cause, counterexample, corrected pipeline and
+      verification.
+- [x] Push to `origin/main` without rewriting `b7bda66` or any earlier commit.
+
+Acceptance gate: the phase-7 curve work is complete and ready for external audit. Phase 8 is deliberately **not**
+started.
 
 ## Phase 8 — Release readiness
 

@@ -200,19 +200,34 @@ export const COMPLETED_CSS = `
   background: var(--dsw-alias-label-secondary, #7f8287);
 }
 .dsh-tpm-peak-dot[data-leader="output"] { background: var(--dsh-tpm-accent); }
-/* A one-vertex run is a measurement, not a line: it is drawn as a point marker.
-   Same size as the peak dot so the two coincide exactly when the singleton *is*
-   the peak, and coloured by its own series rather than by the leader. */
+/*
+   Two marker levels, because one size for both made a chart of many single-measurement
+   stretches read as a field of peaks. 0.24 x font is roughly a quarter of the plot
+   height and about half the previous 0.42, which was the size the peak uses and is
+   the size that made dozens of ordinary beads dominate the trace; the opacity is kept
+   below 1 for the same reason. The labels, the legend and the printed peak are
+   unchanged, so nothing a reader relies on became smaller — only the decoration.
+   Both tones resolve through DSH aliases, so light and dark themes follow the host
+   without a second rule. */
 .dsh-tpm-singleton-dot {
   position: absolute;
-  width: calc(var(--dsh-tpm-font) * .42);
-  height: calc(var(--dsh-tpm-font) * .42);
+  width: calc(var(--dsh-tpm-font) * .24);
+  height: calc(var(--dsh-tpm-font) * .24);
   margin: 0;
   border-radius: 50%;
+  opacity: .75;
   transform: translate(-50%, -50%);
   background: var(--dsw-alias-label-tertiary, #a2a4a6);
 }
 .dsh-tpm-singleton-dot[data-series="output"] { background: var(--dsh-tpm-accent); }
+/* A singleton that *is* the published peak keeps the peak's own size: the peak dot
+   is drawn at the same coordinate, and a smaller circle would leave a visible ring
+   of the larger one behind it. */
+.dsh-tpm-singleton-dot[data-peak="true"] {
+  width: calc(var(--dsh-tpm-font) * .42);
+  height: calc(var(--dsh-tpm-font) * .42);
+  opacity: 1;
+}
 .dsh-tpm-axis-max {
   flex: 0 0 auto;
   align-self: flex-start;

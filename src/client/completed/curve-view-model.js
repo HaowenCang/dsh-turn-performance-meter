@@ -15,12 +15,14 @@
  * matters because those six operations are the statistics; a component that
  * recomputed any of them would be a second, silently divergent definition of TPS.
  *
- * **One series, several paths.** A phase may be present in more than one
- * *episode*: `Reasoning A -> Output A -> Tool -> Reasoning B` puts two reasoning
- * runs on one curve, and `source.curve.series[].runs` carries them separately. This
- * module turns each run into its own `M...L...` path and never joins two runs,
- * because the join is a fabricated straight line through a stretch where the phase
- * produced nothing. The reader sees a gap, which is what happened.
+ * **One measurement per attempt, several tones.** Since Phase 7C the curve is one
+ * attempt-local trailing-one-second **total** throughput trace per model attempt,
+ * and a phase is a *colour* of that one measurement rather than a rate of its own:
+ * `source.curve.attempts[].runs` carries the phase-coloured subruns of each trace.
+ * Two subruns that meet at a phase transition share their boundary vertex, so this
+ * module emits one `M...L...` path per subrun and never joins two *attempts* —
+ * the join between two calls is a fabricated straight line through a tool wait,
+ * which is a stretch where nothing was generated.
  *
  * Geometry is expressed in a fixed logical viewBox (`0 0 100 48`) that the SVG
  * stretches to its container with `preserveAspectRatio="none"` and
@@ -259,6 +261,35 @@ function runsOf(curve, key, legacy) {
 }
 
 /**
+ * Every phase-coloured subrun of one curve, in draw order.
+ *
+ * The per-attempt structure is the geometry; the per-phase `series` is a view of it
+ * built for the legend. Reading the geometry from the attempt traces is what keeps
+ * "one measurement per attempt, colour-segmented" true no matter how a caller
+ * chooses to group the runs.
+ */
+function runsOfAll(curve) {
+  const attempts = Array.isArray(curve?.attempts) ? curve.attempts : null
+  if (attempts === null) return null
+  const runs = []
+  for (const attempt of attempts) {
+    for (const run of Array.isArray(attempt?.runs) ? attempt.runs : []) runs.push(run)
+  }
+  return runs
+}
+
+/**
+ * Whether the curve's magnitudes were anchored to provider usage.
+ *
+ * It is carried onto the view model rather than printed, because the chart shows it
+ * through the peak's `≈` and the panel's quality axes; a caller that wants to
+ * annotate "this curve is calibrated" reads it here instead of re-deriving it.
+ */
+function calibratedOf(curve) {
+  return curve?.source?.calibrated === true
+}
+
+/**
  * Build the curve panel's view model.
  *
  * @param {object|null|undefined} settled the settled turn snapshot
@@ -273,14 +304,29 @@ export function curveViewModel(settled) {
   /**
    * The axis is scaled by the **full-series** peak, never by the drawn points:
    * downsampling is a drawing budget and may not rescale the chart either.
-   * `downsampleSeries` guarantees the peak-bearing point survives, so the drawn
+   * `downsampleRun` guarantees the peak-bearing point survives, so the drawn
    * curve reaches the top of the axis rather than falling short of it.
    */
   const peakValue = Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : 0
   const axisMax = niceCeiling(peakValue)
 
-  const reasoning = buildSeries(runsOf(curve, 'reasoning'), durationMs, axisMax)
-  const output = buildSeries(runsOf(curve, 'output'), durationMs, axisMax)
+  /**
+   * The runs come from the attempt traces when the curve carries them, because those
+   * are the geometry: one total trace per model attempt, cut into phase-coloured
+   * subruns. The per-phase `series` is only a view — and on a pre-Phase-7C snapshot,
+   * which has no `attempts`, it is the whole of the evidence.
+   */
+  const attemptRuns = runsOfAll(curve)
+  const reasoning = buildSeries({
+    key: 'reasoning',
+    tone: 'neutral',
+    runs: attemptRuns === null ? runsOf(curve, 'reasoning').runs : attemptRuns.filter(run => run.phase === 'reasoning'),
+  }, durationMs, axisMax)
+  const output = buildSeries({
+    key: 'output',
+    tone: 'accent',
+    runs: attemptRuns === null ? runsOf(curve, 'output').runs : attemptRuns.filter(run => run.phase === 'output'),
+  }, durationMs, axisMax)
 
   /**
    * The series holding the global peak, so the marker sits on it. A tie resolves to
@@ -291,6 +337,50 @@ export function curveViewModel(settled) {
   const leader = (output.peak?.tps ?? -1) > (reasoning.peak?.tps ?? -1) ? 'output' : 'reasoning'
   const leaderSeries = leader === 'output' ? output : reasoning
   /**
+   * One marker per attempted transition, not one per run.
+   *
+   * A phase transition whose shared seam is the **only** vertex either side draws
+   * produces two singleton runs holding the same vertex, and emitting one marker per
+   * run would stack two dots on one measurement and charge it twice against the render
+   * budget. Since the seam is shared, both subpaths place the same vertex at the same
+   * coordinate, so a measurement is identified by the attempt that produced it plus the
+   * instant it sits at — not by position alone, because two zero-width attempts can
+   * legitimately share a coordinate, and `test/completed-interaction.test.js` holds that
+   * case.
+   */
+  const singletonByMeasurement = new Map()
+  for (const series of [
+    { key: 'reasoning', tone: 'neutral', built: reasoning },
+    { key: 'output', tone: 'accent', built: output },
+  ]) {
+    for (const marker of series.built.markers) {
+      const key = `${marker.attemptId ?? ''}@${marker.timeMs}`
+      if (singletonByMeasurement.has(key)) continue
+      singletonByMeasurement.set(key, {
+        ...marker,
+        x: round(marker.x),
+        y: round(marker.y),
+        series: series.key,
+        tone: series.tone,
+      })
+    }
+  }
+  const markers = [...singletonByMeasurement.values()]
+  const drawnPoints = reasoning.points + output.points
+  const drawnRuns = reasoning.runs.filter(run => run.present).length
+    + output.runs.filter(run => run.present).length
+  /**
+   * Whether any subpath has positive length. A run of two vertices **at the same
+   * instant** — which a single-delta attempt whose successor owns the coordinate can
+   * produce — is a real run with no segment, so counting runs would call the chart
+   * drawable while nothing is drawn.
+   */
+  const hasSegment = reasoning.runs.concat(output.runs).some(run => (
+    run.present && run.coordinates.length >= 2
+    && run.coordinates[run.coordinates.length - 1].x > run.coordinates[0].x
+  ))
+
+  /**
    * The marker is placed only when the leading series' strongest **drawn** vertex is the
    * measurement the card prints.
    *
@@ -298,7 +388,7 @@ export function curveViewModel(settled) {
    * because a drawing limit may not move a reported statistic. The position, by contrast,
    * can only come from a vertex that survived onto the chart. Those two coincide whenever
    * the peak-bearing run is drawn — `allocateRunBudgets` seats it first, whatever its
-   * length, and `downsampleSeries` keeps its maximum — but they come apart if it is not,
+   * length, and `downsampleRun` keeps its maximum — but they come apart if it is not,
    * and the failure is silent and misleading: the card prints `≈1000` and the dot lands on
    * a 400 tokens/s vertex, one pixel apart, with nothing on screen to distinguish them.
    *
@@ -319,15 +409,25 @@ export function curveViewModel(settled) {
     /**
      * Both series are always listed, in a fixed order, so the legend never
      * changes shape between turns. `present: false` means the phase produced
-     * nothing to draw — an honest "no evidence", not a zero line.
+     * nothing to draw — an honest "no evidence", not a zero line. `present` says
+     * whether the phase has a **drawable segment**, which is what its legend entry
+     * claims; a phase whose only evidence is a single measured instant is marked
+     * `markersOnly` instead, so the two are never conflated.
      */
     series: [
       { key: 'reasoning', tone: 'neutral', ...reasoning },
       { key: 'output', tone: 'accent', ...output },
     ],
     /**
-     * Per-phase episode intervals, carried through for diagnostics and for tests
-     * that assert no drawable path crosses an absent stretch.
+     * Whether the curve's magnitudes were anchored to authoritative provider usage
+     * (`curve.source`). The chart shows this only through the peak's `≈`; a caller
+     * that wants to annotate provenance reads it here rather than re-deriving it.
+     */
+    calibrated: calibratedOf(curve),
+    /**
+     * Per-phase colour segmentation of the same traces, carried through for
+     * diagnostics and for tests that assert no drawable path crosses a stretch where
+     * the model produced nothing.
      */
     phaseRuns: curve.phaseRuns ?? { reasoning: [], output: [] },
     /**
@@ -351,22 +451,29 @@ export function curveViewModel(settled) {
      * vertex contributes zero: it is drawn as a point marker, not as a vertex of a line,
      * and counting it here would make this number mean two different things.
      */
-    drawnPoints: reasoning.points + output.points,
+    drawnPoints,
     /** Rendered subpath count: one per drawable run, never one per series. */
-    drawnRuns: reasoning.runs.filter(run => run.present).length
-      + output.runs.filter(run => run.present).length,
+    drawnRuns,
     /**
-     * Point markers for one-vertex runs, in a fixed series order.
+     * Point markers for one-vertex runs, one per measured instant.
      *
      * Each carries the tone of its own series, so a reasoning singleton and an output
      * singleton are distinguishable by the same channel the legend already uses. They
      * are markers, not data: the SVG is `aria-hidden` and so are they, and no count on
      * this object includes them — `renderElementPoints` below adds them explicitly.
+     *
+     * `isPeak` says whether this marker **is** the published peak, which is the one
+     * visual distinction the plot makes between two markers: an ordinary singleton is
+     * small and subdued, and only the peak keeps the stronger marker. A chart of forty
+     * ordinary beads must not read as forty peaks.
      */
-    markers: [
-      ...reasoning.markers.map(marker => ({ ...marker, series: 'reasoning', tone: 'neutral' })),
-      ...output.markers.map(marker => ({ ...marker, series: 'output', tone: 'accent' })),
-    ].map(marker => ({ ...marker, x: round(marker.x), y: round(marker.y) })),
+    markers: markers.map(marker => (
+      placedPeak !== null
+      && marker.timeMs === placedPeak.timeMs
+      && Math.abs(marker.tps - placedPeak.tps) < 1e-9
+        ? { ...marker, isPeak: true }
+        : { ...marker, isPeak: false }
+    )),
     /**
      * The quantity the chart-wide render budget bounds: line vertices **plus** singleton
      * markers, its own named sum.
@@ -375,16 +482,16 @@ export function curveViewModel(settled) {
      * and naming the first `drawnPoints` invited a bound assertion that measured the chart
      * while leaving every marker outside it. The two remain separate because they are
      * different things — a vertex of a polyline and a standalone dot — but no caller has to
-     * add them up by hand to check the bound.
+     * add them up by hand to check the bound. A phase-transition seam is counted in
+     * `drawnPoints` twice, because both subpaths do emit it.
      */
-    renderElementPoints: reasoning.points + output.points + reasoning.markers.length + output.markers.length,
+    renderElementPoints: drawnPoints + markers.length,
     /**
-     * True when the only evidence a phase has is single-vertex runs. The renderer
+     * True when the chart's only evidence is single-vertex runs. The renderer
      * needs it because `drawnRuns === 0` with `markers.length > 0` is a chart that has
      * something to show and no line to show it with — the case that must not render
      * the "no curve" placeholder.
      */
-    markersOnly: reasoning.runs.every(run => !run.present) && output.runs.every(run => !run.present)
-      && (reasoning.markers.length + output.markers.length) > 0,
+    markersOnly: !hasSegment && markers.length > 0,
   }
 }

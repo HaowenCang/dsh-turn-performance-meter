@@ -58,13 +58,22 @@ export {
   DEFAULT_MAX_POINTS,
   DEFAULT_SAMPLE_EVERY_MS,
   DEFAULT_WINDOW_MS,
+  MAX_RENDER_POINTS_TOTAL,
+  MIN_MAX_POINTS,
+  allocateRunBudgets,
+  attemptTrace,
+  attemptTraces,
+  downsampleRun,
   downsampleSeries,
+  minimumRunCost,
   peakTps,
-  perAttemptSeries,
   phaseRuns,
   phaseSpans,
-  rollingTpsSeries,
+  totalRollingTpsSeries,
+  visualRunsOf,
 } from './curve.js'
+
+export { curveSource } from './curve-source.js'
 
 export { aggregateTurn, isContributingAttempt, normalizeUsage, reduceAttempt } from './aggregate-turn.js'
 

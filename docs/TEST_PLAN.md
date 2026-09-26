@@ -192,6 +192,48 @@ Phase 5 additions (all in `npm run verify`; the browser A/B and the screenshot s
   curve, the `:focus-visible` ring replacing rather than removing the outline, reduced motion, no timer in the card at
   any mode, and both locales.
 
+Phase 7C additions (all in `npm run verify`). The two defect files were written first and **observed failing** against
+`b7bda66` before any production change, so both counterexamples are demonstrated rather than asserted:
+
+- `test/curve-calibration.test.js` — the completed curve's magnitude system. The failing example is the minimal
+  instance: one attempt, two 400-character deltas half a window apart, settled with `outputTokens: 900`. Raw shape sum
+  200, calibrated samples `[450, 450]`, and `peakTps` was **200** where the calibrated answer is **900**. It then
+  freezes the matrix: the exact split calibrating both phases, one common scale when `reasoningTokens` is absent, no
+  usage leaving the estimated shape and inventing nothing, per-attempt independent scales, tool-call arguments inside
+  the calibrated total, the calibrated sample sum equalling `outputTokens`, a vertex never calling itself exact, and
+  the Phase 7B reproduction printed as a diagnostic table (**raw shape peak 100, calibrated peak 365.2, provider total
+  365**, with the rejected per-phase peak shown to sit below the turn's own mean);
+- `test/curve-source.test.js` — the join. Positional and verified on `attemptId`/`step`/sample count; a disagreement in
+  any of them degrades the **whole** join to the raw shape and reports every symptom rather than the first; the raw
+  evidence is asserted unmutated by identity and by value; an empty attempt is carried through so the source's attempt
+  list matches the turn's; and the source re-derives exactly the numbers `aggregateTurn` published;
+- `test/curve-total-rolling.test.js` — the cross-phase counterexample: one reasoning delta at 0 and one output delta at
+  500 against a 1000-token provider total. The rejected per-phase pipeline peaks at 500; the corrected total window
+  reads **1000** at that instant and so does the published peak. It then asserts the completed trace vertex for vertex
+  against `SlidingWindowMeter`'s rule restated independently, the `activePhase` label rule, and the shared seam;
+- `test/curve-trace-matrix.test.js` — the fourteen-scenario acceptance matrix: reasoning-only, output-only,
+  reasoning→output within and beyond one window, reasoning→output→reasoning, a long internal stall decaying to zero and
+  resuming, a tool gap at zero width, a next attempt and a retry each resetting the window as a subpath break, a phase
+  boundary as a colour change rather than a statistical reset or an x gap, the global peak as the maximum over every
+  attempt-local total vertex, and the published provenance shape;
+- `test/curve-long-agent-visual.test.js` — the visual regression, on a 24-call turn with 23 tools and a four-second
+  stall inside every fourth call. It asserts two subpaths per call (`reasoning` then tool-call arguments) sharing their
+  seam, a stall adding no subpath, zero singleton markers on the corrected chart, the chart staying inside
+  `MAX_RENDER_POINTS_TOTAL`, the peak surviving on a drawn run, and — computed from the same fixture — the rejected
+  episode-based rule needing strictly more subpaths and producing 18 markers for the same evidence;
+- `test/curve-reference-window.test.js` — rewritten around the total window. The reference is now the literal
+  definition over **all** phases, with the body ladder plus the one-step-shifted tail ladder and no episode partition;
+  the comparison is vertex by vertex in both directions (nothing invented, nothing missing), plus the structural
+  claims, plus the independent brute-force peak over every attempt;
+- `test/curve.test.js` — the pure sampler and reducer: the total window, the label-not-filter rule, a deterministic
+  tie-break when a reasoning and a text delta share an instant, the seam invariants of `visualRunsOf` (including a
+  gapped transition), `downsampleRun`'s seam protection at every budget, and `attemptTrace`'s two clocks;
+- `test/curve-regression-matrix.test.js`, `test/curve-attempt-boundary.test.js`, `test/curve-episode-opening.test.js`,
+  `test/curve-render-budget.test.js`, `test/curve-peak-priority.test.js`, `test/telemetry-store.test.js`,
+  `test/runtime-robustness.test.js`, `test/completed-tree.test.js` — the existing suites, corrected where they encoded
+  the superseded geometry. Every changed expectation carries its old contract in a comment beside it; the reasons are
+  collected in `docs/IMPLEMENTATION_LOG.md` §"Phase 7C".
+
 ## 2. Required metric fixtures
 
 ### A. Single call, text only

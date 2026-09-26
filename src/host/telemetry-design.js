@@ -18,16 +18,18 @@
 import { LiveMeter, LivePhase } from '../core/live-metrics.js'
 import { sampleFromChunk, heuristicTokenWeight } from '../core/token-allocation.js'
 import { compressAttempts } from '../core/time-axis.js'
+import { curveSource } from '../core/curve-source.js'
 import {
   DEFAULT_SAMPLE_EVERY_MS as CURVE_SAMPLE_EVERY_MS,
   DEFAULT_WINDOW_MS as CURVE_WINDOW_MS,
   MAX_RENDER_POINTS_TOTAL,
   MIN_MAX_POINTS,
   allocateRunBudgets,
-  downsampleSeries,
+  attemptTraces,
+  downsampleRun,
   peakTps,
-  perAttemptSeries,
   phaseRuns,
+  visualRunsOf,
 } from '../core/curve.js'
 import { aggregateTurn } from '../core/aggregate-turn.js'
 import { QualityLevel, clampToAxis, QUALITY_AXIS } from '../core/quality-model.js'
@@ -333,36 +335,73 @@ export class TurnTelemetryStore {
       timestampsComplete,
     })
 
+    /**
+     * The ephemeral curve input: the stored attempts joined with the calibrated
+     * per-delta allocation `aggregateTurn` has already computed. The raw evidence is
+     * not touched — `record.attempts[].samples` remains the provenance — and no
+     * second calibration algorithm lives here, because a duplicate would be free to
+     * drift from the one the printed token totals use
+     * (`src/core/curve-source.js`).
+     */
+    const source = curveSource(record.attempts, aggregate.attemptBreakdown)
+    const calibratedIds = new Set(
+      source.attempts
+        .filter(attempt => attempt?.anchored === true)
+        .map(attempt => attempt.attemptId ?? null),
+    )
+
     // The curve is built from the same compressed clock the live meter used, so
     // a point read off it means the same thing the pill showed at that instant.
-    const compressed = compressAttempts(record.attempts)
+    const compressed = compressAttempts(source.attempts)
 
     /**
-     * The rolling series is built **per attempt**, then relabelled onto the
-     * compressed coordinate. This ordering is the specification.
+     * The rolling series is one **attempt-local total trace** per model attempt.
+     * This ordering is the specification.
      *
-     * The compressed clock concatenates attempts so a tool gap has no width, but
-     * a trailing one-second window is a property of one model call. Rolling one
-     * window across the concatenated list made the opening vertices of attempt B
-     * count attempt A's trailing tokens — the two numbers are drawn a single pixel
-     * apart and describe different calls, which is precisely the case a reader
-     * cannot detect by looking at the chart. `perAttemptSeries` measures each
-     * attempt on its own clock; `test/curve-attempt-boundary.test.js` carries the
-     * counterexample that the previous implementation fails.
+     * The compressed clock concatenates attempts so a tool gap has no width, but a
+     * trailing one-second window is a property of one model call. Rolling one window
+     * across the concatenated list made the opening vertices of attempt B count
+     * attempt A's trailing tokens — the two numbers are drawn a single pixel apart
+     * and describe different calls, which is precisely the case a reader cannot
+     * detect by looking at the chart. `attemptTraces` measures each attempt on its
+     * own clock; `test/curve-attempt-boundary.test.js` carries the counterexample
+     * that the previous implementation fails.
+     *
+     * Within one attempt the trace is **total**: every generated sample counts,
+     * whatever its phase, which is what `LiveMeter` measures. Reasoning and output
+     * are visual phases of that one measurement, carried on each vertex as
+     * `activePhase`; they are not two rate definitions. The previous revision built
+     * a separate per-phase series for each, so at a reasoning-to-output transition
+     * the live pill showed the sum of both contributions while neither drawn line
+     * did, and `peakTps` took the larger of two partial rates.
      */
-    const series = [
-      { key: 'reasoning', tone: 'neutral', phase: 'reasoning' },
-      { key: 'output', tone: 'accent', phase: 'output' },
-    ].map(({ key, tone, phase }) => {
-      const runs = perAttemptSeries(compressed.segments, compressed.samples, {
-        phase,
-        windowMs: CURVE_WINDOW_MS,
-        sampleEveryMs: CURVE_SAMPLE_EVERY_MS,
-        /** The last attempt may draw its decay as far as the axis it was given. */
-        durationMs: compressed.durationMs,
-      })
-      return { key, tone, phase, runs }
+    const traces = attemptTraces(compressed.segments, compressed.samples, {
+      windowMs: CURVE_WINDOW_MS,
+      sampleEveryMs: CURVE_SAMPLE_EVERY_MS,
+      calibratedAttemptIds: calibratedIds,
     })
+
+    /**
+     * The vertex set of each attempt, as flat index ranges rather than copies. The
+     * allocation below needs the length of every visual run and the renderer needs
+     * its slice; neither needs a duplicated array per run, and a slice keeps the
+     * shared phase-transition vertex the **same object** in both runs that meet on
+     * it, which is what makes the tone change a seam rather than a fabricated
+     * duplicate measurement.
+     */
+    const drawables = []
+    for (const trace of traces) {
+      for (const run of trace.visualRuns) {
+        drawables.push({
+          attemptId: trace.attemptId,
+          phase: run.phase,
+          /** Explicit length, because this run is a range and not its own array. */
+          length: run.pointCount,
+          points: trace.points.slice(run.startIndex, run.endIndex + 1),
+          trace,
+        })
+      }
+    }
 
     /**
      * The chart-wide point budget, allocated **before** any downsampling runs.
@@ -370,62 +409,151 @@ export class TurnTelemetryStore {
      * `downsampleSeries` bounds one run, and one run is not a chart: a turn that
      * alternates reasoning and output a hundred times produced a hundred runs of up
      * to `DEFAULT_MAX_POINTS` vertices each, so the SVG's element count followed the
-     * model's delivery pattern. Both phases are budgeted together because they are
+     * model's delivery pattern. Every phase is budgeted together because they are
      * drawn into one plot area and share one axis.
      *
-     * The allocation is computed over the run lists and then applied per run. The
-     * runs are never flattened, downsampled as one series and cut back apart: the
+     * The allocation is computed over the run list and then applied per run. The
+     * attempts are never flattened, downsampled as one series and cut back apart: the
      * cut points would not fall on run boundaries, and a single bridged polyline
-     * across a stretch where a phase produced nothing is exactly the defect the
-     * per-attempt and per-episode structure exists to prevent.
+     * across a stretch where the model produced nothing is exactly the defect the
+     * per-attempt structure exists to prevent.
      *
-     * `peakTps` below still reads the **full** series, and `downsampleSeries`
+     * `peakTps` below still reads the **full** series, and `downsampleRun`
      * independently guarantees the maximum survives into whatever budget it is
      * given, so the budget can thin the drawing but never move a reported number.
      */
-    const drawables = series.flatMap(entry => entry.runs)
     const allocation = allocateRunBudgets(drawables, MAX_RENDER_POINTS_TOTAL)
     let cursor = 0
-
-    const budgeted = series.map((entry) => {
-      const runs = entry.runs.map((run) => {
-        const allowance = allocation.budgets[cursor] ?? run.points.length
+    const budgetedTraces = traces.map((trace) => {
+      const runs = trace.visualRuns.map((run) => {
+        const allowance = allocation.budgets[cursor] ?? run.pointCount
         const refused = allocation.degraded.includes(cursor)
         cursor += 1
+        const full = trace.points.slice(run.startIndex, run.endIndex + 1)
         /**
-         * Two runs bypass `downsampleSeries` and keep their measured vertices: a
-         * refused run keeps none, and a run of one or two vertices keeps all of them.
-         * The second case matters because `downsampleSeries` refuses a budget below
-         * `MIN_MAX_POINTS` by design — it cannot honour the three anchors — and a run
-         * that already has fewer vertices than that is at full resolution. Such a run
-         * is a **singleton measurement**, drawn as a point marker rather than as a
-         * line (`src/client/completed/curve-view-model.js`), which is why carrying it
-         * through is not the same as inventing a second vertex to draw a segment with.
+         * Two cases bypass downsampling and keep their measured vertices: a refused
+         * run keeps none, and a run of one or two vertices is already at full
+         * resolution. The second matters because `downsampleSeries` refuses a budget
+         * below `MIN_MAX_POINTS` by design — it cannot honour the three anchors — and
+         * a run that already has fewer vertices than that has nothing to thin. Such a
+         * run is a **singleton measurement**, drawn as a point marker rather than as
+         * a line (`src/client/completed/curve-view-model.js`), which is why carrying
+         * it through is not the same as inventing a second vertex to draw a segment
+         * with.
+         *
+         * `downsampleRun` is what protects a phase transition: adjacent runs share
+         * their boundary vertex, and thinning each run independently would be free to
+         * drop exactly that shared vertex, reopening as a blank horizontal gap a tone
+         * change that is not a stall.
          */
-        const measured = run.points.length < MIN_MAX_POINTS
+        const measured = full.length < MIN_MAX_POINTS
         const points = refused
           ? []
-          : (measured ? run.points.slice() : downsampleSeries(run.points, allowance))
+          /**
+           * A run that fits keeps the trace's **own** vertex objects rather than copies. Two
+           * reasons, and the second is the load-bearing one: the renderer only ever reads
+           * them, so copying buys nothing; and the runs of one attempt meet on a shared
+           * boundary vertex, so a copy per run would quietly turn one measurement drawn twice
+           * into two objects that merely happen to agree. Identity is what lets a test — and a
+           * future diagnostic — say "these two subpaths meet *here*" rather than "they end and
+           * start at the same coordinate".
+           */
+          : (measured ? full : downsampleRun(full, allowance))
         return {
-          ...run,
+          attemptId: trace.attemptId,
+          phase: run.phase,
+          startIndex: run.startIndex,
+          endIndex: run.endIndex,
+          startMs: points.length > 0 ? points[0].timeMs : trace.startMs,
+          endMs: points.length > 0 ? points[points.length - 1].timeMs : trace.startMs,
+          pointCount: run.pointCount,
           points,
-          peak: peakTps(run.points),
+          peak: peakTps(points),
           degraded: refused,
           /**
            * `false` when the run is drawn under a reduced allowance. A caller that
            * wants to annotate a thinned run can read it; nothing renders it.
            */
-          fullResolution: !refused && allowance >= run.points.length,
+          fullResolution: !refused && allowance >= run.pointCount,
         }
       })
       return {
-        key: entry.key,
-        tone: entry.tone,
-        phase: entry.phase,
-        present: runs.some(run => run.points.length >= 2),
+        attemptId: trace.attemptId,
+        startMs: trace.startMs,
+        endMs: trace.endMs,
+        localEndMs: trace.localEndMs,
+        durationMs: trace.durationMs,
+        sampleCount: trace.sampleCount,
+        /**
+         * The sum this attempt's curve samples carry. With calibration it equals the
+         * attempt's authoritative `outputTokens`, which is what makes the printed
+         * generated-token total and the curve the same magnitude system.
+         */
+        tokens: trace.tokens,
+        calibratedTokens: trace.calibratedTokens,
+        calibrated: trace.calibrated,
+        /**
+         * The **unbudgeted** total trace, so a test or a diagnostic can read the
+         * series the peak was measured on. The renderer must use `runs`.
+         */
+        points: trace.points,
+        /**
+         * The attempt's own curve-source samples, on its attempt-local clock, exactly
+         * as the rolling window read them. They are the bridge between a printed token
+         * total and a drawn vertex, which is why they are published rather than left
+         * to be reassembled from the runs.
+         */
+        samples: trace.samples,
+        /** The attempt's budgeted phase-coloured subruns, in ascending time order. */
         runs,
       }
     })
+
+    /**
+     * The per-phase view of the same runs, in the fixed legend order.
+     *
+     * It is a **view**, not a second measurement: every entry is one of the budgeted
+     * visual runs of an attempt trace, so the legend, the peak and the drawn geometry
+     * can never describe different series. A phase with no run is absent rather than
+     * flat, because "never reasoned here" and "reasoning throughput fell to zero" are
+     * different facts.
+     */
+    const series = ['reasoning', 'output'].map((key) => {
+      const runs = []
+      for (const attempt of budgetedTraces) {
+        for (const run of attempt.runs) if (run.phase === key) runs.push(run)
+      }
+      return {
+        key,
+        tone: key === 'output' ? 'accent' : 'neutral',
+        phase: key,
+        present: runs.some(run => run.points.length >= 2),
+        runs,
+        peak: runs.reduce((highest, run) => Math.max(highest, run.peak), 0),
+      }
+    })
+
+    /**
+     * The same allocation, counted the way the chart is drawn. `lineVertices` is the
+     * number of path vertices the SVG will receive — runs of two or more points — and
+     * `markers` is the number of one-vertex runs, each of which becomes a point marker
+     * rather than a vertex of a line. Their sum is what `MAX_RENDER_POINTS_TOTAL`
+     * bounds; see `renderBudget` below for why the two are never published as one
+     * number called `drawnPoints`.
+     *
+     * A phase-transition vertex is charged **once**, to both of the runs that share it,
+     * because it is drawn as the endpoint of both subpaths. That is why the sum below
+     * is the honest count of emitted vertices and why the seam can never push the
+     * chart past its own bound.
+     */
+    let lineVertices = 0
+    let markers = 0
+    for (const entry of series) {
+      for (const run of entry.runs) {
+        if (run.points.length >= 2) lineVertices += run.points.length
+        else if (run.points.length === 1) markers += 1
+      }
+    }
 
     /**
      * Runs the allocator had to refuse outright, because even the three anchors that
@@ -437,41 +565,16 @@ export class TurnTelemetryStore {
     const degradedRuns = allocation.degraded.length
 
     /**
-     * The same allocation, counted the way the chart is drawn. `lineVertices` is the
-     * number of path vertices the SVG will receive — runs of two or more points — and
-     * `markers` is the number of one-vertex runs, each of which becomes a point marker
-     * rather than a vertex of a line. Their sum is what `MAX_RENDER_POINTS_TOTAL`
-     * bounds; see `renderBudget` below for why the two are never published as one
-     * number called `drawnPoints`.
-     */
-    let lineVertices = 0
-    let markers = 0
-    for (const entry of budgeted) {
-      for (const run of entry.runs) {
-        if (run.points.length >= 2) lineVertices += run.points.length
-        else if (run.points.length === 1) markers += 1
-      }
-    }
-
-    /**
-     * `peakTps` is measured on the **full** series, before downsampling. The
-     * order of the two expressions in `curve` below is the specification, not an
-     * accident: the rendered point count is a drawing budget, and a drawing
-     * budget must never move a reported statistic. `downsampleSeries`
-     * independently guarantees that the point bearing this maximum survives into
-     * the rendered series, so the drawn curve and the printed peak agree.
+     * `peakTps` is measured on the **full** series, before downsampling. The order of
+     * the two expressions in `curve` below is the specification, not an accident: the
+     * rendered point count is a drawing budget, and a drawing budget must never move a
+     * reported statistic. `downsampleRun` independently guarantees that the point
+     * bearing this maximum survives into the rendered series, so the drawn curve and
+     * the printed peak agree.
      *
-     * The peak is the maximum over every per-attempt series. It is never a sum
-     * and never an average across attempts: the turn's peak rate is the fastest
-     * any single call ran, not a quantity assembled from two calls.
-     *
-     * `phaseRuns` records, per phase, the intervals over which that phase has
-     * actual evidence: from each episode's first token-producing sample to its
-     * last one plus the rolling window, clamped to its own attempt. Outside those
-     * intervals the series reads zero because the phase **is not producing**, not
-     * because its throughput collapsed, and a renderer must not draw the two the
-     * same way. A turn with two reasoning episodes gets two runs, so no drawable
-     * path is ever asked to bridge an output-only stretch.
+     * The peak is the maximum over every attempt's total trace. It is never a sum and
+     * never an average across attempts: the turn's peak rate is the fastest any single
+     * call ran, not a quantity assembled from two calls.
      *
      * `renderBudget` publishes the allocation itself, so a test or a diagnostic can
      * assert the chart-wide bound without re-deriving it from the point counts.
@@ -482,38 +585,57 @@ export class TurnTelemetryStore {
       curve: {
         durationMs: compressed.durationMs,
         segments: compressed.segments,
-        series: budgeted,
-        phaseRuns: phaseRuns(compressed.samples, compressed.segments, CURVE_WINDOW_MS, compressed.durationMs),
-        peakTps: peakTps(...series.flatMap(entry => entry.runs.map(run => run.points))),
         /**
-         * Flat concatenations of the per-attempt series, retained for callers that
-         * want one array of vertices. They carry `attemptId` on every point; a
-         * renderer must segment on it rather than joining the array into one path.
-         * They are the **budgeted** series, so a caller cannot accidentally render
-         * an unbounded list through this compatibility path.
+         * The curve's own magnitude provenance. `aligned: false` means the join
+         * between the stored attempts and their calibrated reductions could not be
+         * trusted, and the whole curve fell back to the raw shape weight rather than
+         * attaching one attempt's calibration to another
+         * (`src/core/curve-source.js`).
          */
-        reasoning: budgeted[0].runs.flatMap(run => run.points),
-        output: budgeted[1].runs.flatMap(run => run.points),
+        source: {
+          aligned: source.aligned,
+          calibrated: source.calibratedForCurve,
+          contributingAttemptCount: source.contributingCount,
+          calibratedAttemptCount: source.calibratedCount,
+          rawFallbackAttemptIds: source.rawFallbackAttemptIds,
+          issues: source.issues,
+        },
+        /** The rendered geometry: one trace per attempt, split into phase-coloured runs. */
+        attempts: budgetedTraces,
+        series,
         /**
-         * The chart-wide rendering budget, and what became of it. `allocated` is at
-         * or below `total`, and `degradedRuns` counts the runs refused outright when
-         * the anchors did not fit — the documented degradation, published rather
-         * than silent.
+         * Per-phase colour segmentation of the same traces, for diagnostics and for
+         * tests that ask where a phase has evidence at all. It is derived from the
+         * attempt traces rather than measured separately.
+         */
+        phaseRuns: phaseRuns(traces),
+        peakTps: peakTps(...traces.map(trace => trace.points)),
+        /**
+         * Flat concatenations of the budgeted runs, retained for callers that want one
+         * array of vertices. They carry `attemptId` on every point; a renderer must
+         * segment on it rather than joining the array into one path.
+         */
+        reasoning: series[0].runs.flatMap(run => run.points),
+        output: series[1].runs.flatMap(run => run.points),
+        /**
+         * The chart-wide rendering budget, and what became of it. `allocated` is at or
+         * below `total`, and `degradedRuns` counts the runs refused outright when the
+         * anchors did not fit — the documented degradation, published rather than
+         * silent.
          *
          * `lineVertices` and `markers` split the same allocation the way the chart is
-         * actually built: a run of two or more vertices becomes a path vertex, and a
-         * run of one becomes a point marker
+         * actually built: a run of two or more vertices becomes a path vertex, and a run
+         * of one becomes a point marker
          * (`src/client/completed/curve-view-model.js`). `elementPoints` is their sum,
          * and it — not `drawnPoints` alone — is the quantity `MAX_RENDER_POINTS_TOTAL`
-         * bounds, because a marker is an SVG-adjacent element just as a vertex is.
-         * Publishing the two separately keeps the bound measurable without making
-         * either count mean two things at once.
+         * bounds, because a marker is an SVG-adjacent element just as a vertex is, and
+         * a phase-transition vertex is emitted by both subpaths that share it.
          *
-         * `peakRun` is the flat index of the run carrying the chart maximum in
-         * `series.flatMap(entry => entry.runs)`, or `-1` when no run holds a finite
-         * rate. `peakRetained` is false only when that run could not be seated at all,
-         * which at a budget of 512 cannot happen; a caller that reads it must not
-         * present a refused peak as a drawn one.
+         * `peakRun` is the flat index of the run carrying the chart maximum in the
+         * allocation's own run order, or `-1` when no run holds a finite rate.
+         * `peakRetained` is false only when that run could not be seated at all, which
+         * at a budget of 512 cannot happen; a caller that reads it must not present a
+         * refused peak as a drawn one.
          */
         renderBudget: {
           total: allocation.total,
@@ -528,8 +650,8 @@ export class TurnTelemetryStore {
         },
         /**
          * Every budgeted vertex, summed over both phases and every run. This is the
-         * allocation's own total, so it counts a one-vertex run as the single vertex it
-         * holds — which is what the allocator charged for it.
+         * allocation's own accounting, so it counts a one-vertex run as the single
+         * vertex it holds — which is what the allocator charged for it.
          *
          * It is therefore **not** the same quantity as `curveViewModel.drawnPoints`,
          * which counts path vertices only and reports markers separately. The two names
@@ -538,15 +660,15 @@ export class TurnTelemetryStore {
          * on top. `renderBudget.elementPoints` is the sum that is actually bounded;
          * this field remains the allocator's accounting.
          */
-        drawnPoints: budgeted.reduce(
+        drawnPoints: series.reduce(
           (sum, entry) => sum + entry.runs.reduce((inner, run) => inner + run.points.length, 0),
           0,
         ),
         /**
-         * Curve quality follows the **temporal shape** axis, not the token axis.
-         * A curve is a shape claim, so an exactly known token total with
-         * incomplete timestamps is an estimated shape, and `usageComplete` alone
-         * cannot express that. See `curveQuality` below.
+         * Curve quality follows the **temporal shape** axis, not the token axis. A
+         * curve is a shape claim, so an exactly known token total with incomplete
+         * timestamps is an estimated shape, and `usageComplete` alone cannot express
+         * that. See `curveQuality` below.
          */
         quality: curveQuality(aggregate),
         qualityAxes: {

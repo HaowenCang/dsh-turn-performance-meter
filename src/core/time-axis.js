@@ -101,7 +101,7 @@ export function compressAttempts(attempts) {
    * the axis end is indistinguishable from one followed by another call, and the
    * final attempt would lose the window decay that shows its last tokens expiring.
    *
-   * `perAttemptSeries` reads both. An attempt that ends where another begins — the
+   * `attemptTrace` reads both. An attempt that ends where another begins — the
    * common tool-separated case, and the degenerate case where both share a
    * coordinate — therefore draws no tail, which is correct: the next call's
    * vertices own those coordinates. The final attempt alone is free to draw its

@@ -47,32 +47,47 @@ function chunkOf(kind = 'output') {
 }
 
 /**
- * Drive a turn whose phase alternates on a fixed cadence, producing one episode per stretch.
+ * Drive a turn with many phase-coloured runs.
  *
- * `stretches` is the number of phase stretches; each is `spanMs` wide and separated from the
- * next by `gapMs`, so a gap longer than one window makes every stretch its own episode and
- * therefore its own run.
+ * Since Phase 7C the unit of drawing is the **attempt** (cut into phase stretches), not
+ * the evidence episode: a phase that falls silent inside one call no longer splits into
+ * several runs. A many-run chart is therefore a many-**call** chart, which is also the
+ * shape the budget exists for — a long agent turn of dozens of model calls with a tool
+ * between each.
+ *
+ * `stretches` is the number of model attempts; each spans `spanMs` of deltas on the 250 ms
+ * grid and is separated from the next by `gapMs`, which costs no axis width but does reset
+ * the window.
  */
 function driveAlternating({ stretches, spanMs = 2000, gapMs = 2000, kind = 'output', endPaddingMs = 2000 }) {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
-  const attempt = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
-  let at = 0
+  let wallMs = 0
   let last = 0
   for (let stretch = 0; stretch < stretches; stretch += 1) {
+    const attempt = store.beginAttempt(record, {
+      attemptId: `a${stretch}`,
+      step: stretch + 1,
+      startedAtMs: wallMs,
+    })
     for (let offset = 0; offset < spanMs; offset += STEP_MS) {
-      const timeMs = at + offset
+      const timeMs = wallMs + offset
       store.acceptChunk(record, attempt, { timeMs, chunk: chunkOf(kind) })
       last = timeMs
     }
-    at += spanMs + gapMs
+    store.settleAttempt(attempt, {
+      settledAtMs: last + 1,
+      settlementKind: 'message',
+      surfaceCommitted: true,
+      attemptOutcome: 'committed',
+      settlementSeq: stretch + 1,
+    })
+    if (stretch < stretches - 1) {
+      store.toolStarted(record, { callId: `t${stretch}`, name: 'pwsh', timeMs: last + 1 })
+      store.toolSettled(record, { callId: `t${stretch}`, timeMs: last + 1 + gapMs, status: 'ok' })
+    }
+    wallMs = last + 1 + gapMs
   }
-  store.settleAttempt(attempt, {
-    settledAtMs: last + 1,
-    settlementKind: 'message',
-    surfaceCommitted: true,
-    attemptOutcome: 'committed',
-  })
   return store.endTurn(record, { timeMs: last + endPaddingMs, status: 'completed' }).curve
 }
 
@@ -104,8 +119,8 @@ test('a chart with many runs never exceeds the total budget', () => {
     const drawable = runsOf(curve).filter(run => run.points.length >= 2)
 
     assert.ok(stretches >= 10)
-    assert.ok(drawable.length >= stretches - 2,
-      `${stretches} stretches produced only ${drawable.length} drawable runs`)
+    assert.equal(drawable.length, stretches,
+      `${stretches} model calls must produce ${stretches} drawable runs, not ${drawable.length}`)
     assert.ok(drawn <= MAX_RENDER_POINTS_TOTAL,
       `${stretches} runs drew ${drawn} vertices against a budget of ${MAX_RENDER_POINTS_TOTAL}`)
     assert.equal(curve.drawnPoints, drawn, 'the published count is the sum over both phases and every run')
@@ -159,36 +174,50 @@ test('the global peak survives total budgeting however many runs there are', () 
 
 test('a peak confined to one run among many is retained', () => {
   /**
-   * A deliberately uneven turn: many ordinary episodes plus one loud one. The budget must thin
-   * the ordinary runs rather than lose the spike, which is the case a naive uniform stride over
-   * a flattened series drops.
+   * A deliberately uneven turn: many ordinary calls plus one loud one. The budget must thin
+   * the ordinary runs rather than lose the spike, which is the case a naive uniform stride
+   * over a flattened series drops.
+   *
+   * Each block is its own model attempt, because since Phase 7C the unit of drawing is the
+   * attempt — a tool-separated sequence of short calls is exactly the shape that produces a
+   * many-run chart.
    */
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
-  const attempt = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
   const at = { value: 0 }
-  const emit = (kind, characters, count, stepMs = STEP_MS) => {
+  const emit = (attempt, kind, characters, count) => {
     for (let index = 0; index < count; index += 1) {
       store.acceptChunk(record, attempt, {
         timeMs: at.value,
         chunk: { type: kind === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: 'x'.repeat(characters) },
       })
-      at.value += stepMs
+      at.value += STEP_MS
     }
   }
-  for (let episode = 0; episode < 60; episode += 1) {
-    emit('output', 400, 3)
+  for (let call = 0; call < 60; call += 1) {
+    const attempt = store.beginAttempt(record, { attemptId: `a${call}`, step: call + 1, startedAtMs: at.value })
+    emit(attempt, 'output', 400, 3)
+    store.settleAttempt(attempt, {
+      settledAtMs: at.value,
+      settlementKind: 'message',
+      surfaceCommitted: true,
+      attemptOutcome: 'committed',
+      settlementSeq: call + 1,
+    })
+    /** A tool between calls: no axis width, but a hard window reset. */
     at.value += 3000
   }
+  const spike = store.beginAttempt(record, { attemptId: 'spike', step: 61, startedAtMs: at.value })
   /** The spike: five heavy deltas inside one window. */
-  emit('output', 4000, 5)
-  const last = at.value
-  store.settleAttempt(attempt, {
-    settledAtMs: last + 1,
+  emit(spike, 'output', 4000, 5)
+  store.settleAttempt(spike, {
+    settledAtMs: at.value,
     settlementKind: 'message',
     surfaceCommitted: true,
     attemptOutcome: 'committed',
+    settlementSeq: 61,
   })
+  const last = at.value
   const curve = store.endTurn(record, { timeMs: last + 2000, status: 'completed' }).curve
   const runs = runsOf(curve)
 
@@ -201,6 +230,7 @@ test('a peak confined to one run among many is retained', () => {
   assert.ok(owner !== undefined, 'the run holding the spike is still drawn, at the peak')
   assert.equal(owner.fullResolution, true,
     'and it keeps full resolution: the budget is taken from the ordinary runs instead')
+  assert.equal(owner.attemptId, 'spike', 'and the drawn peak sits on the call that produced it')
 })
 
 test('run order and run boundaries survive total budgeting', () => {
@@ -217,14 +247,33 @@ test('run order and run boundaries survive total budgeting', () => {
   }
 
   /**
-   * No run may span a gap: every run's vertices stay inside its own evidence interval, so a
-   * thinned run cannot acquire a bridging segment. Checked on both phases independently.
+   * No run may leave its own attempt: every vertex stays inside the coordinates that attempt
+   * owns, so a thinned run cannot acquire a bridging segment. Checked on both phases
+   * independently, and against the attempt the run names rather than against a global
+   * interval — two attempts can share a compressed coordinate, and only the attempt
+   * identity can tell them apart.
+   *
+   * The coordinates an attempt owns are its own body plus one window of tail, cut where the
+   * next call begins. The previous expectation compared against `endMs` alone, which is the
+   * attempt's last **delta**: an attempt's own decay legitimately reaches past it, and a test
+   * that forbade that would forbid the tail the chart exists to show.
    */
+  const ownsOf = (trace) => {
+    const segment = curve.segments.find(candidate => candidate.attemptId === trace.attemptId)
+    const limit = segment.hasSuccessor
+      ? segment.nextStartMs
+      : segment.endMs + curve.windowMs
+    return { startMs: trace.startMs, endMs: limit }
+  }
   for (const entry of curve.series) {
     for (const run of entry.runs) {
+      const trace = curve.attempts.find(attempt => attempt.attemptId === run.attemptId)
+      assert.ok(trace !== undefined, `${entry.key}: run ${run.attemptId} names a real attempt`)
+      const owns = ownsOf(trace)
       for (const point of run.points) {
-        assert.ok(point.timeMs >= run.startMs && point.timeMs <= run.endMs,
-          `${entry.key}: vertex ${point.timeMs} escaped its run [${run.startMs}, ${run.endMs}]`)
+        assert.ok(point.timeMs >= owns.startMs && point.timeMs <= owns.endMs + 1e-9,
+          `${entry.key}: vertex ${point.timeMs} escaped what attempt ${run.attemptId} owns `
+          + `[${owns.startMs}, ${owns.endMs}]`)
       }
       for (let index = 1; index < run.points.length; index += 1) {
         assert.ok(run.points[index].timeMs > run.points[index - 1].timeMs,
@@ -233,32 +282,79 @@ test('run order and run boundaries survive total budgeting', () => {
     }
   }
 
-  /** First and last meaningful anchors survive on every run that is drawn at all. */
-  for (const run of runs) {
-    if (run.points.length === 0) continue
-    assert.equal(run.points[0].timeMs,
-      run.points[0].timeMs, 'placeholder')
+  /**
+   * A run is a slice of its attempt's own trace, and the slices of one attempt tile that
+   * trace with a shared vertex at every tone change. Asserted structurally, because it is
+   * the property that makes the colour segmentation a view of the statistics rather than a
+   * second measurement of them.
+   */
+  for (const trace of curve.attempts) {
+    const runs = trace.runs
+    for (let index = 1; index < runs.length; index += 1) {
+      assert.equal(runs[index - 1].points.at(-1).timeMs, runs[index].points[0].timeMs,
+        `${trace.attemptId}: a colour change is not a horizontal gap`)
+    }
+    assert.equal(runs.reduce((sum, run) => sum + run.pointCount, 0),
+      trace.points.length + runs.length - 1,
+      `${trace.attemptId}: the runs charge each shared seam exactly once per subpath`)
   }
 })
 
 test('the first and last samples of each run survive total budgeting', () => {
   const curve = driveAlternating({ stretches: 120 })
-  for (const entry of curve.series) {
-    for (const run of entry.runs) {
+  for (const trace of curve.attempts) {
+    for (const run of trace.runs) {
       if (run.degraded) continue
       assert.ok(run.points.length >= 1)
-      /** `downsampleSeries` guarantees the endpoints; the budget must not defeat it. */
+      /** `downsampleRun` guarantees the endpoints; the budget must not defeat it. */
       assert.equal(run.points[0].timeMs, run.startMs,
-        `${entry.key}: run ${run.startMs} lost its opening vertex`)
-      const unbudgeted = curve.phaseRuns[entry.key].find(candidate => (
-        candidate.attemptId === run.attemptId
-        && candidate.startMs === run.startMs
-        && candidate.endMs === run.endMs
-      ))
-      if (unbudgeted !== undefined) {
-        assert.ok(run.points.at(-1).timeMs <= unbudgeted.endMs,
-          `${entry.key}: run ${run.startMs} drew past its own evidence interval`)
+        `${trace.attemptId}: run ${run.startMs} lost its opening vertex`)
+      assert.ok(run.points.at(-1).timeMs <= trace.points.at(-1).timeMs,
+        `${trace.attemptId}: run ${run.startMs} drew past its own trace`)
+      assert.equal(run.points.at(-1).timeMs, run.endMs,
+        `${trace.attemptId}: and its closing vertex, which is the next tone's opening one`)
+    }
+  }
+})
+
+test('the published budget accounting matches the geometry actually emitted', () => {
+  /**
+   * A consistency check between the snapshot's own accounting and its own geometry, which is
+   * the pair a reader of the chart cannot see. It exists because the two were written
+   * independently once — `lineVertices` counted budgeted runs while `drawnPoints` counted
+   * something else — and because the browser reading of a real 11-call turn showed a chart far
+   * inside the budget while the runs held far fewer vertices than their 250 ms grids would
+   * imply. That reading is expected (a call whose deltas share an instant really does have
+   * almost no width), and this asserts the arithmetic around it rather than the reading.
+   */
+  for (const stretches of [1, 10, 120]) {
+    const curve = driveAlternating({ stretches })
+    const runs = runsOf(curve)
+    const budget = curve.renderBudget
+
+    assert.equal(budget.lineVertices + budget.markers, budget.elementPoints)
+    assert.equal(budget.markers, runs.filter(run => run.points.length === 1).length)
+    assert.equal(budget.lineVertices, runs.filter(run => run.points.length >= 2)
+      .reduce((sum, run) => sum + run.points.length, 0))
+    assert.equal(curve.drawnPoints, runs.reduce((sum, run) => sum + run.points.length, 0))
+    assert.equal(budget.runs, runs.length)
+    /**
+     * The allocator's `allocated` is what it charged, and it never charges a run more than the
+     * vertices that run holds. The emitted geometry is therefore never larger than the
+     * allocation, and the allocation is never larger than the budget.
+     */
+    assert.ok(budget.allocated <= budget.total)
+    assert.ok(budget.elementPoints <= budget.allocated,
+      `${stretches} calls: the chart emits ${budget.elementPoints} elements against an allocation of ${budget.allocated}`)
+    /** A run that was not refused is never published with fewer vertices than it holds. */
+    for (const run of runs) {
+      if (run.degraded) {
+        assert.deepEqual(run.points, [])
+        continue
       }
+      assert.ok(run.points.length > 0)
+      assert.ok(run.points.length <= run.pointCount,
+        `${run.attemptId}: a run drew ${run.points.length} vertices from ${run.pointCount}`)
     }
   }
 })
