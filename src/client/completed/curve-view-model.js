@@ -84,9 +84,24 @@ function round(value) {
 /**
  * Turn one run's vertices into coordinates and a single-subpath `d` string.
  *
- * A run shorter than two vertices is not drawable: one point is a measurement,
- * not a line. It is reported as `present: false` with its coordinates intact, so
- * a caller can still see that the attempt produced something.
+ * A run shorter than two vertices is not drawable **as a line**: one point is a
+ * measurement, not a segment. It is reported as `present: false` with its
+ * coordinates intact, and — since Phase 7 — with `marker` set, so the renderer can
+ * place a point where the measurement actually is.
+ *
+ * ## Why a marker, and why not a second vertex
+ *
+ * A run can legitimately hold one vertex: an attempt that produced a single delta has
+ * zero width, and an episode whose phase falls silent immediately after one delta has
+ * a tail grid with no whole step left inside its bound. That measurement can be the
+ * turn's peak, which meant the card printed a peak the chart could not locate —
+ * `test/completed-tree.test.js` recorded it as a known mismatch and Phase 7 closed it.
+ *
+ * The tempting repair is to duplicate the vertex so a line exists. That would be a
+ * fabrication: two vertices at one instant draw a segment the data does not contain,
+ * and a two-point series would then satisfy `present`, inflating `drawnPoints`,
+ * `drawnRuns` and the legend's presence claim. The marker adds no vertex, carries the
+ * same tone as its series, is `aria-hidden`, and adds nothing to any statistic.
  */
 function buildRun(run, durationMs, axisMax) {
   const coordinates = []
@@ -104,6 +119,7 @@ function buildRun(run, durationMs, axisMax) {
   }
 
   if (coordinates.length < 2) {
+    const single = coordinates.length === 1 ? coordinates[0] : null
     return {
       attemptId: run?.attemptId ?? null,
       startMs: run?.startMs ?? null,
@@ -112,7 +128,19 @@ function buildRun(run, durationMs, axisMax) {
       path: null,
       coordinates,
       points: coordinates.length,
-      peak: coordinates.length === 1 ? coordinates[0] : null,
+      peak: single,
+      /**
+       * A point the chart must draw even though it cannot draw a line to it. `null`
+       * for an empty run, so a caller can distinguish "one measurement" from
+       * "nothing measured" without inspecting `coordinates`.
+       */
+      marker: single,
+      /**
+       * Stated explicitly so the HTML layer does not have to infer it: exactly one
+       * vertex, drawn as a marker. A longer run never carries this flag, and a
+       * refused run (zero vertices) never does either.
+       */
+      singleton: single !== null,
     }
   }
 
@@ -139,6 +167,9 @@ function buildRun(run, durationMs, axisMax) {
     coordinates,
     points: coordinates.length,
     peak,
+    /** A drawable run is never a singleton: it has a real segment. */
+    marker: null,
+    singleton: false,
   }
 }
 
@@ -161,9 +192,22 @@ function buildSeries(entry, durationMs, axisMax) {
     tone: entry?.tone ?? null,
     present: drawable.length > 0,
     runs,
+    /**
+     * One entry per run that holds exactly one vertex. These are drawn as point
+     * markers, so a one-vertex run that carries the turn's peak has a position on
+     * the chart instead of existing only as a printed number. Kept as its own list
+     * rather than folded into `coordinates`, because a marker is not a vertex of a
+     * path and must not be counted as one.
+     */
+    markers: runs.filter(run => run.singleton).map(run => run.marker),
     /** Concatenated vertices of every run, for a caller that wants one array. */
     coordinates: runs.flatMap(run => run.coordinates),
-    points: runs.reduce((sum, run) => sum + run.points, 0),
+    /**
+     * Path vertices only. A singleton run contributes **zero** here rather than one:
+     * this count feeds `drawnPoints`, which is what bounds the SVG, and a marker is a
+     * separate element with its own count.
+     */
+    points: runs.filter(run => run.present).reduce((sum, run) => sum + run.points, 0),
     /** The single strongest vertex across this phase's runs, or `null`. */
     peak,
     /**
@@ -286,5 +330,25 @@ export function curveViewModel(settled) {
     /** Rendered subpath count: one per drawable run, never one per series. */
     drawnRuns: reasoning.runs.filter(run => run.present).length
       + output.runs.filter(run => run.present).length,
+    /**
+     * Point markers for one-vertex runs, in a fixed series order.
+     *
+     * Each carries the tone of its own series, so a reasoning singleton and an output
+     * singleton are distinguishable by the same channel the legend already uses. They
+     * are markers, not data: the SVG is `aria-hidden` and so are they, and no count on
+     * this object includes them.
+     */
+    markers: [
+      ...reasoning.markers.map(marker => ({ ...marker, series: 'reasoning', tone: 'neutral' })),
+      ...output.markers.map(marker => ({ ...marker, series: 'output', tone: 'accent' })),
+    ].map(marker => ({ ...marker, x: round(marker.x), y: round(marker.y) })),
+    /**
+     * True when the only evidence a phase has is single-vertex runs. The renderer
+     * needs it because `drawnRuns === 0` with `markers.length > 0` is a chart that has
+     * something to show and no line to show it with — the case that must not render
+     * the "no curve" placeholder.
+     */
+    markersOnly: reasoning.runs.every(run => !run.present) && output.runs.every(run => !run.present)
+      && (reasoning.markers.length + output.markers.length) > 0,
   }
 }

@@ -27,14 +27,39 @@
  *
  * Native `stats` is untouched: it keeps its own seat and its own id.
  *
- * ## Order
+ * ## Order (changed in Phase 7)
  *
- * `order` is ascending within the list. The seat's shipped occupants are
- * `todo` (0), `goal` (10) and `queue` (20), so `order: 30` places this entry
- * **last** — directly above the composer card, below the native state panels.
- * A negative order would have floated the meter above `todo`/`goal`, i.e. the
- * one position that is *not* adjacent to the composer whenever a plan or a goal
- * bar is on screen.
+ * `order` is ascending within the list, and the shipped occupants of this seat are
+ * `todo` (0), `goal` (10) and `queue` (20). Phase 5 placed this entry at `order: 30`
+ * — last, directly above the composer — on the reasoning that adjacency to the
+ * composer is what the reference layout shows.
+ *
+ * A screenshot of the real interface showed why that is wrong. Those three occupants
+ * are **full-width cards** and the meter is a content-sized pill, so rendering the
+ * narrow pill last put it between a wide card and the composer and left a band of
+ * empty width on both sides of it: the stack read as card, then an orphan, then the
+ * input. The reference ordering is `telemetry -> task state -> input`, and the
+ * measured evidence is in `docs/IMPLEMENTATION_LOG.md` (Phase 7 dock placement).
+ *
+ * `SLOT_ORDER` is therefore **-10**, which is before every currently shipped occupant
+ * and yields:
+ *
+ *     turn-performance-meter   -10
+ *     todo                       0
+ *     goal                      10
+ *     queue                     20
+ *     composer
+ *
+ * This is a `list` slot with ascending order and nothing else: DSH defines no
+ * `alwaysFirst`, `pinTop` or equivalent, so the honest claim is "first among all
+ * currently shipped `conversation.input.dock` occupants", **not** "above every
+ * third-party entry". Any plugin may register a lower finite order. A finite value is
+ * used deliberately; `Number.NEGATIVE_INFINITY` would be an unsupported claim on the
+ * ordering contract and would also break any future DSH sorting that assumes
+ * comparability.
+ *
+ * Native `stats` is untouched: it keeps its own seat (`conversation.composer.dock`,
+ * below the composer) and its own id.
  *
  * Service keys (`slots`, `sessions`, `locale`) are the Cordis service names;
  * the package names they arrive from are declared in `package.json`
@@ -57,8 +82,14 @@ export const inject = ['slots', 'sessions', 'locale']
 /** The seat this plugin occupies, and the id it must never reuse. */
 export const SLOT_NAME = 'conversation.input.dock'
 export const SLOT_ID = 'turn-performance-meter'
-/** Last among the shipped occupants (`todo` 0, `goal` 10, `queue` 20). */
-export const SLOT_ORDER = 30
+/**
+ * First among the shipped occupants (`todo` 0, `goal` 10, `queue` 20), so the stack
+ * reads telemetry, then task state, then the composer.
+ *
+ * The value is finite on purpose. No DSH slot contract defines a top pin, so the
+ * claim is bounded: a third-party entry at a lower order would precede this one.
+ */
+export const SLOT_ORDER = -10
 
 /**
  * Diagnostic switch (default OFF). When the browser local-storage key

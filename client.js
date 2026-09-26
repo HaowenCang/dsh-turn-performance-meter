@@ -353,6 +353,39 @@ class LiveMeter {
   }
 
   /**
+   * Record the turn's start now that it has been observed.
+   *
+   * Two orderings reach this method. A page that attached mid-turn adopted the
+   * open turn with an unknown start, and the turn's own `turn/start` row later
+   * enters the window (a reconnect, or the window sliding back far enough): the
+   * missing instant is then *recovered*, not redefined. Second, the ordinary
+   * case calls it on every durable `turn/start` after `turnStarted`, where a
+   * finite start is already present.
+   *
+   * Both elapsed time and turn TTFT are defined as intervals from the turn's
+   * start, so recording that instant late does not move either measurement: it
+   * is the same arithmetic on the same evidence, and the first token timestamp
+   * was already stamped when its delta arrived. What the call changes is
+   * whether the metric is *computable* — a finite start turns an unknown into a
+   * measured value, which is strictly more evidence than was held before.
+   *
+   * The converse is refused: an observed start is never replaced by a later
+   * non-finite one, so authority can only be added, never withdrawn. The first
+   * finite observation wins because a turn has exactly one start.
+   *
+   * @param {{turn:number|null, timeMs:number|null}} input
+   * @returns {boolean} whether the recorded start changed
+   */
+  turnStartObserved({ turn, timeMs }) {
+    if (turn === null || turn === undefined) return false
+    if (turn !== this.turn) return false
+    if (Number.isFinite(this.turnStartMs)) return false
+    if (!Number.isFinite(timeMs)) return false
+    this.turnStartMs = timeMs
+    return true
+  }
+
+  /**
    * Begin a new model attempt. Always resets the window: a new attempt identity
    * is exactly the boundary across which a rolling window must not be bridged.
    * @returns {boolean} whether the identity actually changed
@@ -452,7 +485,13 @@ class LiveMeter {
   snapshot(nowMs) {
     if (this.turn === null) return { phase: LivePhase.IDLE }
     const now = this.clock(nowMs)
-    const elapsedMs = Number.isFinite(this.turnStartMs) ? Math.max(0, now - this.turnStartMs) : 0
+    /**
+     * `null`, never `0`, when the turn start was not observed: a page that
+     * attaches mid-turn adopts the open turn without its `turn/start` boundary
+     * (see `client-feed`), and "elapsed 0 s" would then be a fabricated number
+     * for a turn that may have been running for minutes.
+     */
+    const elapsedMs = Number.isFinite(this.turnStartMs) ? Math.max(0, now - this.turnStartMs) : null
     const base = {
       turn: this.turn,
       phase: this.phase,
@@ -1858,7 +1897,13 @@ function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) {
       }
     }
   }
-  const conveysPeak = index => index === peakIndex || (peakValue <= 0 && lengths[index] > 0)
+  /**
+   * Exactly one run carries the priority band, and `peakValue` starts below every finite
+   * rate, so a run is identified whenever any run holds a finite one. A chart whose every
+   * rate is zero or non-finite has no maximum to keep on the chart, and only then does no
+   * run receive priority — which is the correct reading rather than a fallback.
+   */
+  const conveysPeak = index => index === peakIndex
 
   /** Ranked by band descending: the peak-bearing run first, then the longer runs. */
   const ranked = lengths.map((length, index) => ({ index, length }))
@@ -1869,33 +1914,40 @@ function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) {
     ))
 
   /**
-   * Two classes of run are **locked**: a run shorter than `MIN_MAX_POINTS` holds
-   * only the measurements it has, so its allowance is its whole length and it cannot
-   * be thinned further; a run of no points needs no allowance at all. Both are
-   * committed before anything is ranked, because their cost is fixed and pretending
-   * otherwise would misreport the budget left for the runs that compete for it.
+   * **Anchors first, for every drawable run, in priority order.** A run that does not fit is
+   * left at `0` — refused outright rather than thinned below its own anchor contract — and the
+   * ranking guarantees the peak-bearing run is the last one that could ever be refused.
+   *
+   * This pass runs before any class of run is locked, and that ordering is a correctness
+   * requirement rather than a style choice. `MIN_MAX_POINTS` is the *minimum drawable*
+   * allowance: giving a run less than it — which a pass that committed short runs first would
+   * do whenever the budget ran out mid-list — produces an allowance that `downsampleSeries`
+   * refuses, so the run would reach the renderer with an allowance its own contract cannot
+   * honour. A run is either drawable at the minimum or not drawable at all.
    */
-  const locked = new Set()
   let allocated = 0
-  for (let i = 0; i < lengths.length; i += 1) {
-    if (lengths[i] > 0 && lengths[i] < MIN_MAX_POINTS) {
-      budgets[i] = lengths[i]
-      allocated += lengths[i]
-      locked.add(i)
-    }
-  }
-
-  /**
-   * Anchors for the drawable runs, in priority order. A run that does not fit is
-   * left at `0` — refused outright rather than thinned below its own anchor
-   * contract — and the ranking guarantees the peak-bearing run is the last one that
-   * could ever be refused.
-   */
+  const anchored = new Set()
   for (const entry of ranked) {
-    if (locked.has(entry.index)) continue
+    if (lengths[entry.index] < MIN_MAX_POINTS) continue
     if (allocated + MIN_MAX_POINTS > budget) continue
     budgets[entry.index] = MIN_MAX_POINTS
     allocated += MIN_MAX_POINTS
+    anchored.add(entry.index)
+  }
+
+  /**
+   * Then the runs that are simply too short to thin: one or two vertices cannot be reduced
+   * without deleting the only measurements they hold, so their allowance is their whole length.
+   * They are served after the anchors because serving them first could consume budget the
+   * anchor pass needs, and an unrunnable allowance is worse than a refused short run.
+   */
+  const locked = new Set()
+  for (let i = 0; i < lengths.length; i += 1) {
+    if (lengths[i] === 0 || lengths[i] >= MIN_MAX_POINTS) continue
+    if (allocated + lengths[i] > budget) continue
+    budgets[i] = lengths[i]
+    allocated += lengths[i]
+    locked.add(i)
   }
 
   /**
@@ -1903,12 +1955,20 @@ function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) {
    * one vertex at a time around the ranking, which is what keeps a two-vertex run
    * from being starved by a four-hundred-vertex one. The loop terminates because
    * every pass either grants a vertex or finds nothing left to grant.
+   *
+   * Locked runs are skipped, and so is every run the anchor pass refused. That second guard is
+   * the one that matters: a run the anchor pass could not seat at `MIN_MAX_POINTS` must stay at
+   * `0`, because topping it up with whatever surplus remains would hand it an allowance below
+   * `MIN_MAX_POINTS` — an allowance `downsampleSeries` refuses outright and which cannot honour
+   * the first, last and peak anchors it promises. A run is drawable at the minimum or it is not
+   * drawable at all; there is no third state.
    */
   let remaining = budget - allocated
   while (remaining > 0) {
     let served = false
     for (const entry of ranked) {
       if (remaining <= 0) break
+      if (!anchored.has(entry.index)) continue
       const capacity = lengths[entry.index] - budgets[entry.index]
       if (capacity <= 0) continue
       const share = Math.max(1, Math.floor(remaining / ranked.length))
@@ -2979,6 +3039,37 @@ class TurnTelemetryStore {
     const meter = this.live(sessionId)
     if (meter.turn !== turn) meter.turnStarted({ turn, timeMs })
     return record
+  }
+
+  /**
+   * Record a turn's start time that was **observed after the record already
+   * existed**.
+   *
+   * The one path that needs this is the mid-turn attach. A page that reloads
+   * during a turn sees no `turn/start` in its window and adopts the open turn
+   * from transient evidence (`SessionEventFeed.adoptTurn`, marked `recovered`),
+   * which opens the record with `startMs: null` so nothing is measured from the
+   * reload. If the durable `turn/start` row is later published into this client
+   * — a reconnect, or the window sliding back over it — its timestamp is the
+   * turn's real start, and `beginTurn` is idempotent and would otherwise keep
+   * the record at `null` for the rest of the turn.
+   *
+   * Two rules make the upgrade safe. It is **one-way**: a node already holding a
+   * finite start is left untouched, so re-observing a turn can never withdraw
+   * authority or move a measurement that was already reported. And it is
+   * **recomputed, not restarted**: `record.firstTokenMs` is the absolute time of
+   * the first token-producing delta and is never rewritten here, so TTFT stays
+   * `firstToken - turn/start` over the same evidence, and elapsed is the same
+   * interval it always was — merely computable now.
+   *
+   * @returns {boolean} whether anything was upgraded
+   */
+  turnStartObserved(record, { timeMs }) {
+    if (record === null || record === undefined) return false
+    if (Number.isFinite(record.startMs) || !Number.isFinite(timeMs)) return false
+    record.startMs = timeMs
+    this.live(record.sessionId).turnStartObserved({ turn: record.turn, timeMs })
+    return true
   }
 
   /**
@@ -4822,6 +4913,13 @@ const FEED_ISSUE = Object.freeze({
   DUPLICATE_TRANSIENT: 'duplicate-transient-row',
   DUPLICATE_DURABLE: 'duplicate-durable-event',
   UNMATCHED_SETTLEMENT: 'settlement-without-attempt-id',
+  /**
+   * A transient row naming a turn this client has already finished with. The
+   * row is not delivered — re-opening a settled turn would resurrect a closed
+   * record and a card that has already been built — but it is recorded, because
+   * a late frame is a real wire behaviour and silence would hide it.
+   */
+  LATE_TURN_ROW: 'transient-row-of-a-finished-turn',
 })
 
 class SessionEventFeed {
@@ -4847,6 +4945,20 @@ class SessionEventFeed {
     this.openAttemptId = null
     /** Open turn number, or `null`. */
     this.openTurn = null
+    /**
+     * Turns this feed has seen close (`turn/end`). A late transient row of any
+     * of them must not re-open the turn: its record has already been settled and
+     * its evidence handed to the completed card. Keyed by identity rather than a
+     * single "last settled" number, because a settlement can be followed by rows
+     * of an older turn.
+     */
+    this.settledTurns = new Set()
+    /**
+     * The highest turn number observed so far, or `null`. Turns are ordered
+     * within a session, so a transient row below it is late evidence of a turn
+     * the feed has already moved past (`adoptTurn`).
+     */
+    this.highestTurn = null
     this.issues = []
     /** Counts of deliberately skipped window changes, for diagnostics. */
     this.ignoredPrepends = 0
@@ -4918,6 +5030,15 @@ class SessionEventFeed {
     this.transientRows = new WeakSet()
     this.openAttemptId = null
     this.openTurn = null
+    /**
+     * The turn-adoption guards are generation state too. A new window is a new
+     * set of rows: a turn this client had already closed may legitimately be
+     * the open turn of the replayed window, and a window may begin at any turn.
+     * Keeping the previous generation's `highestTurn` would refuse the adoption
+     * the reload just made necessary.
+     */
+    this.settledTurns = new Set()
+    this.highestTurn = null
     this.emit({ kind: 'window-rebaseline', timeMs: null })
   }
 
@@ -4953,6 +5074,69 @@ class SessionEventFeed {
     }
     if (this.openAttemptId === attemptId) this.openAttemptId = null
     this.emit({ ...normalized, attemptId })
+  }
+
+  /**
+   * Derive the open-turn boundary from transient evidence.
+   *
+   * The published window is a live *tail*: after a reload — or after a
+   * `replace` rebaseline, which is what a reconnect produces — the open turn's
+   * `turn/start` row is normally outside it. A page that attaches mid-turn then
+   * knows the turn only from the `turn` field of its transient rows. Without a
+   * boundary every turn-scoped event is discarded ("belongs to no turn") and
+   * the live view never appears at all.
+   *
+   * The first transient row naming a turn the feed is not tracking is therefore
+   * adopted as the boundary — the same client-side derivation the attempt
+   * boundary below already relies on. The emitted event carries
+   * `recovered: true` because it is *inferred*, not observed: consumers must not
+   * restart turn-scoped stopwatches from it, and the turn's start time stays
+   * unknown (`timeMs: null`) so TTFT is never measured from the reload.
+   *
+   * A turn already closed by a durable `turn/end` is never re-opened, and a turn
+   * the feed has already moved past is never re-adopted: both guards are per turn
+   * identity, because a turn number is an identity and the rows of one turn can
+   * arrive interleaved with another's. A row that names no *finite* turn adopts
+   * nothing — there is nothing to name, and guessing one would attach this
+   * client's evidence to a turn it cannot identify.
+   */
+  adoptTurn(turn) {
+    if (!Number.isFinite(turn)) return false
+    if (turn === this.openTurn) return false
+    if (this.settledTurns.has(turn)) return false
+    /** Turns are ordered, so a row below the highest observed one is late evidence of a past turn. */
+    if (Number.isFinite(this.highestTurn) && turn < this.highestTurn) return false
+    this.markTurnSeen(turn)
+    this.openTurn = turn
+    this.emit({ kind: NORMALIZED_KIND.TURN_START, turn, timeMs: null, recovered: true })
+    return true
+  }
+
+  /**
+   * Record that a turn number has been observed, whichever plane named it.
+   *
+   * This is the ordering watermark `adoptTurn` compares against, and it is fed
+   * by transient rows and durable turn rows alike: a turn established by a
+   * durable boundary — a row the client *did* observe, fully — must not later be
+   * re-opened by the synthetic path either.
+   */
+  markTurnSeen(turn) {
+    if (!Number.isFinite(turn)) return
+    if (!Number.isFinite(this.highestTurn) || turn > this.highestTurn) this.highestTurn = turn
+  }
+
+  /**
+   * Drop a transient row that belongs to a turn this feed has already finished
+   * with, and record why.
+   *
+   * The row is *not* delivered. A turn closed by `turn/end` has a settled record
+   * and a card; feeding a late delta into it would re-open a turn the session
+   * ended, and the attempt identity it carries is no longer open, so the value it
+   * would contribute is not the live view's business. Dropping it silently would
+   * hide a real wire behaviour, so it is counted as an issue.
+   */
+  dropLateRow(turn, attemptId) {
+    this.issue(FEED_ISSUE.LATE_TURN_ROW, { turn, attemptId })
   }
 
   processEntries(entries) {
@@ -4991,6 +5175,20 @@ class SessionEventFeed {
     // Attempt identity exists only on the transient plane: a change of
     // `attemptId` between consecutive rows is the client-side attempt
     // boundary (the browser never sees the host `start` frame).
+    this.markTurnSeen(normalized.turn)
+    const adopted = this.adoptTurn(normalized.turn)
+    if (!adopted && Number.isFinite(normalized.turn)) {
+      /**
+       * The row names a finite turn that was not adopted. Either the turn is
+       * already the open one — the ordinary case, every row after the first —
+       * or it is a turn this client has finished with, and its late evidence is
+       * dropped rather than re-attached to a settled record.
+       */
+      if (normalized.turn !== this.openTurn) {
+        this.dropLateRow(normalized.turn, normalized.attemptId)
+        return
+      }
+    }
     if (normalized.attemptId !== this.openAttemptId) {
       this.openAttemptId = normalized.attemptId
       this.emit({
@@ -5029,11 +5227,14 @@ class SessionEventFeed {
         return
       case NORMALIZED_KIND.TURN_START:
         this.openTurn = normalized.turn
+        this.markTurnSeen(normalized.turn)
         this.emit(normalized)
         return
       case NORMALIZED_KIND.TURN_END:
         this.openTurn = null
         this.openAttemptId = null
+        if (Number.isFinite(normalized.turn)) this.settledTurns.add(normalized.turn)
+        this.markTurnSeen(normalized.turn)
         this.emit(normalized)
         return
       case NORMALIZED_KIND.ATTEMPT_SETTLE:
@@ -5513,6 +5714,22 @@ function reduceLiveUi(machine, event) {
       // A replayed durable turn/start for the open turn must not restart the
       // TTFT stage or wipe the frozen marker.
       if (machine.state !== INACTIVE && machine.state !== SETTLED && event.turn === machine.turn) return machine
+      /**
+       * Adopted boundary (`recovered`): the page attached mid-turn and the
+       * open turn's `turn/start` was outside the published window, so this
+       * turn's TTFT was never observed *here*. The turn opens in the neutral
+       * waiting stage with the TTFT stopwatch already frozen as unknown —
+       * restarting it would print a TTFT measured from the reload.
+       */
+      if (event.recovered === true) {
+        return {
+          state: WAITING_MODEL,
+          turn: event.turn ?? machine.turn,
+          ttftFrozen: true,
+          sinceMs: null,
+          activeTools: 0,
+        }
+      }
       return {
         state: PENDING_FIRST_TOKEN,
         turn: event.turn ?? machine.turn,
@@ -5666,7 +5883,12 @@ class LivePresenter {
     if (!snapshot || snapshot.phase === 'idle' || snapshot.phase === 'settled') return hidden(machine)
 
     const turn = machine.turn ?? snapshot.turn ?? null
-    const elapsedMs = Number.isFinite(snapshot.turnElapsedMs) ? snapshot.turnElapsedMs : 0
+    /**
+     * `null` when the turn start was not observed (mid-turn attach): the pill
+     * then omits the elapsed run instead of printing `0 s`. Never a stale or
+     * fabricated number.
+     */
+    const elapsedMs = Number.isFinite(snapshot.turnElapsedMs) ? snapshot.turnElapsedMs : null
 
     // Tool stage: both the machine's activity counter and the meter's phase
     // are accepted as evidence, so a missed event cannot show a stale TPS.
@@ -5931,11 +6153,34 @@ function createController({
       }
 
       case NORMALIZED_KIND.TURN_START: {
-        state.currentRecord = store.beginTurn({ sessionId, turn: event.turn, timeMs: event.timeMs })
-        state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs })
+        /**
+         * `recovered` marks a boundary the feed *derived* from transient
+         * evidence (mid-turn attach) rather than observed as a durable event.
+         * The record is opened with an unknown start time (`timeMs: null`), so
+         * TTFT and turn elapsed stay unknown instead of being measured from the
+         * reload.
+         */
+        const recovered = event.recovered === true
+        state.currentRecord = store.beginTurn({
+          sessionId,
+          turn: event.turn,
+          timeMs: recovered ? null : event.timeMs,
+        })
+        /**
+         * The durable `turn/start` can arrive **after** the turn was adopted: the
+         * window is a live tail, so a reconnect (or the tail sliding back over
+         * the row) publishes it mid-turn. It is then an upgrade of an unknown
+         * start to the observed one, never a restart of the metrics — the
+         * attempt boundaries, deltas and first-token stamp already collected for
+         * this turn are kept. The inverse is impossible by construction: only a
+         * `recovered` event carries `timeMs: null`, and such an event is emitted
+         * exactly once per turn, when the turn is first adopted.
+         */
+        store.turnStartObserved(state.currentRecord, { timeMs: event.timeMs })
+        state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs, recovered })
         /** A new turn supersedes the previous card in this same advance. */
         state.settledRead = undefined
-        log('turn open', sessionId, event.turn)
+        log(recovered ? 'turn adopted (mid-turn attach)' : 'turn open', sessionId, event.turn)
         return
       }
 
@@ -6575,6 +6820,21 @@ function metric(value, unit, { tone = 'primary', className = 'dsh-tpm-number' } 
   ])
 }
 
+/**
+ * Separator plus turn-elapsed run, or nothing.
+ *
+ * The turn elapsed is `null` when the turn start was not observed (a page that
+ * attached mid-turn adopts the open turn without its `turn/start`); rendering
+ * `0 s` there would be a fabricated number, so the run is omitted entirely.
+ */
+function elapsedRun(view) {
+  if (!Number.isFinite(view.elapsedMs)) return []
+  return [
+    h('span', { key: 's', className: 'dsh-tpm-sep' }),
+    h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs)),
+  ]
+}
+
 function pillContent(view, label) {
   switch (view.kind) {
     case 'ttft': {
@@ -6594,16 +6854,14 @@ function pillContent(view, label) {
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
         metric(formatApproxTps(view.tps, view.approximate), 'tokens/s', { tone: 'accent' }),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
 
     case 'tool':
       return [
         h('span', { key: 'n', className: 'dsh-tpm-tool' }, formatToolLabel(view.names, view.count)),
         h('span', { key: 'g', className: 'dsh-tpm-stage' }, `· ${formatElapsed(view.toolElapsedMs ?? 0)}`),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
 
     case 'waiting': {
@@ -6611,16 +6869,14 @@ function pillContent(view, label) {
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
         metric(parts.value, parts.unit),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
     }
 
     case 'transition':
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, `${label}…`),
-        h('span', { key: 's', className: 'dsh-tpm-sep' }),
-        h('span', { key: 'e', className: 'dsh-tpm-elapsed' }, formatElapsed(view.elapsedMs ?? 0)),
+        ...elapsedRun(view),
       ]
 
     default:
@@ -6636,7 +6892,9 @@ function pillContent(view, label) {
 function LivePill({ view, translate }) {
   const t = typeof translate === 'function' ? translate : (key => key)
   const label = t(stateLabelKey(view))
-  const ariaLabel = `${label} · ${formatElapsed(view.elapsedMs ?? 0)}`
+  const ariaLabel = Number.isFinite(view.elapsedMs)
+    ? `${label} · ${formatElapsed(view.elapsedMs)}`
+    : label
   return h('div', {
     className: 'dsh-tpm-root',
     'data-kind': 'live',
@@ -6842,6 +7100,39 @@ function plotTree(createElement, curveView, translate) {
   }, paths)
 
   const area = [svg]
+
+  /**
+   * Point markers for one-vertex runs.
+   *
+   * A run that holds a single measurement cannot be a path, and until Phase 7 it was
+   * therefore invisible — including when that measurement was the turn's peak, which
+   * left the card printing a peak the chart could not point at. The marker is an HTML
+   * element rather than an SVG circle for the same reason the peak dot is: the viewBox
+   * is stretched non-uniformly, so a circle drawn inside it would render as an
+   * ellipse.
+   *
+   * It is `aria-hidden`, like the rest of the plot, because the accessible summary of
+   * the chart is the panel's `aria-label`; a screen reader gains nothing from a
+   * decorative dot. It carries its series in `data-series` and its tone through the
+   * same class channel the legend uses, and it does **not** count toward
+   * `data-points`: a marker is not a vertex, and inflating the drawn count would make
+   * the chart's own bound unmeasurable.
+   */
+  for (const [index, marker] of (Array.isArray(curveView.markers) ? curveView.markers : []).entries()) {
+    area.push(createElement('span', {
+      key: `singleton:${marker.series}:${marker.attemptId ?? 'unknown'}:${index}`,
+      className: 'dsh-tpm-singleton-dot',
+      'data-series': marker.series,
+      'data-attempt': marker.attemptId === null ? '' : String(marker.attemptId),
+      'data-tps': String(marker.tps),
+      'aria-hidden': 'true',
+      style: {
+        left: `${marker.x}%`,
+        top: `${(marker.y / curveView.height) * 100}%`,
+      },
+    }))
+  }
+
   if (curveView.peak.x !== null && curveView.peak.y !== null) {
     area.push(createElement('span', {
       key: 'dot',
@@ -6854,14 +7145,29 @@ function plotTree(createElement, curveView, translate) {
       },
     }))
   }
-  if (curveView.drawnPoints === 0) {
+  /**
+   * The placeholder appears only when the chart has **nothing at all** to place: no
+   * path vertex and no marker. A turn whose only evidence is singleton runs has
+   * markers, so it renders them instead of claiming the curve is unavailable —
+   * that substitution was the visible half of the singleton defect.
+   */
+  if (curveView.drawnPoints === 0 && curveView.markers.length === 0) {
     area.push(createElement('span', {
       key: 'empty',
       className: 'dsh-tpm-plot-empty',
     }, translate('curveUnavailable')))
   }
 
-  return createElement('div', { className: 'dsh-tpm-plot', 'data-points': curveView.drawnPoints }, [
+  return createElement('div', {
+    className: 'dsh-tpm-plot',
+    'data-points': curveView.drawnPoints,
+    /**
+     * Markers are counted separately from vertices, and published so a test can
+     * assert the two are never conflated: `data-points` is what the chart-wide
+     * render budget bounds, `data-markers` is decoration layered on top of it.
+     */
+    'data-markers': curveView.markers.length,
+  }, [
     createElement('div', { key: 'area', className: 'dsh-tpm-plot-area' }, area),
     createElement('span', { key: 'axis', className: 'dsh-tpm-axis-max' }, curveView.axis.display),
   ])
@@ -7116,9 +7422,24 @@ function round(value) {
 /**
  * Turn one run's vertices into coordinates and a single-subpath `d` string.
  *
- * A run shorter than two vertices is not drawable: one point is a measurement,
- * not a line. It is reported as `present: false` with its coordinates intact, so
- * a caller can still see that the attempt produced something.
+ * A run shorter than two vertices is not drawable **as a line**: one point is a
+ * measurement, not a segment. It is reported as `present: false` with its
+ * coordinates intact, and — since Phase 7 — with `marker` set, so the renderer can
+ * place a point where the measurement actually is.
+ *
+ * ## Why a marker, and why not a second vertex
+ *
+ * A run can legitimately hold one vertex: an attempt that produced a single delta has
+ * zero width, and an episode whose phase falls silent immediately after one delta has
+ * a tail grid with no whole step left inside its bound. That measurement can be the
+ * turn's peak, which meant the card printed a peak the chart could not locate —
+ * `test/completed-tree.test.js` recorded it as a known mismatch and Phase 7 closed it.
+ *
+ * The tempting repair is to duplicate the vertex so a line exists. That would be a
+ * fabrication: two vertices at one instant draw a segment the data does not contain,
+ * and a two-point series would then satisfy `present`, inflating `drawnPoints`,
+ * `drawnRuns` and the legend's presence claim. The marker adds no vertex, carries the
+ * same tone as its series, is `aria-hidden`, and adds nothing to any statistic.
  */
 function buildRun(run, durationMs, axisMax) {
   const coordinates = []
@@ -7136,6 +7457,7 @@ function buildRun(run, durationMs, axisMax) {
   }
 
   if (coordinates.length < 2) {
+    const single = coordinates.length === 1 ? coordinates[0] : null
     return {
       attemptId: run?.attemptId ?? null,
       startMs: run?.startMs ?? null,
@@ -7144,7 +7466,19 @@ function buildRun(run, durationMs, axisMax) {
       path: null,
       coordinates,
       points: coordinates.length,
-      peak: coordinates.length === 1 ? coordinates[0] : null,
+      peak: single,
+      /**
+       * A point the chart must draw even though it cannot draw a line to it. `null`
+       * for an empty run, so a caller can distinguish "one measurement" from
+       * "nothing measured" without inspecting `coordinates`.
+       */
+      marker: single,
+      /**
+       * Stated explicitly so the HTML layer does not have to infer it: exactly one
+       * vertex, drawn as a marker. A longer run never carries this flag, and a
+       * refused run (zero vertices) never does either.
+       */
+      singleton: single !== null,
     }
   }
 
@@ -7171,6 +7505,9 @@ function buildRun(run, durationMs, axisMax) {
     coordinates,
     points: coordinates.length,
     peak,
+    /** A drawable run is never a singleton: it has a real segment. */
+    marker: null,
+    singleton: false,
   }
 }
 
@@ -7193,9 +7530,22 @@ function buildSeries(entry, durationMs, axisMax) {
     tone: entry?.tone ?? null,
     present: drawable.length > 0,
     runs,
+    /**
+     * One entry per run that holds exactly one vertex. These are drawn as point
+     * markers, so a one-vertex run that carries the turn's peak has a position on
+     * the chart instead of existing only as a printed number. Kept as its own list
+     * rather than folded into `coordinates`, because a marker is not a vertex of a
+     * path and must not be counted as one.
+     */
+    markers: runs.filter(run => run.singleton).map(run => run.marker),
     /** Concatenated vertices of every run, for a caller that wants one array. */
     coordinates: runs.flatMap(run => run.coordinates),
-    points: runs.reduce((sum, run) => sum + run.points, 0),
+    /**
+     * Path vertices only. A singleton run contributes **zero** here rather than one:
+     * this count feeds `drawnPoints`, which is what bounds the SVG, and a marker is a
+     * separate element with its own count.
+     */
+    points: runs.filter(run => run.present).reduce((sum, run) => sum + run.points, 0),
     /** The single strongest vertex across this phase's runs, or `null`. */
     peak,
     /**
@@ -7318,6 +7668,26 @@ function curveViewModel(settled) {
     /** Rendered subpath count: one per drawable run, never one per series. */
     drawnRuns: reasoning.runs.filter(run => run.present).length
       + output.runs.filter(run => run.present).length,
+    /**
+     * Point markers for one-vertex runs, in a fixed series order.
+     *
+     * Each carries the tone of its own series, so a reasoning singleton and an output
+     * singleton are distinguishable by the same channel the legend already uses. They
+     * are markers, not data: the SVG is `aria-hidden` and so are they, and no count on
+     * this object includes them.
+     */
+    markers: [
+      ...reasoning.markers.map(marker => ({ ...marker, series: 'reasoning', tone: 'neutral' })),
+      ...output.markers.map(marker => ({ ...marker, series: 'output', tone: 'accent' })),
+    ].map(marker => ({ ...marker, x: round(marker.x), y: round(marker.y) })),
+    /**
+     * True when the only evidence a phase has is single-vertex runs. The renderer
+     * needs it because `drawnRuns === 0` with `markers.length > 0` is a chart that has
+     * something to show and no line to show it with — the case that must not render
+     * the "no curve" placeholder.
+     */
+    markersOnly: reasoning.runs.every(run => !run.present) && output.runs.every(run => !run.present)
+      && (reasoning.markers.length + output.markers.length) > 0,
   }
 }
 
@@ -7749,6 +8119,19 @@ const COMPLETED_CSS = `
   background: var(--dsw-alias-label-secondary, #7f8287);
 }
 .dsh-tpm-peak-dot[data-leader="output"] { background: var(--dsh-tpm-accent); }
+/* A one-vertex run is a measurement, not a line: it is drawn as a point marker.
+   Same size as the peak dot so the two coincide exactly when the singleton *is*
+   the peak, and coloured by its own series rather than by the leader. */
+.dsh-tpm-singleton-dot {
+  position: absolute;
+  width: calc(var(--dsh-tpm-font) * .42);
+  height: calc(var(--dsh-tpm-font) * .42);
+  margin: 0;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+.dsh-tpm-singleton-dot[data-series="output"] { background: var(--dsh-tpm-accent); }
 .dsh-tpm-axis-max {
   flex: 0 0 auto;
   align-self: flex-start;
@@ -8209,14 +8592,39 @@ function wrapTranslate(rawT) {
  *
  * Native `stats` is untouched: it keeps its own seat and its own id.
  *
- * ## Order
+ * ## Order (changed in Phase 7)
  *
- * `order` is ascending within the list. The seat's shipped occupants are
- * `todo` (0), `goal` (10) and `queue` (20), so `order: 30` places this entry
- * **last** — directly above the composer card, below the native state panels.
- * A negative order would have floated the meter above `todo`/`goal`, i.e. the
- * one position that is *not* adjacent to the composer whenever a plan or a goal
- * bar is on screen.
+ * `order` is ascending within the list, and the shipped occupants of this seat are
+ * `todo` (0), `goal` (10) and `queue` (20). Phase 5 placed this entry at `order: 30`
+ * — last, directly above the composer — on the reasoning that adjacency to the
+ * composer is what the reference layout shows.
+ *
+ * A screenshot of the real interface showed why that is wrong. Those three occupants
+ * are **full-width cards** and the meter is a content-sized pill, so rendering the
+ * narrow pill last put it between a wide card and the composer and left a band of
+ * empty width on both sides of it: the stack read as card, then an orphan, then the
+ * input. The reference ordering is `telemetry -> task state -> input`, and the
+ * measured evidence is in `docs/IMPLEMENTATION_LOG.md` (Phase 7 dock placement).
+ *
+ * `SLOT_ORDER` is therefore **-10**, which is before every currently shipped occupant
+ * and yields:
+ *
+ *     turn-performance-meter   -10
+ *     todo                       0
+ *     goal                      10
+ *     queue                     20
+ *     composer
+ *
+ * This is a `list` slot with ascending order and nothing else: DSH defines no
+ * `alwaysFirst`, `pinTop` or equivalent, so the honest claim is "first among all
+ * currently shipped `conversation.input.dock` occupants", **not** "above every
+ * third-party entry". Any plugin may register a lower finite order. A finite value is
+ * used deliberately; `Number.NEGATIVE_INFINITY` would be an unsupported claim on the
+ * ordering contract and would also break any future DSH sorting that assumes
+ * comparability.
+ *
+ * Native `stats` is untouched: it keeps its own seat (`conversation.composer.dock`,
+ * below the composer) and its own id.
  *
  * Service keys (`slots`, `sessions`, `locale`) are the Cordis service names;
  * the package names they arrive from are declared in `package.json`
@@ -8235,8 +8643,14 @@ const inject = ['slots', 'sessions', 'locale']
 /** The seat this plugin occupies, and the id it must never reuse. */
 const SLOT_NAME = 'conversation.input.dock'
 const SLOT_ID = 'turn-performance-meter'
-/** Last among the shipped occupants (`todo` 0, `goal` 10, `queue` 20). */
-const SLOT_ORDER = 30
+/**
+ * First among the shipped occupants (`todo` 0, `goal` 10, `queue` 20), so the stack
+ * reads telemetry, then task state, then the composer.
+ *
+ * The value is finite on purpose. No DSH slot contract defines a top pin, so the
+ * claim is bounded: a third-party entry at a lower order would precede this one.
+ */
+const SLOT_ORDER = -10
 
 /**
  * Diagnostic switch (default OFF). When the browser local-storage key

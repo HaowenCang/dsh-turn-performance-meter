@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 
 import { completedTree } from '../src/client/completed/completed-tree.js'
 import { curveViewModel } from '../src/client/completed/curve-view-model.js'
+import { COMPLETED_CSS } from '../src/client/completed/completed-css.js'
 import {
   COMPLETED_VIEW_CURVE,
   COMPLETED_VIEW_SUMMARY,
@@ -248,6 +249,111 @@ test('the peak marker is placed in percentages and never as raw pixels', () => {
   assert.match(dot.props.style.top, /^[\d.]+%$/, 'a percentage survives a host font-size change')
 })
 
+/* -------------------------------------------------- singleton (one-vertex) runs */
+
+/**
+ * A curve carrying explicit `series` runs, so a one-vertex run can be placed on the panel
+ * exactly as the settled snapshot would deliver it.
+ */
+function singletonCurve(runs, { peakTps = null } = {}) {
+  const series = [
+    { key: 'reasoning', tone: 'neutral', runs: Array.isArray(runs.reasoning) ? runs.reasoning : [] },
+    { key: 'output', tone: 'accent', runs: Array.isArray(runs.output) ? runs.output : [] },
+  ]
+  const peak = peakTps ?? Math.max(
+    0,
+    ...series.flatMap(entry => entry.runs.flatMap(run => run.points.map(point => point.tps))),
+  )
+  return { ...settledCurve(), series, peakTps: peak }
+}
+
+const singletonRun = (attemptId, timeMs, tps) => ({ attemptId, points: [{ timeMs, tps }] })
+
+test('a one-vertex run is drawn as a point marker, not as a fabricated line', () => {
+  const curve = singletonCurve({ output: [singletonRun('a', 0, 500)] })
+  const panel = layer(cardWith(curve, COMPLETED_VIEW_CURVE), 'curve')
+
+  /**
+   * No path, because one measurement is not a segment: duplicating the vertex to manufacture
+   * a line would draw a trend the data does not contain.
+   */
+  assert.equal(byClass(panel, 'dsh-tpm-series').length, 0, 'no line is invented for one vertex')
+
+  const markers = byClass(panel, 'dsh-tpm-singleton-dot')
+  assert.equal(markers.length, 1, 'the measurement is placed instead')
+  const [marker] = markers
+  assert.equal(marker.tag, 'span', 'an HTML marker, so the non-uniform viewBox cannot squash it')
+  assert.equal(marker.props['data-series'], 'output', 'it carries its own series')
+  assert.equal(marker.props['data-attempt'], 'a')
+  assert.equal(marker.props['data-tps'], '500', 'and the measurement it stands for')
+  assert.equal(marker.props['aria-hidden'], 'true', 'decorative: the panel label is the description')
+  assert.match(marker.props.style.left, /^[\d.]+%$/)
+  assert.match(marker.props.style.top, /^[\d.]+%$/)
+
+  /**
+   * The marker is not a vertex. `data-points` is the quantity the chart-wide render budget
+   * bounds, so counting markers there would make the bound unmeasurable.
+   */
+  const plot = byClass(panel, 'dsh-tpm-plot')[0]
+  assert.equal(plot.props['data-points'], 0)
+  assert.equal(plot.props['data-markers'], 1)
+  assert.equal(byClass(panel, 'dsh-tpm-plot-empty').length, 0,
+    'a chart with a marker has something to show and must not claim the curve is unavailable')
+})
+
+test('a singleton reasoning run and a singleton output run are told apart by series and tone', () => {
+  const curve = singletonCurve({
+    reasoning: [singletonRun('r', 0, 120)],
+    output: [singletonRun('o', 4000, 640)],
+  })
+  const panel = layer(cardWith(curve, COMPLETED_VIEW_CURVE), 'curve')
+  const markers = byClass(panel, 'dsh-tpm-singleton-dot')
+  assert.equal(markers.length, 2, 'both phases are placed')
+  assert.deepEqual(markers.map(marker => marker.props['data-series']), ['reasoning', 'output'],
+    'phase order is fixed, as the legend order is')
+  assert.deepEqual(markers.map(marker => marker.props['data-tps']), ['120', '640'])
+  assert.deepEqual(markers.map(marker => marker.props.style.left).length, 2)
+  /** The tone channel the legend already uses, so colour is available without being the only one. */
+  assert.ok(COMPLETED_CSS.includes('.dsh-tpm-singleton-dot[data-series="output"]'),
+    'the output marker has its own tone rule')
+  assert.ok(COMPLETED_CSS.includes('.dsh-tpm-singleton-dot'),
+    'and the base rule colours the reasoning marker')
+})
+
+test('a singleton that is the turn peak coincides with the peak marker rather than displacing it', () => {
+  const curve = singletonCurve({ output: [singletonRun('a', 0, 900)] })
+  const panel = layer(cardWith(curve, COMPLETED_VIEW_CURVE), 'curve')
+  const [marker] = byClass(panel, 'dsh-tpm-singleton-dot')
+  const [dot] = byClass(panel, 'dsh-tpm-peak-dot')
+  assert.ok(dot !== undefined, 'the peak is still marked: a rendering limit may not drop it')
+  /**
+   * The whole point of the singleton marker: the printed peak now has a position on the chart.
+   * The two markers land on the same coordinate, which is the correct outcome and not a
+   * duplication to be avoided.
+   */
+  assert.equal(marker.props.style.left, dot.props.style.left)
+  assert.equal(marker.props.style.top, dot.props.style.top)
+  assert.deepEqual(texts(byClass(panel, 'dsh-tpm-peak')[0]), ['peak', '≈900', 'tokens/s'])
+})
+
+test('several singleton runs of one phase are all placed, one marker each', () => {
+  const curve = singletonCurve({
+    output: [
+      singletonRun('a', 0, 100),
+      singletonRun('b', 0, 200),
+      singletonRun('c', 6000, 300),
+    ],
+  })
+  const panel = layer(cardWith(curve, COMPLETED_VIEW_CURVE), 'curve')
+  const markers = byClass(panel, 'dsh-tpm-singleton-dot')
+  assert.equal(markers.length, 3, 'every measurement gets a position, including two on one coordinate')
+  assert.deepEqual(markers.map(marker => marker.props['data-attempt']), ['a', 'b', 'c'])
+  assert.deepEqual(markers.map(marker => marker.props['data-tps']), ['100', '200', '300'])
+  assert.equal(byClass(panel, 'dsh-tpm-plot')[0].props['data-points'], 0)
+  assert.equal(byClass(panel, 'dsh-tpm-plot')[0].props['data-markers'], 3)
+  assert.equal(byClass(panel, 'dsh-tpm-series').length, 0, 'still no fabricated segments')
+})
+
 /* -------------------------------------------------------------- focusability */
 
 test('the card is a focus stop with a described hint exactly when a curve exists', () => {
@@ -283,7 +389,6 @@ test('the card is a focus stop with a described hint exactly when a curve exists
 })
 
 test('the card keeps a focus ring rule instead of removing the outline', async () => {
-  const { COMPLETED_CSS } = await import('../src/client/completed/completed-css.js')
   assert.ok(COMPLETED_CSS.includes('.dsh-tpm-card:focus-visible'), 'the ring is on focus-visible only')
   assert.ok(COMPLETED_CSS.includes('outline: 2px solid'), 'a real outline, not a border swap')
   assert.equal(/outline:\s*none/.test(COMPLETED_CSS), false, 'the outline is replaced, never removed')

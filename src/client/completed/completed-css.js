@@ -200,6 +200,19 @@ export const COMPLETED_CSS = `
   background: var(--dsw-alias-label-secondary, #7f8287);
 }
 .dsh-tpm-peak-dot[data-leader="output"] { background: var(--dsh-tpm-accent); }
+/* A one-vertex run is a measurement, not a line: it is drawn as a point marker.
+   Same size as the peak dot so the two coincide exactly when the singleton *is*
+   the peak, and coloured by its own series rather than by the leader. */
+.dsh-tpm-singleton-dot {
+  position: absolute;
+  width: calc(var(--dsh-tpm-font) * .42);
+  height: calc(var(--dsh-tpm-font) * .42);
+  margin: 0;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+.dsh-tpm-singleton-dot[data-series="output"] { background: var(--dsh-tpm-accent); }
 .dsh-tpm-axis-max {
   flex: 0 0 auto;
   align-self: flex-start;

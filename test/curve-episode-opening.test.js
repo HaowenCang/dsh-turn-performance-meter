@@ -179,3 +179,126 @@ test('the correction does not depend on the silence length, only on the window',
     }
   }
 })
+
+/**
+ * Live-vs-completed equivalence for a **later episode of one attempt**.
+ *
+ * Phase 6 verified this across an attempt boundary, where the live meter's
+ * `attemptStarted` reset and the completed curve's per-attempt partition are two
+ * independent implementations of the same rule. The Phase 7 defect was not a boundary
+ * effect at all: it lived inside one attempt, on the second episode's opening vertex.
+ * The equivalence therefore has to be asserted there too, and it is the sharpest
+ * available check, because the live meter never had the defect — its
+ * `SlidingWindowMeter` rolls an unconditional `(t - windowMs, t]` and has no notion of
+ * an episode — so the two implementations disagree exactly where the completed curve
+ * went wrong.
+ *
+ * The fixture is the audit's own: output deltas at attempt-local 0 ms and 3000 ms, one
+ * window of 1000 ms. The live meter is read at every 250 ms grid instant during the
+ * attempt, with each chunk accepted before it is read, and every reading is then matched
+ * against the completed curve's vertex at the same attempt-local instant.
+ */
+test('a later same-attempt episode: the completed curve equals what the live meter read', () => {
+  const store = new TurnTelemetryStore()
+  const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
+  const attempt = store.beginAttempt(record, { attemptId: 'episode-attempt', step: 1, startedAtMs: 0 })
+
+  /**
+   * Read live across the whole attempt, before any settlement exists, so the two values
+   * come from genuinely different machinery: the meter's rolling window and the curve's
+   * reconstruction from stored samples.
+   */
+  const live = []
+  for (let localMs = 0; localMs <= 4000; localMs += DEFAULT_SAMPLE_EVERY_MS) {
+    if (localMs === 0 || localMs === 3000) {
+      store.acceptChunk(record, attempt, { timeMs: localMs, chunk: outputChunk('x'.repeat(400)) })
+    }
+    live.push({ localMs, tps: store.liveSnapshot('s1', localMs).tps })
+  }
+  store.settleAttempt(attempt, {
+    settledAtMs: 3100,
+    settlementKind: 'message',
+    surfaceCommitted: true,
+    attemptOutcome: 'committed',
+  })
+  const curve = store.endTurn(record, { timeMs: 4100, status: 'completed' }).curve
+  const runs = curve.series.find(series => series.key === 'output').runs
+  assert.equal(runs.length, 2, 'the silence splits the attempt into two episodes')
+
+  /** The live reading at the second episode's opening, which is the disputed instant. */
+  const liveAtOpening = live.find(point => point.localMs === 3000)
+  assert.equal(liveAtOpening.tps, 100,
+    'the live meter measures the trailing window and reports 100 at 3000 ms')
+
+  /**
+   * The decisive comparison. Every live reading must equal the completed curve's vertex at
+   * the same attempt-local instant. `completed = 200, live = 100` is the defect this test
+   * exists to make impossible; an instant the curve does not sample is skipped, because the
+   * two grids are asserted equal elsewhere.
+   */
+  let compared = 0
+  for (const reading of live) {
+    if (!Number.isFinite(reading.tps)) continue
+    const point = runs
+      .flatMap(run => run.points)
+      .find(candidate => candidate.localMs === reading.localMs)
+    if (point === undefined) continue
+    compared += 1
+    assert.equal(point.tps, reading.tps,
+      `attempt-local ${reading.localMs}: the live meter said ${reading.tps}, the completed curve says ${point.tps}`)
+  }
+  assert.ok(compared >= 9, `the comparison covered ${compared} instants`)
+
+  /** The two instants that pin the fixture, restated as explicit values. */
+  assert.equal(live.find(point => point.localMs === 1000).tps, 0,
+    'the live meter expires the opening delta one window after it arrived')
+  assert.deepEqual(runs[1].points.map(p => p.tps), [100, 100, 100, 100, 0])
+  assert.equal(curve.peakTps, 100,
+    'no window ever holds both deltas, so the completed peak is one delta, not two')
+  assert.equal(runs[1].peak, 100, 'and the second run reports the same reading the live meter did')
+})
+
+test('a new attempt still resets the live window and the completed curve together', () => {
+  /**
+   * The Phase 6 result, re-asserted because the correction above changed the window
+   * definition both paths share: the reset must survive it. Attempt B streams the same shape
+   * as attempt A, so a bridged window would make its opening reading larger than A's — the one
+   * outcome both implementations must refuse.
+   */
+  const store = new TurnTelemetryStore()
+  const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
+
+  const a = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
+  store.acceptChunk(record, a, { timeMs: 0, chunk: outputChunk('x'.repeat(400)) })
+  const liveA = store.liveSnapshot('s1', 0).tps
+  store.settleAttempt(a, {
+    settledAtMs: 50,
+    settlementKind: 'message',
+    surfaceCommitted: true,
+    attemptOutcome: 'committed',
+  })
+
+  store.toolStarted(record, { callId: 't1', name: 'pwsh', timeMs: 100 })
+  store.toolSettled(record, { callId: 't1', timeMs: 61_000, status: 'ok' })
+
+  const b = store.beginAttempt(record, { attemptId: 'b', step: 2, startedAtMs: 61_100 })
+  /** A fresh attempt's window is empty before its first delta, read live. */
+  assert.equal(store.liveSnapshot('s1', 61_100).tps, 0)
+  store.acceptChunk(record, b, { timeMs: 61_100, chunk: outputChunk('y'.repeat(400)) })
+  const liveB = store.liveSnapshot('s1', 61_100).tps
+  store.settleAttempt(b, {
+    settledAtMs: 61_150,
+    settlementKind: 'message',
+    surfaceCommitted: true,
+    attemptOutcome: 'committed',
+  })
+
+  assert.equal(liveA, 100)
+  assert.equal(liveB, 100,
+    'the live meter reset at the new attempt; B is not reading A\'s 100 on top of its own')
+  const curve = store.endTurn(record, { timeMs: 62_000, status: 'completed' }).curve
+  const runs = curve.series.find(series => series.key === 'output').runs
+  assert.deepEqual(runs.map(run => run.points[0].tps), [liveA, liveB],
+    'and the completed curve reproduces both readings at their own openings')
+  assert.equal(curve.peakTps, 100, 'never the 200 a bridged window would produce')
+})

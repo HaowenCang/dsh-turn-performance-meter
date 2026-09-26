@@ -179,7 +179,7 @@ test('a phase with no runs is absent rather than drawn as a flat zero line', () 
   assert.equal(view.series.length, 2, 'the legend still lists the phase, so its absence is visible')
 })
 
-test('a run of one vertex is not drawable but is reported honestly', () => {
+test('a run of one vertex is not drawable as a line but is placed as a marker', () => {
   const view = curveViewModel(settledCurve({
     series: [
       { key: 'reasoning', tone: 'neutral', runs: [] },
@@ -202,7 +202,26 @@ test('a run of one vertex is not drawable but is reported honestly', () => {
   assert.equal(output.peak.tps, 10)
   assert.equal(output.path, null, 'nothing is drawn for a single vertex')
   assert.equal(view.peak.display, `≈${formatTps(10)}`, 'the peak is printed, with its approximation marker')
-  assert.equal(view.drawnPoints, 1, 'the lone vertex is carried but not drawn')
+  /**
+   * Phase 7 closed the mismatch this test used to record. `drawnPoints` counts
+   * **path vertices**, and a singleton contributes none: it is not a vertex of any
+   * line. The measurement is placed instead, as a marker, which is carried
+   * separately so it can never inflate the count the render budget bounds.
+   */
+  assert.equal(view.drawnPoints, 0, 'a singleton contributes no path vertex')
+  assert.equal(view.markers.length, 1, 'but it is placed on the chart')
+  assert.equal(output.markers.length, 1, 'and it belongs to its own series')
+  assert.equal(view.markersOnly, true, 'a chart of markers alone is not an unavailable curve')
+  const [marker] = view.markers
+  assert.equal(marker.series, 'output', 'a marker carries the series it measured')
+  assert.equal(marker.tone, 'accent', 'and that series\' tone, not the leader\'s')
+  assert.equal(marker.tps, 10)
+  assert.equal(marker.attemptId, 'a')
+  assert.ok(marker.x >= 0 && marker.x <= CURVE_VIEW_WIDTH)
+  assert.ok(marker.y >= 0 && marker.y <= CURVE_PLOT_HEIGHT)
+  /** Coincidence with the peak marker is required, not avoided. */
+  assert.equal(marker.x, view.peak.x)
+  assert.equal(marker.y, view.peak.y)
 })
 
 test('the peak marker is approximate, sits on the leading series and is placed inside the plot', () => {

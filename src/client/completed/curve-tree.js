@@ -125,6 +125,39 @@ function plotTree(createElement, curveView, translate) {
   }, paths)
 
   const area = [svg]
+
+  /**
+   * Point markers for one-vertex runs.
+   *
+   * A run that holds a single measurement cannot be a path, and until Phase 7 it was
+   * therefore invisible — including when that measurement was the turn's peak, which
+   * left the card printing a peak the chart could not point at. The marker is an HTML
+   * element rather than an SVG circle for the same reason the peak dot is: the viewBox
+   * is stretched non-uniformly, so a circle drawn inside it would render as an
+   * ellipse.
+   *
+   * It is `aria-hidden`, like the rest of the plot, because the accessible summary of
+   * the chart is the panel's `aria-label`; a screen reader gains nothing from a
+   * decorative dot. It carries its series in `data-series` and its tone through the
+   * same class channel the legend uses, and it does **not** count toward
+   * `data-points`: a marker is not a vertex, and inflating the drawn count would make
+   * the chart's own bound unmeasurable.
+   */
+  for (const [index, marker] of (Array.isArray(curveView.markers) ? curveView.markers : []).entries()) {
+    area.push(createElement('span', {
+      key: `singleton:${marker.series}:${marker.attemptId ?? 'unknown'}:${index}`,
+      className: 'dsh-tpm-singleton-dot',
+      'data-series': marker.series,
+      'data-attempt': marker.attemptId === null ? '' : String(marker.attemptId),
+      'data-tps': String(marker.tps),
+      'aria-hidden': 'true',
+      style: {
+        left: `${marker.x}%`,
+        top: `${(marker.y / curveView.height) * 100}%`,
+      },
+    }))
+  }
+
   if (curveView.peak.x !== null && curveView.peak.y !== null) {
     area.push(createElement('span', {
       key: 'dot',
@@ -137,14 +170,29 @@ function plotTree(createElement, curveView, translate) {
       },
     }))
   }
-  if (curveView.drawnPoints === 0) {
+  /**
+   * The placeholder appears only when the chart has **nothing at all** to place: no
+   * path vertex and no marker. A turn whose only evidence is singleton runs has
+   * markers, so it renders them instead of claiming the curve is unavailable —
+   * that substitution was the visible half of the singleton defect.
+   */
+  if (curveView.drawnPoints === 0 && curveView.markers.length === 0) {
     area.push(createElement('span', {
       key: 'empty',
       className: 'dsh-tpm-plot-empty',
     }, translate('curveUnavailable')))
   }
 
-  return createElement('div', { className: 'dsh-tpm-plot', 'data-points': curveView.drawnPoints }, [
+  return createElement('div', {
+    className: 'dsh-tpm-plot',
+    'data-points': curveView.drawnPoints,
+    /**
+     * Markers are counted separately from vertices, and published so a test can
+     * assert the two are never conflated: `data-points` is what the chart-wide
+     * render budget bounds, `data-markers` is decoration layered on top of it.
+     */
+    'data-markers': curveView.markers.length,
+  }, [
     createElement('div', { key: 'area', className: 'dsh-tpm-plot-area' }, area),
     createElement('span', { key: 'axis', className: 'dsh-tpm-axis-max' }, curveView.axis.display),
   ])

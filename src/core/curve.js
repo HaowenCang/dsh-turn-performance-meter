@@ -605,7 +605,13 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
       }
     }
   }
-  const conveysPeak = index => index === peakIndex || (peakValue <= 0 && lengths[index] > 0)
+  /**
+   * Exactly one run carries the priority band, and `peakValue` starts below every finite
+   * rate, so a run is identified whenever any run holds a finite one. A chart whose every
+   * rate is zero or non-finite has no maximum to keep on the chart, and only then does no
+   * run receive priority — which is the correct reading rather than a fallback.
+   */
+  const conveysPeak = index => index === peakIndex
 
   /** Ranked by band descending: the peak-bearing run first, then the longer runs. */
   const ranked = lengths.map((length, index) => ({ index, length }))
@@ -616,33 +622,40 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
     ))
 
   /**
-   * Two classes of run are **locked**: a run shorter than `MIN_MAX_POINTS` holds
-   * only the measurements it has, so its allowance is its whole length and it cannot
-   * be thinned further; a run of no points needs no allowance at all. Both are
-   * committed before anything is ranked, because their cost is fixed and pretending
-   * otherwise would misreport the budget left for the runs that compete for it.
+   * **Anchors first, for every drawable run, in priority order.** A run that does not fit is
+   * left at `0` — refused outright rather than thinned below its own anchor contract — and the
+   * ranking guarantees the peak-bearing run is the last one that could ever be refused.
+   *
+   * This pass runs before any class of run is locked, and that ordering is a correctness
+   * requirement rather than a style choice. `MIN_MAX_POINTS` is the *minimum drawable*
+   * allowance: giving a run less than it — which a pass that committed short runs first would
+   * do whenever the budget ran out mid-list — produces an allowance that `downsampleSeries`
+   * refuses, so the run would reach the renderer with an allowance its own contract cannot
+   * honour. A run is either drawable at the minimum or not drawable at all.
    */
-  const locked = new Set()
   let allocated = 0
-  for (let i = 0; i < lengths.length; i += 1) {
-    if (lengths[i] > 0 && lengths[i] < MIN_MAX_POINTS) {
-      budgets[i] = lengths[i]
-      allocated += lengths[i]
-      locked.add(i)
-    }
-  }
-
-  /**
-   * Anchors for the drawable runs, in priority order. A run that does not fit is
-   * left at `0` — refused outright rather than thinned below its own anchor
-   * contract — and the ranking guarantees the peak-bearing run is the last one that
-   * could ever be refused.
-   */
+  const anchored = new Set()
   for (const entry of ranked) {
-    if (locked.has(entry.index)) continue
+    if (lengths[entry.index] < MIN_MAX_POINTS) continue
     if (allocated + MIN_MAX_POINTS > budget) continue
     budgets[entry.index] = MIN_MAX_POINTS
     allocated += MIN_MAX_POINTS
+    anchored.add(entry.index)
+  }
+
+  /**
+   * Then the runs that are simply too short to thin: one or two vertices cannot be reduced
+   * without deleting the only measurements they hold, so their allowance is their whole length.
+   * They are served after the anchors because serving them first could consume budget the
+   * anchor pass needs, and an unrunnable allowance is worse than a refused short run.
+   */
+  const locked = new Set()
+  for (let i = 0; i < lengths.length; i += 1) {
+    if (lengths[i] === 0 || lengths[i] >= MIN_MAX_POINTS) continue
+    if (allocated + lengths[i] > budget) continue
+    budgets[i] = lengths[i]
+    allocated += lengths[i]
+    locked.add(i)
   }
 
   /**
@@ -650,12 +663,20 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
    * one vertex at a time around the ranking, which is what keeps a two-vertex run
    * from being starved by a four-hundred-vertex one. The loop terminates because
    * every pass either grants a vertex or finds nothing left to grant.
+   *
+   * Locked runs are skipped, and so is every run the anchor pass refused. That second guard is
+   * the one that matters: a run the anchor pass could not seat at `MIN_MAX_POINTS` must stay at
+   * `0`, because topping it up with whatever surplus remains would hand it an allowance below
+   * `MIN_MAX_POINTS` — an allowance `downsampleSeries` refuses outright and which cannot honour
+   * the first, last and peak anchors it promises. A run is drawable at the minimum or it is not
+   * drawable at all; there is no third state.
    */
   let remaining = budget - allocated
   while (remaining > 0) {
     let served = false
     for (const entry of ranked) {
       if (remaining <= 0) break
+      if (!anchored.has(entry.index)) continue
       const capacity = lengths[entry.index] - budgets[entry.index]
       if (capacity <= 0) continue
       const share = Math.max(1, Math.floor(remaining / ranked.length))

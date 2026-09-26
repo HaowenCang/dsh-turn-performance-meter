@@ -114,11 +114,12 @@ test('apply registers the locale namespace, the additive slot entry and a dispos
   assert.equal(registration.options.id, 'turn-performance-meter', 'an independent id; the native stats id stays untouched')
   assert.equal(registration.options.name, 'conversation.input.dock')
   /**
-   * The seat's shipped occupants are `todo` (0), `goal` (10) and `queue` (20), so
-   * an ascending order of 30 places this entry last — immediately above the
-   * composer card — rather than above the native state panels.
+   * The seat's shipped occupants are `todo` (0), `goal` (10) and `queue` (20), and
+   * order is ascending, so `-10` places this entry **first** — telemetry, then task
+   * state, then the composer. Phase 5 shipped `30`, which put the content-sized pill
+   * below three full-width cards; Phase 7 corrected it against the real interface.
    */
-  assert.equal(registration.options.order, 30, 'last among the shipped occupants, next to the composer')
+  assert.equal(registration.options.order, -10, 'first among the shipped occupants, above the native state panels')
   assert.equal(typeof registration.component, 'function', 'a React component is registered')
 
   // Teardown (HMR/unload): `ctx.effect` runs its callback as setup NOW and
@@ -139,8 +140,32 @@ test('the plugin never occupies the composer dock, so the native stats keep thei
    */
   const { exports, requested } = materialize({ react: reactStub })
   assert.equal(exports.SLOT_NAME, 'conversation.input.dock')
-  assert.equal(exports.SLOT_ORDER, 30)
+  assert.equal(exports.SLOT_ORDER, -10)
   assert.equal(exports.SLOT_ID, 'turn-performance-meter')
+  /**
+   * The ordering contract, asserted against the shipped module rather than a local
+   * constant: every currently shipped occupant of `conversation.input.dock` must
+   * sort **after** this entry. The list below is the verified upstream registration
+   * order, and the comparison is the same ascending comparison the slot performs.
+   */
+  const SHIPPED_OCCUPANTS = Object.freeze([
+    { id: 'todo', order: 0 },
+    { id: 'goal', order: 10 },
+    { id: 'queue', order: 20 },
+  ])
+  for (const occupant of SHIPPED_OCCUPANTS) {
+    assert.ok(exports.SLOT_ORDER < occupant.order,
+      `${occupant.id} (order ${occupant.order}) must render below the meter (order ${exports.SLOT_ORDER})`)
+  }
+  assert.deepEqual(
+    [...SHIPPED_OCCUPANTS, { id: exports.SLOT_ID, order: exports.SLOT_ORDER }]
+      .sort((left, right) => left.order - right.order)
+      .map(entry => entry.id),
+    ['turn-performance-meter', 'todo', 'goal', 'queue'],
+    'ascending order yields the target stack: meter, task state, then the composer',
+  )
+  assert.equal(Number.isFinite(exports.SLOT_ORDER), true,
+    'a finite order: no slot contract defines a top pin, so the claim stays bounded')
   /**
    * The quoted form, not the bare word: the module keeps the migration's history
    * in prose comments, and a test that forbade the *name* would forbid explaining

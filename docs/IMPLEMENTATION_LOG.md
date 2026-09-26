@@ -1692,6 +1692,161 @@ Keep this current. Every approximation that can affect displayed numbers belongs
     pane and the completed curve agree at every attempt-local instant that was actually observed live (asserted in
     `test/curve-attempt-boundary.test.js`), but the curve is rebuilt from stored samples and can be finer than what the
     50 ms presentation cadence happened to display.
-13. A run of one vertex is not drawable, so an attempt that produced a single measured instant inside a phase
-    contributes a peak but no line. This is deliberate: one point is a measurement, not a line. It means a card can
-    report a turn peak whose vertex is not visible on the chart.
+13. A run of one vertex is not drawable **as a line**, so an attempt that produced a single measured instant inside a
+    phase contributes a peak with no segment. Phase 7 closed the mismatch that used to follow from this: the
+    measurement is now placed as a point marker of its own series, so a card can no longer print a turn peak whose
+    vertex has no position on the chart. The vertex count is unaffected — a marker is not a path vertex and does not
+    count toward the render budget.
+
+## Phase 7 — curve correctness, chart budget, dock placement (2026-09-26)
+
+An independent audit of the Phase 6 code found three defects and one placement error. Each is recorded with the
+counterexample that establishes it, because in all four cases the shipped behaviour looked plausible and the
+arithmetic was what was wrong.
+
+### 1. The rolling window was episode-local, not attempt-local
+
+`rollingTpsSeries` carried a special case at an episode's opening vertex:
+
+    const lowerExclusive = localMs <= fromMs ? Number.NEGATIVE_INFINITY : localMs - windowMs
+
+The case was written for an attempt's first episode — local zero is the attempt's own opening delta — and the
+reasoning is sound about the attempt but wrong about the coordinate: `fromMs` is the *episode* bound, so `localMs ==
+fromMs` holds at **every** episode's opening vertex. An attempt whose phase falls silent for longer than one window
+splits into two episodes, and the second opening reopened the window to negative infinity and readmitted samples the
+trailing definition had already evicted.
+
+Counterexample, frozen in `test/curve-episode-opening.test.js`: one attempt, output deltas at attempt-local 0 ms and
+3000 ms, `windowMs = 1000`. The episodes are `0 -> 1000` and `3000 -> 4000`; at the second opening the window is
+`(2000, 3000]` and contains the 3000 ms delta alone, so the rate is **100 tokens/s**. The shipped code reported
+**200**. Both episodes belong to one attempt, so nothing here is an attempt-boundary effect. The clamp was also
+unnecessary for the case it was written for: at local zero `localMs - windowMs` is `-windowMs`, and a sample at zero
+lies inside `(-windowMs, 0]`, so the opening delta is included by the arithmetic. The bound is now uniform.
+
+`test/curve-reference-window.test.js` is the independent check: an O(n²) brute-force reference that shares no code
+with `src/core/curve.js`, re-derives the window from the literal definition, partitions episodes by a single gap rule,
+and requires every production vertex to lie on its grid with exactly the reference rate. It covers a single run, split
+runs, gaps below / at / above the window, reasoning-output alternation, multiple attempts, retries, and two generated
+families over 84 turns. Two expectations that had encoded the wrong arithmetic were corrected rather than preserved.
+
+### 2. Per-run point caps left the chart unbounded
+
+`downsampleSeries` bounds **one** run at `DEFAULT_MAX_POINTS` (512) and nothing bounded their sum, so the SVG's element
+count followed the model's delivery pattern: a turn alternating reasoning and output a hundred times produced a hundred
+runs of up to 512 vertices, and several cards can be on screen at once. `MAX_RENDER_POINTS_TOTAL` (512, fixed and
+chart-wide) is the missing bound and `allocateRunBudgets` divides it — anchors first in priority order with the
+peak-bearing run ranked first, then runs too short to thin, then a round-robin top-up that never raises an allowance
+above what the run holds and never hands out one below `MIN_MAX_POINTS`. `test/curve-render-budget.test.js` asserts the
+bound at 10 / 25 / 100 / 150 / 200 runs through both the settled snapshot and the pure allocator, and asserts the
+properties that make the bound safe: the global peak survives on a drawn run, run order and run intervals are
+preserved, endpoints are kept, a small chart is untouched, and the allocation is deterministic and never raises a
+measured value.
+
+### 3. A one-vertex run was invisible
+
+Handled by the point marker described in limitation 13, with `test/completed-interaction.test.js` asserting that no
+line is fabricated, that the marker carries its own series and tone, that `data-points` stays 0 while `data-markers`
+is 1, and that a singleton which is the turn's peak lands on exactly the peak marker's coordinate.
+
+### 4. Dock placement
+
+Phase 5 placed the entry at `order: 30` — last in `conversation.input.dock`, directly above the composer. A screenshot
+of the real interface showed why that reads wrong: the seat's other occupants (`todo` 0, `goal` 10, `queue` 20) are
+full-width cards and this entry is a content-sized pill, so rendering it last put a narrow orphan between a wide card
+and the input. `SLOT_ORDER` is now **-10**, which yields telemetry, task state, composer. The value is finite on
+purpose: no slot contract defines a top pin, so the honest claim is "first among all currently shipped occupants", and
+`test/client-bundle.test.js` asserts exactly that by sorting this entry against the shipped occupants.
+
+### 5. Chart-wide budget and the curve work are visible in the bundle
+
+`client.js` and `lib/client.js` are regenerated from `src/` by `npm run build:client` in the same change as the
+sources, and `scripts/verify-structure.mjs` fails the suite when either is stale. A source change that is not reflected
+in the bundle is therefore a red build rather than a silent one.
+
+## Toolchain incidents (Phase 7, 2026-09-26)
+
+Two failures in this round were not plugin defects but they gated the phase, and both are recorded here with the
+evidence that established them.
+
+### 1. `dev_reload_package` reloaded the wrong module and took the host down with it
+
+**Symptom.** `dev_reload_package dsh-turn-performance-meter` never returned. The session log's last real event was the
+tool call at 01:29:26.408; on the next host start the crash-repair in `@deepseek-ai/dsh-session/repair.js` appended a
+synthetic `TOOL_OUTCOME_UNKNOWN` result. The plugin's client module also disappeared from the browser boot manifest
+(60 entries, ours absent, `/plugins/??dsh-turn-performance-meter/client.js` 404).
+
+**Mechanism.** `reloadPackage` selected its target from the loader module cache with two rules: the key must *contain*
+the package name and must *end with* `/lib/index.js`. This package's host entry is the root `index.js`
+(`exports["."]`), so the only cache key that could satisfy both rules was another package's — and the dev-only fixture
+recorder lives *inside this repository* at `dev/fixture-recorder/lib/index.js`, whose realpath URL contains
+`dsh-turn-performance-meter` and ends with `/lib/index.js`. The first call therefore disposed this plugin's fiber and
+rebuilt it with the recorder's module (`registry 无 runtime，entry.fiber 直接重建（state=1）`): the client row was
+dropped (that branch returned without `refreshClientRow`/`notifyClientRebuilt`), the browser lost the bundle, and the
+recorder came back to life. The recording for this session resumes at exactly the reload's own result timestamp
+(01:28:09.282) after a 73.7 s gap, which is what fixes the identification. The second call then rebuilt again, wrote
+its audit line (`activeEntry=none`) and its success counter at 01:29:31, and the process stopped making progress:
+no session event, no injector log, no fixture row after that instant. The operation lock was *not* involved — a
+probe call for a non-existent package name returns immediately.
+
+**Fix (local injector, `Plugins/dsh-routing-suite`).** `src/index.ts` and the loaded artifact
+`injector-release/lib/index.js` now resolve the target by the entry's own package identity: `packageRootOf` →
+`declaredEntryOf` (`exports["."]` → `main` → `./index.js`) → candidate URLs must live inside that root at depth ≤ 2,
+so a nested `dev/<sub>/lib/index.js` can never shadow the package. The freshness pre-check now uses the package root
+rather than `dirname(dirname(entryUrl))` (which pointed one directory above for a root entry), the watcher pre-check
+probes the declared entry instead of a hardcoded `lib/index.js` (the source of dozens of `watch-precheck-blocked`
+lines), and the `registry 无 runtime` repair branch now performs the same `refreshClientRow` +
+`notifyClientRebuilt` hand-off as the standard path.
+
+**Verification.** A temporary decoy package at `dev/decoy-probe/lib/index.js` (the collision shape, injected and then
+removed) was present during the reload: `OK: dsh-turn-performance-meter 热重载完成（清缓存 2 模块，重建 1 fiber）`,
+`client ✓ (dsh-turn-performance-meter/client.js)`, and `reload-debug.log` reports
+`activeEntry=include:turn-performance-meter fiberState=active` — against `activeEntry=none` before the fix. Purging the
+module cache first exercises the repair branch, after which the browser still served the bundle (200) with a fresh rev.
+The injector itself was updated by self-reload, confirmed by the new generation's startup audit lines.
+
+### 2. A page that attaches mid-turn left the live meter hidden
+
+**Symptom.** Reloading the GUI while a turn was streaming left the dock empty for the rest of that turn. The plugin was
+mounted (its style tag was in the document, `attach` succeeded, 11 886 notifications and 4 513 renders were counted)
+but `controller.project()` returned `{kind:'hidden', state:'inactive'}` throughout, with `droppedDeltas` at 11 552.
+
+**Mechanism.** The published window is a live *tail*, so a page that attaches mid-turn never sees the open turn's
+`turn/start`. `reduceLiveUi` discards every turn-scoped event while the machine is `inactive` (`wrongTurn`), and
+`controller` drops deltas whose turn has no record — correctly refusing to fabricate a start time, but with the
+consequence that the whole turn is invisible to this page instance.
+
+**Fix.** The boundary is now *derived* from evidence the page does have: the first transient row naming a turn the
+feed is not tracking is adopted (`SessionEventFeed.adoptTurn`) and emitted as a `turn-start` carrying
+`recovered: true` and `timeMs: null`. `reduceLiveUi` opens an adopted turn in `waiting-model` with `ttftFrozen: true`,
+so the TTFT stopwatch is never restarted from the reload; `LiveMeter.turnElapsedMs` and the presenter's `elapsedMs`
+are `null` rather than `0` when the start is unknown, and the pill omits the elapsed run entirely.
+
+Adoption is bounded on three sides, because the synthetic boundary must never outrank real evidence. It happens once
+per turn: the feed tracks the open turn, so ten thousand further rows of turn 42 produce one boundary, one attempt
+identity and ten thousand deltas. A row naming no finite turn adopts nothing — there is no identity to adopt, and
+guessing one would attach this client's deltas to a turn it cannot name. And a turn this client has finished with is
+never re-opened: `turn/end` records the turn in `settledTurns`, and a late transient row of it is dropped and counted
+as `transient-row-of-a-finished-turn` rather than delivered into a settled record or allowed to re-show a live meter.
+That guard is per turn identity and ordering (`highestTurn`), not a global "no adoption after any `turn/end`", so a
+following turn 43 is adopted normally; both guards are generation state and are reset by a `replace` rebaseline.
+
+**Authoritative upgrade.** The adopted record opens with `startMs: null`, and `beginTurn` is idempotent — a replayed
+durable boundary must not discard the samples already observed for the turn — so the durable `turn/start` arriving
+*later* (a reconnect, or the tail sliding back over the row) needed its own step: `TurnTelemetryStore.turnStartObserved`
+and `LiveMeter.turnStartObserved`, both called from the controller's `turn-start` branch. The upgrade is one-way (an
+observed start is never replaced by a later synthetic or absent one, because a turn has exactly one start) and it
+recomputes rather than restarts: `firstTokenMs` keeps the timestamp its delta already carried, the rolling window is
+not reset, and elapsed and TTFT are the same arithmetic on the same evidence — merely computable now. `recovered` is
+emitted exactly once per turn, which is what makes the inverse impossible by construction.
+
+**Completed card.** The card's TTFT is `first model-producing delta - turn/start` over observed evidence only. If the
+durable `turn/start` never entered this client, TTFT is `unavailable` and renders as an em dash: a settlement's stream
+timestamps say when a delta was produced, never when the turn started, so deriving a TTFT from them would silently
+substitute "time since the reload" for the metric.
+
+**Verification.** Twelve tests in `test/mid-turn-reload-recovery.test.js` plus rewritten cases in `dsh-client-feed`,
+`live-state`, `live-metrics` and `runtime-robustness` pin adoption, single adoption over ten thousand rows, the
+event order (an attempt boundary must not reach a presenter that is still `inactive`), the no-identity drop, the
+finished-turn drop, future-turn adoption, unknown-not-zero elapsed, the authoritative upgrade and its refusal to
+downgrade, and both completed-card TTFT paths. In the browser, reloading the page mid-turn now renders the live pill
+(`data-kind="live"`, tool-stage timer and TPS from observed deltas) with no fabricated turn elapsed.
