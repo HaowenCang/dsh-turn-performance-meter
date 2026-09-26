@@ -265,10 +265,18 @@ test('the calibration window is the documented one second on the attempt-local c
   const { settled } = driveTwoDeltaTurn({ outputTokens: 900, reasoningTokens: 0 })
   assert.equal(settled.curve.windowMs, WINDOW_MS)
   assert.equal(settled.curve.sampleEveryMs, DEFAULT_SAMPLE_EVERY_MS)
-  /** The decay is drawn: the second vertex's window still holds both deltas. */
-  assert.equal(tpsAt(settled.curve, 'a', 1000), 450,
-    'one window after the second delta it alone survives, so the rate has halved')
-  assert.equal(tpsAt(settled.curve, 'a', 1500), 0, 'and one further window empties the trace')
+  /**
+   * The window is the documented 1000 ms even though the trace is now only as wide as the
+   * attempt's own generation. The instant at which the first delta expires sits **past** the
+   * attempt's last delta, so it is no longer sampled: `docs/METRICS_SPEC.md` §8.1 makes the
+   * axis model generation, and a vertex at 1000 ms would be post-generation time. What the
+   * window still does inside the attempt is visible at every vertex the trace does carry.
+   */
+  assert.equal(tpsAt(settled.curve, 'a', 500), 900,
+    'at the second delta both are inside the one-second window: the full provider total')
+  assert.equal(settled.curve.attempts[0].points.at(-1).localMs, 500,
+    'and the trace stops there, on the attempt\'s own last delta')
+  assert.equal(settled.curve.durationMs, 500)
 })
 
 /**
@@ -378,8 +386,9 @@ test('the Phase 7B reproduction: raw shape peak, calibrated peak, and the provid
   assert.equal(table.newCalibratedTotalPeak, reference,
     'the published peak equals the brute-force total-window reference')
   assert.deepEqual(curve.attempts[0].points.map(point => point.tps),
-    [100, 100, 365, 365, 265, 265, 0],
-    'the trace rises as the second delta enters the window and falls as the first leaves it')
+    [100, 100, 365],
+    'the trace rises as the second delta enters the window and stops on the attempt\'s last delta; '
+    + 'the previous expectation carried the 265, 265, 0 decay past it, which the axis no longer owns')
 
   /**
    * The other direction, on a different script: a provider count **above** the raw shape raises

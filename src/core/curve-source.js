@@ -48,13 +48,51 @@
  *
  * ## Fallback
  *
- * `calibratedForCurve` is `false` only when the join could not be trusted. The
- * curve then carries the raw shape weight under `curveQuality`'s ordinary
- * `estimated` reading, which is the pre-Phase-7C behaviour and is honest about it.
+ * The join either happens or it does not. When it does not, `calibrationCoverage` is
+ * `fallback`, `calibratedForCurve` is `false`, and the curve carries the raw shape
+ * weight under `curveQuality`'s ordinary `estimated` reading.
+ *
+ * ## Coverage, and why a boolean was not enough
+ *
+ * The join can succeed while only **part** of the curve is anchored: three contributing
+ * attempts, two of which reported usage, produce a curve whose first two stretches are
+ * calibrated to provider counters and whose third is still the coarse shape weight. Both
+ * magnitudes are legitimate best estimates — per-delta allocation is reconstructed either
+ * way, so the peak is `≈` at every coverage level, and dropping the unanchored attempt
+ * would remove real generation from the chart — but a curve one third of which is
+ * unanchored is not a *calibrated curve*.
+ *
+ * The previous revision reported `calibratedForCurve: calibratedCount > 0`, so that turn
+ * was published as calibrated and every consumer that read the boolean — including
+ * `curveViewModel.calibrated` — was told the whole curve was anchored. Coverage is now
+ * stated explicitly as `calibrationCoverage`, and `calibratedForCurve` is narrowed to its
+ * honest meaning: **full coverage only**.
  */
 
 import { MetricQuality } from './metric-quality.js'
 import { isContributingAttempt } from './aggregate-turn.js'
+
+/**
+ * How much of the curve an authoritative provider total anchored.
+ *
+ *   - `full`     — the join is aligned and **every** contributing attempt is anchored;
+ *   - `partial`  — the join is aligned and some, but not all, are;
+ *   - `none`     — the join is aligned and none are, which is the ordinary
+ *                  no-usage turn and is not an error;
+ *   - `fallback` — the join could not be trusted, so nothing is calibrated and the
+ *                  whole curve is the raw shape weight.
+ *
+ * `none` and `fallback` are deliberately different: the first says the evidence
+ * contains no provider total, the second says the evidence could not be joined. A
+ * consumer that treated missing usage as corruption would report a defect where
+ * there is only a quality level.
+ */
+export const CalibrationCoverage = Object.freeze({
+  FULL: 'full',
+  PARTIAL: 'partial',
+  NONE: 'none',
+  FALLBACK: 'fallback',
+})
 
 /** Fields on `record.attempts` that are shared with every calibration sample. */
 function withCalibratedSamples(attempt, samples, anchored) {
@@ -101,6 +139,7 @@ function curveSample(sample) {
  *   attempts: object[],
  *   aligned: boolean,
  *   calibratedForCurve: boolean,
+ *   calibrationCoverage: 'full'|'partial'|'none'|'fallback',
  *   contributingCount: number,
  *   calibratedCount: number,
  *   rawFallbackAttemptIds: (string|null)[],
@@ -108,7 +147,9 @@ function curveSample(sample) {
  * }}
  *   `attempts` is the list `compressAttempts` must be given; it is never shorter
  *   than the raw contributing list, and it carries calibrated magnitudes for every
- *   attempt the join could be trusted for.
+ *   attempt the join could be trusted for. `calibratedForCurve` is `true` only for
+ *   `full` coverage — it is a statement about the whole curve, never about whether
+ *   any attempt was calibrated.
  */
 export function curveSource(attempts, breakdown) {
   const raw = Array.isArray(attempts) ? attempts : []
@@ -170,6 +211,7 @@ export function curveSource(attempts, breakdown) {
       attempts: raw,
       aligned: false,
       calibratedForCurve: false,
+      calibrationCoverage: CalibrationCoverage.FALLBACK,
       contributingCount: contributing.length,
       calibratedCount: 0,
       rawFallbackAttemptIds: contributing.map(attempt => attempt?.attemptId ?? null),
@@ -178,11 +220,25 @@ export function curveSource(attempts, breakdown) {
   }
 
   const calibratedCount = reduced.filter(entry => entry?.calibration?.totalAnchored === true).length
+  /**
+   * The curve's magnitude provenance, stated as coverage rather than as a yes/no.
+   *
+   * `calibratedForCurve` means "the **whole** curve is anchored", so it requires a
+   * non-empty contributing set: zero attempts cover nothing, and `0 === 0` must not
+   * be read as completeness.
+   */
+  const calibrationCoverage = calibratedCount === 0
+    ? CalibrationCoverage.NONE
+    : (calibratedCount === contributing.length ? CalibrationCoverage.FULL : CalibrationCoverage.PARTIAL)
+  const calibratedForCurve = contributing.length > 0
+    && calibratedCount === contributing.length
+
   if (calibratedCount === 0) {
     return {
       attempts: raw,
       aligned: true,
-      calibratedForCurve: false,
+      calibratedForCurve,
+      calibrationCoverage,
       contributingCount: contributing.length,
       calibratedCount: 0,
       rawFallbackAttemptIds: [],
@@ -213,7 +269,8 @@ export function curveSource(attempts, breakdown) {
   return {
     attempts: joined,
     aligned: true,
-    calibratedForCurve: true,
+    calibratedForCurve,
+    calibrationCoverage,
     contributingCount: contributing.length,
     calibratedCount,
     rawFallbackAttemptIds: [],

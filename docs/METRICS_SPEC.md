@@ -220,8 +220,13 @@ Use compressed model-generation time. For every attempt with generated deltas:
 
 - attempt-local x=0 at first non-empty generated delta;
 - preserve wall-time distances between deltas inside the attempt;
+- attempt-local x=end at the **last** generated delta: nothing is allocated after it;
 - append the next attempt immediately after the previous attempt's last generated delta;
 - allocate no x-axis width to tools, inter-attempt waits, or next-call TTFT.
+
+The third rule applies to the final attempt exactly as it applies to every other one. `curve.durationMs` is the sum of the attempts' own spans, so a vertex carrying a coordinate above it would be clamped onto `x = 100 %` by the view model's `xOf(timeMs, durationMs)` — several distinct instants collapsing onto one drawn x, which the SVG renders as a vertical stroke at the chart's right edge. An earlier revision gave the final attempt one extra window of sampled decay for exactly that reason; it was removed in Phase 7C.1 (§8.2, `test/curve-axis-endpoint.test.js`).
+
+**The attempt's real endpoint is always a vertex.** The sampled instants of an attempt are the **union** of two sets: its own `sampleEveryMs` cadence ladder from local zero, and its last model-producing instant. Deduplicated and ascending, this is what makes an off-grid final delta visible — a call whose last delta arrives at 510 ms is sampled at `0, 250, 500, 510` — while leaving an on-cadence endpoint un-duplicated. No further cadence step is invented merely to place the anchor.
 
 The curve is therefore a model-throughput diagnostic, not an end-to-end turn timeline.
 
@@ -249,7 +254,9 @@ Three consequences are normative:
 
 1. **Compressed coordinate ≠ statistical window.** The axis is continuous across an attempt boundary; the window is not.
 2. **The opening vertex is measured by the ordinary window.** An attempt's local zero *is* its first delta, so `(0 - 1000, 0]` contains it and no clamp is needed. Phase 6 briefly carried one and Phase 7 removed it: it fired at the opening of every *episode*, not only at an attempt's first, and readmitted samples the trailing definition had already evicted.
-3. **Each attempt draws only its own coordinates.** An attempt's one-window decay tail is clamped at the coordinate the following attempt owns. The final attempt keeps its tail, because nothing follows it to compete for the axis.
+3. **Every attempt draws only the coordinates it owns, and they end on its own last delta.** A tool wait, an inter-attempt wait and the next call's TTFT own no coordinate. Neither does the attempt's own post-generation decay: the final attempt is not a special case, and no attempt receives synthetic width merely for being last. This is why the completed trace is narrower than one window past a short call's last delta, and why a live pill reading taken after the model stopped has no vertex to match it — the live pill measures wall time, the axis measures generation.
+
+**Phase ordering inside one instant follows the authoritative stream order.** `activePhase` is read from the newest sample at or before a vertex, and when a reasoning delta and a text delta share an instant, "newest" is decided by the order the model's stream delivered them in — DSH's transient frame index and its durable compact stream member order, which `compressAttempts` publishes per sample as `sampleOrder`. The order is evidence, and it is what `LiveMeter.streamingPhase` reports, because that is the phase of the last accepted sample. An earlier revision broke the tie with a fixed phase hierarchy instead (`reasoning` before `output`), which made the completed label disagree with the live pill for a stream delivered text-then-reasoning. Order changes **no magnitude** — a window holds every sample at an instant however they are sequenced — so only the label moves (`test/curve-stream-order.test.js`).
 
 **Summary rates are a different metric.** Reasoning TPS (§7) and output TPS (§7) are phase **averages**: a phase's token total over that phase's measured active generation time. The curve is an attempt-local trailing one-second throughput trace, colour-coded by active phase. They are not two renderings of one number, and neither is derivable from the other.
 
@@ -267,18 +274,23 @@ The earlier revision instead partitioned each phase's samples into **episodes** 
 
 A phase that produced nothing has no run. That is an absence of evidence, and it is never drawn as a flat zero line: "never reasoned here" and "reasoning throughput fell to zero" are different facts.
 
-### 8.2.2 Where a phase boundary is drawn (frozen in Phase 7C)
+### 8.2.2 Where a phase boundary is drawn (frozen in Phase 7C, restated in Phase 7C.1)
 
-A tone change must not be drawn as a blank horizontal gap, and a run must not claim coordinates its own phase did not produce — otherwise a long silence between two phases would be painted entirely in one of their tones.
+`activePhase` persists until new phase evidence arrives, so **every** vertex of a trace carries a phase. The maximal stretches of one label are therefore contiguous — `next.first === stretch.last + 1` — and a tone change has no silence in it to divide.
 
-The cut is therefore the **midpoint** of the label change, rounded down: the outgoing run keeps the earlier half of the silence and the incoming run the later half, and the two meet on **one shared vertex** — the same instant, the same measured rate, one object emitted by both subpaths. A phase change with no silence between its samples (the ordinary case: a call reasons and then writes) still produces adjacent runs sharing the transition vertex.
+The cut is the outgoing stretch's **own last labelled vertex**. The incoming coloured path opens on that same vertex, and the next vertex carries the new phase, so:
 
-The invariants, asserted in `test/curve.test.js` and `test/curve-trace-matrix.test.js`:
+- no horizontal gap is introduced at a tone change: the two subpaths meet at one instant, one measured rate, one object;
+- no run claims coordinates its own phase did not produce, because a silence inside one phase is a stretch of zero-valued vertices that all carry that phase and are drawn in its tone at full width.
+
+The invariants, asserted in `test/curve.test.js`, `test/curve-trace-matrix.test.js` and `test/curve-axis-endpoint.test.js`:
 
 ```
 runs[i].endIndex === runs[i + 1].startIndex
 sum(runs[i].pointCount) === points.length + (runs.length - 1)
 ```
+
+An earlier revision described this cut as "the midpoint of the label change, rounded down", and computed it as `Math.floor((stretch.last + next.first) / 2)`. For a trace whose every vertex is labelled, `next.first` **is** `stretch.last + 1`, so that expression always evaluated to `stretch.last` — the same index. The formula was correct and its description was not: no real trace could produce the non-adjacent phase stretches the "midpoint of a long silence" wording presupposed. Phase 7C.1 removed the formula and states the rule directly. The seam itself is unchanged.
 
 The shared vertex is one measurement, not two: the rate had no phase partition to reset. It is charged to both subpaths by the render budget of §8.5, because both do emit it.
 
@@ -293,11 +305,23 @@ Stream deltas do not generally expose exact per-delta token counts. Use a two-st
 
 The join is **positional and verified**. `attemptBreakdown` is `record.attempts.filter(isContributingAttempt).map(reduceAttempt)`, so the two lists correspond in order; wherever both sides publish an `attemptId` and a `step`, they must agree, and a disagreement in either — or a sample-count mismatch — degrades the **whole** join to the raw shape rather than attaching one attempt's calibration to another. The degradation is reported in `curve.source.issues` and `curve.source.aligned`.
 
-| Evidence | Curve magnitudes | `curve.source.calibrated` |
+**Coverage is stated explicitly, and `calibrated` means the whole curve (frozen in Phase 7C.1).** The join can succeed while only part of the curve is anchored: three contributing attempts, two of which reported usage, produce a curve whose first two stretches are calibrated to provider counters and whose third is still the coarse shape weight. Both are legitimate best estimates — per-delta allocation is reconstructed either way, so `peakTps` keeps its `≈` at every coverage level — but a curve one third of which is unanchored is not a *calibrated curve*. `curve.source.calibrationCoverage` therefore reports one of:
+
+| `calibrationCoverage` | Condition | `curve.source.calibrated` |
 |---|---|---|
-| `outputTokens` + `reasoningTokens` | both phases anchored to their own counters | `true` |
-| `outputTokens` only | one common scale; the split stays `estimated` | `true` |
-| no usage | the raw shape weight, unchanged | `false` |
+| `full` | aligned, `contributingCount > 0`, every contributing attempt anchored | `true` |
+| `partial` | aligned, `0 < calibratedCount < contributingCount` | `false` |
+| `none` | aligned, `calibratedCount === 0` | `false` |
+| `fallback` | `aligned === false`: the join could not be trusted | `false` |
+
+`none` and `fallback` are different claims and are never conflated: the first says the evidence contains no provider total, the second says the evidence could not be joined. An unanchored attempt inside an aligned join raises **no** source issue — absence of usage is a magnitude-quality fact, not alignment corruption — so `curve.source.issues` stays empty for `partial` and `none`. `calibrated` is `true` only for `full`, including the vacuous case it must refuse: zero contributing attempts covers nothing, so `0 === 0` is `none` rather than completeness.
+
+| Evidence | Curve magnitudes | `calibrationCoverage` |
+|---|---|---|
+| every contributing attempt reports `outputTokens` (with or without `reasoningTokens`) | each anchored to its own provider total; the split is exact only where `reasoningTokens` exists | `full` |
+| some attempts report usage, some do not | the anchored ones calibrated, the others left as their raw shape | `partial` |
+| no attempt reports usage | the raw shape weight, unchanged | `none` |
+| the join is refused | the raw shape weight, with `issues` naming the mismatch | `fallback` |
 
 If an attempt reports `outputTokens` and `reasoningTokens`, reasoning and non-reasoning output are each calibrated separately, and the attempt's curve samples sum to `outputTokens` exactly. The curve's local shape remains an estimate while its integral is anchored to exact aggregate counts; the axis that describes this is `temporalShapeQuality = reconstructed` (§11), and `curve.quality` carries that value.
 

@@ -200,30 +200,27 @@ function referenceTps(samples, atMs) {
 }
 
 /**
- * Reference grid of one attempt: every instant the sampling rule can place a vertex on,
+ * Reference grid of one attempt: every instant the sampling rule places a vertex on,
  * ascending.
  *
- * The body is the 250 ms ladder from the attempt's first sample through its last
- * token-producing sample. The tail continues one step past the last sample until one whole
- * window has been sampled, so every tail window is a whole `(t - windowMs, t]` rather than
- * a truncated one. A silence inside the attempt is simply a stretch of the body ladder.
+ * The body is the 250 ms cadence ladder from the attempt's first sample to its last
+ * token-producing sample, **unioned with that last instant itself**. The anchor is what
+ * makes an attempt's real endpoint a vertex even when it does not fall on the cadence;
+ * deduplication is what keeps an on-cadence endpoint from appearing twice.
+ *
+ * There is no second ladder. `docs/METRICS_SPEC.md` §8.1 defines the axis as compressed
+ * model generation, which ends at the last delta, so a vertex past it would be
+ * post-generation time and would be clamped onto the chart's right edge. A silence
+ * **inside** the attempt is simply a stretch of this one ladder.
  */
-function gridOf(samples, { hasSuccessor = false, nextStartMs = null, endMs = 0 } = {}) {
+function gridOf(samples, segment = null) {
   if (samples.length === 0) return []
   const first = samples[0].localMs
   const last = samples[samples.length - 1].localMs
-  const bodyEnd = Math.min(last, endMs)
+  const bodyEnd = segment === null ? last : Math.min(last, segment.endMs - segment.startMs)
   const instants = []
   for (let at = first; at <= bodyEnd + 1e-9; at += STEP_MS) instants.push(Math.round(at))
-  /**
-   * An attempt followed by another call is cut at the coordinate that call owns, so its
-   * tail is bounded by `nextStartMs`; the final attempt keeps the ordinary one-window
-   * tail because nothing follows it to compete for those coordinates.
-   */
-  const tailLimit = hasSuccessor && nextStartMs !== null
-    ? Math.max(bodyEnd, nextStartMs)
-    : bodyEnd + WINDOW_MS
-  for (let at = last + STEP_MS; at <= tailLimit + 1e-9; at += STEP_MS) instants.push(Math.round(at))
+  if (instants.length === 0 || instants[instants.length - 1] < bodyEnd - 1e-9) instants.push(bodyEnd)
   return [...new Set(instants)].sort((left, right) => left - right)
 }
 
@@ -268,6 +265,11 @@ function compareAttempt(settledCurve, spec, segments, { expectVertices = 1 } = {
    * The colour segmentation partitions the same trace: consecutive runs share their
    * boundary vertex, and every vertex carries the phase of the newest sample at or before
    * it — which is what the live meter's `streamingPhase` reports.
+   *
+   * The reference resolves a simultaneous pair by **list position**, which is the order the
+   * samples were delivered in: `referenceSamples` sorts by `localMs` with a stable sort, so
+   * two samples at one instant keep the order the script declared them in. That is the same
+   * fact `compressAttempts` publishes as `sampleOrder`.
    */
   let expectedPhase = null
   for (const [position, point] of trace.points.entries()) {
@@ -318,9 +320,9 @@ function referencePeak({ attempts, compressed }) {
 test('reference agreement: one burst, two measurements half a window apart', () => {
   const attempt = { id: 'a', step: 1, local: [[0, 'output'], [500, 'output']] }
   const { curve, compressed } = drive({ attempts: [attempt] })
-  compareAttempt(curve, attempt, compressed.segments, { expectVertices: 7 })
-  /** The shape the project has always drawn, restated as the reference's answer. */
-  assert.deepEqual(curve.attempts[0].points.map(p => p.tps), [100, 100, 200, 200, 100, 100, 0])
+  compareAttempt(curve, attempt, compressed.segments, { expectVertices: 3 })
+  /** The shape the project has always drawn, up to its last model-producing delta. */
+  assert.deepEqual(curve.attempts[0].points.map(p => p.tps), [100, 100, 200])
 })
 
 test('reference agreement: two bursts three windows apart', () => {
@@ -340,14 +342,14 @@ test('reference agreement: two bursts three windows apart', () => {
   assert.deepEqual(points.map(point => [point.localMs, point.tps]), [
     [0, 100], [250, 100], [500, 100], [750, 100], [1000, 0],
     [1250, 0], [1500, 0], [1750, 0], [2000, 0], [2250, 0], [2500, 0], [2750, 0],
-    [3000, 100], [3250, 100], [3500, 100], [3750, 100], [4000, 0],
-  ], 'the body ladder runs across the silence and the tail ladder closes it')
+    [3000, 100],
+  ], 'the one ladder runs across the silence and stops on the delta that ended the attempt')
 })
 
 test('reference agreement: a gap below the window is one continuous climb', () => {
   const attempt = { id: 'a', step: 1, local: [[0, 'output'], [750, 'output']] }
   const { curve, compressed } = drive({ attempts: [attempt] })
-  const result = compareAttempt(curve, attempt, compressed.segments, { expectVertices: 8 })
+  const result = compareAttempt(curve, attempt, compressed.segments, { expectVertices: 4 })
   assert.equal(result.episodes, 1)
   assert.equal(curve.attempts[0].points.find(point => point.localMs === 750).tps, 200,
     'both deltas are inside the window at 750 ms')
@@ -356,7 +358,7 @@ test('reference agreement: a gap below the window is one continuous climb', () =
 test('reference agreement: a gap of exactly one window, and the sample at zero expires at its far edge', () => {
   const attempt = { id: 'a', step: 1, local: [[0, 'output'], [1000, 'output']] }
   const { curve, compressed } = drive({ attempts: [attempt] })
-  compareAttempt(curve, attempt, compressed.segments, { expectVertices: 7 })
+  compareAttempt(curve, attempt, compressed.segments, { expectVertices: 5 })
   /**
    * At local 1000 the window is `(0, 1000]`, so the sample at zero has expired at exactly
    * the instant the second one arrives. The reference says the same thing without being
@@ -384,9 +386,9 @@ test('reference agreement: a gap of one window plus one step, on and off the gri
   const second = drive({ attempts: [offGrid] })
   compareAttempt(second.curve, offGrid, second.compressed.segments)
   assert.deepEqual(second.curve.attempts[0].points.map(point => [point.localMs, point.tps]), [
-    [0, 100], [250, 100], [500, 100], [750, 100], [1000, 0],
-    [1251, 100], [1501, 100], [1751, 100], [2001, 0],
-  ], 'an off-grid resumption shifts the tail ladder one step out, so every window it measures is whole')
+    [0, 100], [250, 100], [500, 100], [750, 100], [1000, 0], [1001, 100],
+  ], 'an off-grid final delta is appended to the cadence ladder, so the attempt ends where '
+    + 'it really stopped producing rather than at the last whole step')
 })
 
 test('reference agreement: three bursts in one attempt', () => {
@@ -416,7 +418,12 @@ test('reference agreement: reasoning and output alternating inside one attempt',
    */
   const points = curve.attempts[0].points
   const samples = referenceSamples(attempt)
-  for (const localMs of [0, 500, 1000, 3000, 3500, 4000, 7000, 7500]) {
+  /**
+   * Every vertex the trace actually carries, up to the attempt's own last delta at 7000. The
+   * silence between the phases is long enough that 7000 is a grid instant, so the sample set
+   * below is the whole ladder.
+   */
+  for (const localMs of [0, 500, 1000, 3000, 3500, 4000, 7000]) {
     const point = points.find(candidate => candidate.localMs === localMs)
     assert.ok(point !== undefined, `the trace samples ${localMs}`)
     assert.equal(point.tps, referenceTps(samples, localMs),
@@ -449,15 +456,15 @@ test('reference agreement: across an attempt boundary, each call is measured on 
     tools: [{ callId: 't1', startMs: 1000, endMs: 60_000 }],
   })
   compareAttempt(curve, first, compressed.segments, { expectVertices: 3 })
-  compareAttempt(curve, second, compressed.segments, { expectVertices: 7 })
+  compareAttempt(curve, second, compressed.segments, { expectVertices: 3 })
   /**
    * Both calls stream the same shape, so the two traces must report the same numbers. A
    * bridged window would make the second one larger; the reference measures each over its
    * own script, which is the per-attempt partition restated.
    */
-  assert.deepEqual(curve.attempts[1].points.map(p => p.tps), [100, 100, 200, 200, 100, 100, 0])
+  assert.deepEqual(curve.attempts[1].points.map(p => p.tps), [100, 100, 200])
   assert.deepEqual(curve.attempts[0].points.map(p => p.tps), [100, 100, 200],
-    'attempt A is measured on its own clock up to the coordinate attempt B takes over')
+    'attempt A is measured on its own clock up to its own last delta, where attempt B takes over')
   assert.equal(curve.peakTps, 200)
 })
 
@@ -640,10 +647,11 @@ test('a trace is a function of one attempt alone, whatever its neighbours do', (
   /**
    * The strongest available structural check on the per-attempt partition. The same script
    * is driven twice: once as the only call of its turn, and once as the **second** call,
-   * after a first call that occupies exactly the same compressed width. The two placements
-   * give the attempt the same compressed coordinates and the same "owns its own tail"
-   * status, so its trace must be identical vertex for vertex. Only a window that never read
-   * a neighbouring attempt's samples can survive that.
+   * after a first call that occupies exactly the same compressed width. Both placements
+   * sample the same instants — since Phase 7C.1 every attempt ends on its own last delta,
+   * so neither placement draws past it — and the two traces must therefore be identical
+   * vertex for vertex. Only a window that never read a neighbouring attempt's samples can
+   * survive that.
    */
   const subject = {
     id: 'subject',
@@ -693,10 +701,10 @@ test('a trace is a function of one attempt alone, whatever its neighbours do', (
   compareAttempt(after.curve, subject, after.compressed.segments)
 
   /**
-   * The one thing a neighbour legitimately changes: an attempt followed by another call is
-   * cut at the coordinate that call owns, so its tail cannot be drawn over coordinates the
-   * next call is about to use. The cut is a width limit, never a magnitude one — the
-   * vertices that survive it carry the same values they would have carried alone.
+   * A neighbour changes nothing at all, not even a width limit: an attempt's trace ends on
+   * its own last delta in both placements, and that same coordinate is where the next call
+   * opens. The cut the previous revision applied — bounded by the successor's start — was
+   * therefore never reached, and its removal is what makes the two placements identical.
    */
   const first = drive({
     attempts: [
@@ -706,23 +714,23 @@ test('a trace is a function of one attempt alone, whatever its neighbours do', (
     tools: [{ callId: 't1', startMs: 6000, endMs: 40_000 }],
   })
   const cut = first.curve.attempts.find(candidate => candidate.attemptId === 'subject')
-  const boundary = first.compressed.segments[0].nextStartMs
-  assert.ok(cut.points.at(-1).timeMs <= boundary + 1e-9,
-    `the trace may not be drawn past the coordinate the next attempt owns (${cut.points.at(-1).timeMs} <= ${boundary})`)
-  assert.ok(boundary - cut.points.at(-1).timeMs < STEP_MS,
-    'and it reaches to within one sampling step of it, rather than stopping at the last delta')
+  const boundary = first.compressed.segments[0].endMs
+  assert.equal(cut.points.at(-1).timeMs - cut.startMs, 5400,
+    'the trace ends on the attempt\'s own final delta, which is the coordinate the next attempt owns')
+  assert.equal(cut.points.at(-1).timeMs <= boundary + 1e-9, true,
+    'so it reaches the boundary exactly, and never past it')
   const soloPoints = new Map(solo.points.map(entry => [entry[0], entry[1]]))
   for (const point of cut.points) {
     assert.equal(point.tps, soloPoints.get(point.localMs),
-      `the cut must not move a value: ${point.localMs} ms reads ${point.tps}`)
+      `a neighbour must not move a value: ${point.localMs} ms reads ${point.tps}`)
   }
 })
 
 test('the compressed axis and the trace agree on where each attempt ends', () => {
   /**
-   * A structural check that does not go through the window at all: an attempt's trace can
-   * never draw past the coordinate that attempt owns. The final attempt owns its own
-   * one-window tail; every earlier one is cut where its successor begins.
+   * A structural check that does not go through the window at all, and since Phase 7C.1 it
+   * is an **equality**: an attempt's trace ends on the last coordinate that attempt owns,
+   * for the final attempt exactly as for every earlier one.
    */
   const attempts = [
     { id: 'a', step: 1, local: [[0, 'output'], [1000, 'output']] },
@@ -742,13 +750,15 @@ test('the compressed axis and the trace agree on where each attempt ends', () =>
     assert.equal(trace.endMs, segment.endMs)
     const drawn = trace.points.map(point => point.timeMs)
     assert.equal(drawn[0], segment.startMs, 'a trace opens on its own attempt\'s first coordinate')
-    const limit = segment.hasSuccessor ? segment.nextStartMs : segment.endMs + WINDOW_MS
-    assert.ok(drawn.at(-1) <= limit + 1e-9,
-      `${segment.attemptId}: the trace reaches ${drawn.at(-1)}, past its own limit ${limit}`)
+    assert.equal(drawn.at(-1), segment.endMs,
+      `${segment.attemptId}: the trace ends exactly on the last coordinate the attempt owns`)
+    assert.equal(trace.localEndMs, segment.endMs - segment.startMs)
   }
   /** The whole chart fits the axis, and the axis is model generation only. */
   assert.equal(curve.durationMs, compressed.durationMs)
   assert.equal(curve.durationMs, 1000 + 700 + 0, 'a tool gap and a zero-width attempt consume no width')
+  assert.equal(curve.attempts.at(-1).points.at(-1).timeMs, curve.durationMs,
+    'and the final attempt reaches the axis end without drawing past it')
   assert.equal(peakTps(...curve.attempts.map(attempt => attempt.points)), curve.peakTps)
 })
 

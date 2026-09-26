@@ -2357,3 +2357,125 @@ changed: `totalRollingTpsSeries` sorted its samples by `activeTimeMs` alone, so 
 shared an instant the vertex's `activePhase` depended on the sort's stability — that is, on which chunk the transport
 delivered first. The tie is now broken by phase (`output` after `reasoning`), and `test/curve.test.js` asserts that
 arrival order cannot change the series.
+
+**That repair is superseded by Phase 7C.1, and the reason is stated here rather than only below.** The phase tie-break
+made the completed label disagree with `LiveMeter.streamingPhase` for a stream delivered text-then-reasoning, and the
+assertion "arrival order cannot change the series" was true of the rate and false of the label.
+
+## Phase 7C.1 — Final curve consistency closure (2026-09-26)
+
+An external audit of the pushed Phase 7C history (`117bcdd`) confirmed the calibration join and the attempt-local
+rolling window are correct, and named three remaining inconsistencies. All three are one kind of defect: the code did
+something other than what its own documentation said.
+
+### 1. The final attempt's tail collapsed onto the right edge (BLOCKER A)
+
+**Counterexample.** One attempt, one-second window, 250 ms cadence, deltas at local 0 ms and 500 ms.
+`compressAttempts` measured the attempt's compressed width as `last - first = 500`, so `curve.durationMs` was 500. The
+trace, however, was sampled out to `bodyEndMs + windowMs`:
+
+    old trace times    0, 250, 500, 750, 1000, 1250, 1500
+    old x coordinates  0, 50, 100, 100, 100, 100, 100
+
+`xOf(timeMs, durationMs)` clamps everything above the duration to `CURVE_VIEW_WIDTH`, so **five distinct instants**
+became one x coordinate and the SVG closed with a vertical stroke at the chart's right edge that no delta produced.
+
+**Why the rule existed.** `attemptTrace` gave the final attempt `bodyEndMs + windowMs` because nothing followed it to
+compete for those coordinates, and cut every other attempt at its successor's `nextStartMs`. The intent — "draw the
+decay of the last tokens, which really do contribute to the rate for one window" — is sound about the *window* and
+wrong about the *axis*. §8.1 defines the axis as compressed model generation, §7 excludes the host settlement tail from
+generation duration, and a vertex past the last delta is post-generation time. The final attempt was also the only
+attempt whose own evidence was drawn differently depending on where it sat in the turn: an identical single-delta
+attempt drew five vertices when it happened to be last and one when it did not.
+
+**The rule that replaces it, for every attempt.** The sampled instants are the union of the attempt's own cadence
+ladder from local zero and **its last model-producing instant**, deduplicated and ascending. The trace therefore ends
+where the model stopped producing, and an off-grid endpoint is still a vertex: `0, 250, 500, 510` for a final delta at
+510 ms. `segment.hasSuccessor` and `segment.nextStartMs` are deleted — with the tail gone they named the same
+coordinate as `endMs`, and a field that exists only to special-case the last attempt is the defect restated.
+
+**What it must not remove, and does not.** A silence *between* two deltas is model-generation time and keeps its full
+width: the grid runs across it, the rate decays to zero and climbs again. The distinction is "between deltas" versus
+"after the last one", not "short" versus "long". A 4 s intra-attempt stall is asserted unchanged, and a 60 s tool gap
+still consumes no width at all.
+
+**Peak.** Removing the tail cannot move `peakTps`, and the test measures that rather than arguing it: the superseded
+sampler is reproduced beside the new one, and the two agree on every shared vertex and on the maximum.
+
+### 2. Same-timestamp phase labels followed an arbitrary hierarchy (BLOCKER B)
+
+`totalRollingTpsSeries` and `attemptTrace` both resolved a simultaneous reasoning/output pair with
+`comparePhase(a.phase, b.phase)`, a fixed `reasoning < output` order, so `output` won every tie and the completed
+label was reproducible. Reproducible is not the same as correct: `LiveMeter.streamingPhase` is the phase of the last
+**accepted** sample, so for a pair delivered text-then-reasoning the live pill said `reasoning` while the completed
+vertex said `output`, from the same stream.
+
+DSH already carries the order twice — the transient frame index and the durable compact stream member order — and both
+reconstruct into `record.attempts[].samples` in that order, because `TurnTelemetryStore.acceptChunk` appends and both
+reconstruction paths walk their decoded chunks in sequence. `compressAttempts` now captures that position **before**
+any timestamp sort and publishes it per sample as `sampleOrder`; the curve layer sorts by `time`, then `sampleOrder`,
+and never by phase. `comparePhase` is deleted.
+
+The consequence is bounded, and the boundedness is the contract: order changes **no magnitude**, because a window holds
+every sample at an instant whatever the sequence, so only the label moves. The old assertion in `test/curve.test.js` —
+`arrival order cannot change the series` — was true of the rate and false of the label, and is restated as "order
+cannot change the numbers; it does decide the label". Durable and live feeds are compared over every recorded fixture
+on rate, label and visual tone.
+
+### 3. `curve.source.calibrated` meant "some attempts calibrated" (BLOCKER C)
+
+`curveSource` computed `calibratedForCurve = calibratedCount > 0`, so a turn of three contributing attempts in which
+two reported usage was published as a calibrated curve, and `curveViewModel.calibrated` repeated the claim. One third
+of that chart was still the coarse shape weight.
+
+The mixed magnitudes are **not** the defect and are not removed. An anchored attempt's estimate is calibrated to its
+provider counter, an unanchored one stays the raw shape, both are legitimate best estimates, the peak keeps its `≈` at
+every coverage level because per-delta allocation is reconstructed in all of them, and dropping the unanchored attempt
+would remove real generation from the chart. What was wrong was the provenance claim, so the claim is now explicit:
+
+    full      aligned, contributingCount > 0, every contributing attempt anchored   calibrated: true
+    partial   aligned, 0 < calibratedCount < contributingCount                      calibrated: false
+    none      aligned, calibratedCount === 0                                        calibrated: false
+    fallback  aligned === false                                                     calibrated: false
+
+`none` and `fallback` are different claims and are never conflated — no provider total exists, versus the evidence
+could not be joined — and an unanchored attempt inside an aligned join raises no `issues` entry, because absence of
+usage is a magnitude-quality fact rather than alignment corruption. `calibrationCoverage` travels to `curve.source` and
+to `curveViewModel`; the compact card shows nothing new, because it already prints the peak with `≈` and a third line
+of provenance would be clutter.
+
+### 4. The "midpoint" claim was algebraically a restatement (documentation)
+
+`visualRunsOf` computed a change's boundary as `Math.floor((stretch.last + next.first) / 2)` and described it as "the
+midpoint of the label change, so a long silence is divided between the two tones". Every vertex of a trace carries an
+`activePhase`, so `next.first` **is** `stretch.last + 1` and the expression always evaluated to `stretch.last`: the
+outgoing stretch's own last labelled vertex, shared with the incoming subpath. No real trace could produce the
+non-adjacent phase stretches the wording presupposed. The formula and the trailing "final run must reach the last
+vertex" patch are gone; the rule is stated directly in the code, in `docs/METRICS_SPEC.md` §8.2.2 and in
+`docs/UI_SPEC.md` §6.1. The seam itself is unchanged.
+
+### 5. A latent marker-provenance defect found while fixing the above
+
+`curveViewModel` attached `series` and `tone` to each singleton marker from a hard-coded `{ key, tone }` literal paired
+with the **built** series under a `built` field. The top-level `markers` array carried both; the per-series
+`series[].markers` arrays did not, because `buildSeries` published the raw `run.marker` objects. Two access paths were
+describing the same dot differently. The per-series lists are now a filter of the enriched markers, so the two cannot
+drift, and `test/curve-stream-order.test.js` asserts the tone on the series-level list.
+
+### 6. Verification for this round
+
+Three new defect files were written and **observed failing against `117bcdd` before any production change**:
+`test/curve-axis-endpoint.test.js` (the right-edge counterexample, whose message reads
+`post-generation tail collapses several distinct instants onto one x coordinate; 5 vertices sit at x = 100`),
+`test/curve-stream-order.test.js`, and `test/curve-calibration-coverage.test.js`. Together they produced 26 failing
+assertions on the old revision.
+
+`npm run verify` reports **625 tests, 625 pass, 0 fail**. The 587 of `117bcdd` are retained apart from 53 expectations
+that encoded the superseded axis, the phase tie-break or the partial-coverage claim; every changed expectation carries
+its old contract in a comment beside it, and the reason is one of §1–§4 above. `MAX_RENDER_POINTS_TOTAL` is untouched at
+512, and the budget only becomes easier to satisfy because the tail vertices are gone.
+
+The browser pass is recorded under `dev/screenshots/phase7c1/`, which is gitignored: a simple single-attempt turn and a
+five-call tool-driven turn, both driven from the composer of a clean host, with the DOM geometry and the engine-side
+measurements in `phase7c1-measurements.json`. Both charts carry exactly one vertex on `x = 100` — the legitimate final
+endpoint — and the served bundle was checked to contain the new rules and none of the three superseded ones.

@@ -106,8 +106,8 @@ test('a reasoning-only attempt is one reasoning-coloured run', () => {
   const { curve } = drive([{ id: 'a', step: 1, local: [[0, 'reasoning'], [500, 'reasoning']] }])
   const trace = traceOf(curve, 'a')
   assert.deepEqual(ladder(trace), [
-    [0, RATE], [250, RATE], [500, TWICE], [750, TWICE], [1000, RATE], [1250, RATE], [1500, 0],
-  ], 'one delta, then two inside the window, then the first expires and the last decays')
+    [0, RATE], [250, RATE], [500, TWICE],
+  ], 'one delta, then two inside the window at the attempt\'s own final delta, where the trace stops')
   assert.deepEqual(trace.runs.map(run => run.phase), ['reasoning'], 'one phase, one coloured run')
   assert.equal(curve.series.find(entry => entry.key === 'reasoning').present, true)
   assert.deepEqual(curve.series.find(entry => entry.key === 'output').runs, [],
@@ -135,9 +135,13 @@ test('reasoning then output inside one window is one rate with two tones', () =>
     'and that vertex measures both contributions in one window')
   assert.deepEqual(trace.points.filter(point => point.localMs <= 500).map(point => point.tps),
     [RATE, RATE, TWICE])
-  /** The rate never resets at a colour boundary: it is one trailing window throughout. */
-  assert.equal(at(trace, 750), TWICE)
-  assert.equal(at(trace, 1000), RATE, 'the reasoning delta expires one window after it arrived')
+  /**
+   * The rate never resets at a colour boundary: it is one trailing window throughout, and the
+   * attempt's own end is the last vertex it has. The window's later behaviour — the reasoning
+   * delta expiring one second after it arrived — lies past that end, so it is not drawn; the
+   * attempt's whole width is what the axis measures (`docs/METRICS_SPEC.md` §8.1).
+   */
+  assert.equal(trace.points.at(-1).localMs, 500)
 })
 
 test('reasoning -> output after more than one window leaves a visible zero between them', () => {
@@ -174,10 +178,13 @@ test('a long internal stall decays visibly to zero and then resumes', () => {
     [0, RATE], [250, RATE], [500, RATE], [750, RATE],
     [1000, 0], [1250, 0], [1500, 0], [1750, 0], [2000, 0], [2250, 0], [2500, 0], [2750, 0],
     [3000, 0], [3250, 0], [3500, 0], [3750, 0],
-    [4000, RATE], [4250, RATE], [4500, RATE], [4750, RATE], [5000, 0],
-  ], 'the stall is twelve whole 250 ms vertices of measured zero, and the trace climbs again')
+    [4000, RATE],
+  ], 'the stall is twelve whole 250 ms vertices of measured zero, and the trace climbs again on the '
+    + 'resumed delta — which is also where it ends, because the model stopped producing there')
   assert.equal(trace.runs.length, 1, 'a stall is not a phase change, so it is not a new run')
   assert.equal(curve.durationMs, 4000, 'and the stall keeps its full width on the axis')
+  assert.equal(trace.points.at(-1).timeMs, curve.durationMs,
+    'the trace ends on the axis end rather than on a decay past it')
   assert.equal(curve.peakTps, RATE,
     'two deltas four windows apart never share a window, so the peak is one delta')
 })
@@ -213,16 +220,17 @@ test('the next attempt resets the window and the boundary is a subpath break', (
   const first = traceOf(curve, 'a')
   const second = traceOf(curve, 'b')
   /**
-   * Attempt A is cut where attempt B begins, so its one-window decay is not drawn: those
-   * coordinates belong to the call that follows. The vertices that survive carry the values
-   * its own window produced, so the cut is a width limit and never a magnitude one.
+   * Attempt A ends on its own last delta; attempt B opens on that same coordinate and runs to
+   * its own end. The previous expectation gave B four vertices of one-window decay past its
+   * last delta — and, before that, gave A a cut it no longer needs, since A's own end *is* the
+   * coordinate B begins at. The values that survive carry what each call's own window produced.
    */
   assert.deepEqual(ladder(first), [[0, RATE], [250, RATE], [500, TWICE]],
-    'A stops at the shared coordinate, on its own strongest measurement')
+    'A stops on its own strongest measurement, both of its deltas still inside the window')
   assert.deepEqual(ladder(second), [
     [0, RATE], [250, RATE], [500, RATE], [750, RATE],
     [1000, 0], [1250, 0], [1500, 0], [1750, 0], [2000, 0], [2250, 0],
-    [2500, RATE], [2750, RATE], [3000, RATE], [3250, RATE], [3500, 0],
+    [2500, RATE],
   ], 'attempt B never inherits attempt A\'s trailing tokens: its two deltas are two and a half '
     + 'seconds apart, so the window is empty between them and the peak is one delta')
 
@@ -253,10 +261,10 @@ test('a retry resets the window just as a new attempt does', () => {
   assert.equal(second.startMs, first.startMs + 500,
     'the abandoned prefix keeps its own half-second, and the successor begins after it')
   assert.deepEqual(ladder(first), [[0, RATE], [250, RATE], [500, TWICE]],
-    'an attempt whose successor shares its last coordinate is cut there')
+    'the abandoned prefix ends on its own last coordinate, which the successor takes over')
   assert.deepEqual(ladder(second), [
-    [0, RATE], [250, RATE], [500, TWICE], [750, TWICE], [1000, RATE], [1250, RATE], [1500, 0],
-  ], 'and the retry measures its own window alone')
+    [0, RATE], [250, RATE], [500, TWICE],
+  ], 'and the retry measures its own window alone, ending on its own last delta')
 })
 
 /* ---------------------------------------------------- 12-13. colour is not a statistical reset */
@@ -277,10 +285,12 @@ test('a phase boundary is a colour change, never a statistical reset or an x gap
   assert.equal(first.points.at(-1).timeMs, second.points[0].timeMs)
   assert.equal(first.points.at(-1).tps, second.points[0].tps)
   /**
-   * The seam here sits at the midpoint of the label change, which for adjacent vertices is the
-   * last one still labelled `reasoning`. Both subpaths draw it, so the tone changes on a
-   * measured vertex rather than across a gap; the vertex keeps the phase the meter was
-   * reporting at that instant, which is exactly what `streamingPhase` would have said.
+   * The seam is the outgoing stretch's last labelled vertex, which is the last one still
+   * labelled `reasoning`. Both subpaths draw it, so the tone changes on a measured vertex
+   * rather than across a gap; the vertex keeps the phase the meter was reporting at that
+   * instant, which is exactly what `streamingPhase` would have said. (An earlier revision
+   * described this as the midpoint of the label change; the two stretch boundaries are
+   * adjacent indices, so the formula evaluated to this same vertex.)
    */
   assert.equal(first.points.at(-1).activePhase, 'reasoning')
   assert.equal(second.points[0].activePhase, 'reasoning')

@@ -591,10 +591,19 @@ export class TurnTelemetryStore {
          * trusted, and the whole curve fell back to the raw shape weight rather than
          * attaching one attempt's calibration to another
          * (`src/core/curve-source.js`).
+         *
+         * `calibrated` means **the whole curve** is anchored, and `calibrationCoverage`
+         * states that explicitly as `full` / `partial` / `none` / `fallback`. A turn
+         * whose attempts reported usage unevenly is `partial`: some stretches are
+         * anchored to a provider counter and some are still the coarse shape weight,
+         * which is a legitimate best estimate and an inaccurate thing to call
+         * "calibrated". The peak keeps its `≈` at every level, because per-delta
+         * allocation is reconstructed in all of them.
          */
         source: {
           aligned: source.aligned,
           calibrated: source.calibratedForCurve,
+          calibrationCoverage: source.calibrationCoverage,
           contributingAttemptCount: source.contributingCount,
           calibratedAttemptCount: source.calibratedCount,
           rawFallbackAttemptIds: source.rawFallbackAttemptIds,

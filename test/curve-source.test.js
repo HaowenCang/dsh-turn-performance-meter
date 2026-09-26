@@ -83,6 +83,7 @@ test('with authoritative usage the curve samples sum to the provider total', () 
   const source = curveSource(record.attempts, settled.attemptBreakdown)
   assert.equal(source.aligned, true)
   assert.equal(source.calibratedForCurve, true)
+  assert.equal(source.calibrationCoverage, 'full')
   assert.equal(source.calibratedCount, 1)
   assert.deepEqual(source.issues, [])
 
@@ -164,10 +165,16 @@ test('attempts are calibrated independently, one scale each', () => {
   assert.deepEqual(source.attempts.map(attempt => attempt.anchored), [true, true, false],
     'an attempt inside an aligned join that reported no usage is explicitly unanchored')
   /**
-   * The whole curve is reported as calibrated because the join happened; a caller that
-   * wants per-attempt provenance reads `anchored`.
+   * **The curve as a whole is not calibrated.** Two of three attempts are anchored, so the
+   * provenance is `partial` and `calibratedForCurve` — which means "the whole curve" — is
+   * false. The previous revision reported `true` here because *some* attempt was calibrated,
+   * which told every consumer of the boolean that a curve one third of which was still a raw
+   * heuristic shape was a calibrated curve.
    */
-  assert.equal(source.calibratedForCurve, true)
+  assert.equal(source.calibrationCoverage, 'partial')
+  assert.equal(source.calibratedForCurve, false)
+  assert.deepEqual(source.issues, [],
+    'and the missing usage is not an alignment problem: it is a magnitude-quality one')
 })
 
 test('tool-call argument samples are inside the calibrated total', () => {

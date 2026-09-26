@@ -59,20 +59,41 @@ function assertPositive(value, label) {
 }
 
 /**
- * Total order over the two content phases, so a tie between simultaneous samples resolves the
- * same way whatever order the transport delivered them in.
+ * Authoritative stream ordinal of one sample.
  *
- * The order itself is arbitrary; that it exists is not. `output` sorts **after**
- * `reasoning`, and since a vertex takes the label of the newest sample at or before it, an
- * attempt that produces a reasoning delta and a text delta at the same instant is labelled
- * with the output one — the phase the attempt is moving into, which is also what
- * `LiveMeter.streamingPhase` reports, because its last accepted sample of the batch is
- * whichever arrived last and the two halves of the project must agree on the tie.
+ * The order in which a model's deltas were delivered is **evidence**, and it is the only
+ * evidence there is for which of two simultaneous samples is the newer one. DSH carries it
+ * twice — the transient frame index and the durable compact stream member order — and both
+ * reconstruct into the stored attempt's `samples` array in that order, which
+ * `compressAttempts` publishes per sample as `sampleOrder`.
+ *
+ * A sample that already carries the ordinal keeps it. One that does not takes its position
+ * in the list it arrived in, which is the same fact stated by the array itself and is what
+ * keeps a direct caller of `totalRollingTpsSeries` well defined.
  */
-function comparePhase(left, right) {
-  const rank = phase => (phase === 'reasoning' ? 0 : (phase === 'output' ? 1 : 2))
-  return rank(left) - rank(right)
+function ordinalOf(sample, index) {
+  return Number.isFinite(sample?.sampleOrder) ? sample.sampleOrder : index
 }
+
+/**
+ * Ascending instant, then the authoritative stream ordinal — **never** the phase.
+ *
+ * The second key is load-bearing rather than cosmetic. `activePhase` is the label of the
+ * newest sample at or before a vertex, and a reasoning delta and a text delta can share one
+ * timestamp, so something has to decide which of them is newer. The previous revision
+ * decided it with a fixed phase hierarchy (`reasoning` before `output`, so `output` always
+ * won) on the reasoning that a deterministic rule beats the sort's stability. Determinism
+ * is not the same as agreement: `LiveMeter.streamingPhase` is the phase of the last
+ * **accepted** sample, so for a pair delivered text-then-reasoning the live pill says
+ * `reasoning` while the completed vertex said `output`. Two halves of one project
+ * disagreed about one stream.
+ *
+ * Ordering by the ordinal reproduces the live semantics exactly, because the ordinal *is*
+ * the live order. It does not weaken reproducibility: the ordinal is derived from the
+ * stored evidence, not from which array the transport happened to hand the curve. And it
+ * changes no number — a window holds every sample at an instant whatever their order — so
+ * only the label moves (`test/curve-stream-order.test.js`).
+ */
 
 /**
  * Rolling TPS trace of one attempt, over **every** generated sample of that attempt.
@@ -100,13 +121,14 @@ function comparePhase(left, right) {
  * at or before that instant, which is `LiveMeter.streamingPhase` restated. The
  * label changes where the tone changes; it never changes the number.
  *
- * **A trailing run is sampled on a shifted grid.** The decay past a run's last
- * sample is sampled at `localEnd + sampleEveryMs`, `localEnd + 2 * sampleEveryMs`,
- * … rather than on the grid anchored at the run's start. Both grids place every
- * vertex on a multiple of `sampleEveryMs`, but only the shifted one keeps every
- * window inside `(last − windowMs, last]`: anchoring the grid at the start makes
- * the final vertex a truncated half-window and reports a rate no definition
- * produces.
+ * **The grid ends where the evidence ends.** Vertices run from `fromMs` on the
+ * `sampleEveryMs` ladder to the last sample at or before `toMs`, and the attempt's own
+ * final instant is appended when it does not fall on the ladder. Nothing is sampled
+ * after it: a vertex past the last delta measures a window the model has stopped
+ * feeding, and on the completed chart it would carry a coordinate larger than
+ * `curve.durationMs` and be clamped onto `x = 100` — a vertical stroke at the right
+ * edge that the evidence does not contain
+ * (`test/curve-axis-endpoint.test.js`).
  *
  * **One clock, one window.** This function has no notion of an attempt, so calling
  * it across an attempt boundary bridges two model calls — the exact defect Phase 6
@@ -141,17 +163,21 @@ export function totalRollingTpsSeries(samples, options = {}) {
   assertPositive(sampleEveryMs, 'sampleEveryMs')
 
   const filtered = (Array.isArray(samples) ? samples : [])
-    .filter(sample => sample && Number.isFinite(sample.activeTimeMs))
-    .slice()
     /**
-     * Ascending instant, then phase. The second key is load-bearing rather than cosmetic:
-     * a reasoning delta and a text delta can share a timestamp, and the vertex's label is
-     * read off the newest sample at or before it. Ordering by time alone left that choice to
-     * the sort's stability, so the same evidence could label the same vertex `reasoning` or
-     * `output` depending on which chunk the transport happened to deliver first — and a
-     * phase-coloured chart whose colours depend on arrival order is not reproducible.
+     * The authoritative ordinal is attached to a **copy**, so the caller's sample objects
+     * are never written to, and the sort below has one key to read per entry rather than a
+     * side lookup into the input array.
      */
-    .sort((a, b) => a.activeTimeMs - b.activeTimeMs || comparePhase(a.phase, b.phase))
+    .map((sample, index) => (sample === null || sample === undefined
+      ? null
+      : { ...sample, sampleOrder: ordinalOf(sample, index) }))
+    .filter(sample => sample !== null && Number.isFinite(sample.activeTimeMs))
+    /**
+     * Ascending instant, then the authoritative ordinal. See `ordinalOf` above: the second
+     * key reproduces `LiveMeter.streamingPhase`'s answer for a simultaneous pair instead of
+     * imposing a phase hierarchy on it.
+     */
+    .sort((a, b) => a.activeTimeMs - b.activeTimeMs || a.sampleOrder - b.sampleOrder)
 
   const offsetMs = Number.isFinite(options.offsetMs) ? options.offsetMs : 0
   const sampleEnd = Math.max(0, filtered.length > 0 ? filtered[filtered.length - 1].activeTimeMs : 0)
@@ -159,10 +185,10 @@ export function totalRollingTpsSeries(samples, options = {}) {
     : (Number.isFinite(options.durationMs) ? Math.max(0, options.durationMs) : sampleEnd)
   const fromMs = Number.isFinite(options.fromMs) ? Math.max(0, options.fromMs) : 0
   /**
-   * Where the attempt stops producing. Past that instant the tail grid takes over,
-   * so the vertices before it sit on the attempt's own 250 ms grid and the vertices
-   * after it sit one step further out — which is what keeps every window a whole
-   * `(t - windowMs, t]`.
+   * `sampleEndMs` is where the attempt stops producing, and it is also the last instant the
+   * trace is sampled at. `toMs` bounds it from above so a bounded call still never reaches
+   * outside `[fromMs, toMs]`; the emitted endpoint is the last sample itself, so an off-grid
+   * final delta remains a vertex rather than being rounded to the cadence.
    */
   const sampleEndMs = Number.isFinite(options.sampleEndMs)
     ? Math.max(0, options.sampleEndMs)
@@ -177,9 +203,17 @@ export function totalRollingTpsSeries(samples, options = {}) {
    * floating-point error over a ten-minute turn would otherwise put the last vertex
    * off the grid it claims to be on.
    *
-   * The body grid always starts at `fromMs`, so a run's opening vertex is drawn even
-   * when it produced a single delta; the tail grid starts one step past the last
-   * sample, so it never repeats a vertex the body already drew.
+   * The set is the **union of the cadence ladder and the attempt's own end instant**.
+   * The ladder alone would drop a final delta that does not fall on the cadence — a
+   * delta at 510 ms would be sampled at 500 and the instant the model stopped
+   * producing would never be drawn. The end instant alone would drop the shape
+   * samples in between. Their union, deduplicated and ascending, is what makes the
+   * attempt's real endpoint an unconditional vertex while leaving the cadence intact
+   * (`test/curve-axis-endpoint.test.js`).
+   *
+   * The ladder starts at `fromMs`, so a run's opening vertex is drawn even when it
+   * produced a single delta. There is no second ladder: a vertex past `bodyEndMs`
+   * would be post-generation time and would be clamped onto the chart's right edge.
    */
   const instants = []
   const bodyEndMs = Math.max(fromMs, Math.min(sampleEndMs, toMs))
@@ -188,11 +222,7 @@ export function totalRollingTpsSeries(samples, options = {}) {
     if (at > bodyEndMs + 1e-9) break
     instants.push(at)
   }
-  for (let step = 1; ; step += 1) {
-    const at = sampleEndMs + step * sampleEveryMs
-    if (at > toMs + 1e-9) break
-    instants.push(at)
-  }
+  if (bodyEndMs > instants[instants.length - 1] + 1e-9) instants.push(bodyEndMs)
 
   /** Index into `filtered` of the newest sample at or before `localMs`, or `-1`. */
   let newest = -1
@@ -257,29 +287,32 @@ export function totalRollingTpsSeries(samples, options = {}) {
  * last vertex of A and the first vertex of B are computed from disjoint sample sets,
  * whatever the x distance between them happens to be.
  *
- * A trace is sampled over the attempt's own body and then one window of tail, so the
- * trailing decay of its final tokens is drawn: those tokens really do contribute to
- * the rate for one window after they arrive. The tail is clamped by the **earlier of
- * two** limits, and both are needed:
+ * **A trace is sampled from the attempt's first delta to its last one, and no
+ * further.** The sampled instants are the union of two sets:
  *
- *   - `segment.nextStartMs`, the compressed coordinate at which the next attempt
- *     begins. A window is a per-attempt measurement, so an attempt's decay may not be
- *     drawn across the next call — including the degenerate case where the two
- *     attempts share a coordinate, which is what a retry whose abandoned prefix
- *     produced a single delta looks like;
- *   - `localEnd + windowMs`, for the last attempt, which owns its own tail.
+ *   - the attempt's own cadence ladder, `0, sampleEveryMs, 2 * sampleEveryMs, …`, up
+ *     to its last model-producing delta;
+ *   - that last model-producing instant itself.
  *
- * `hasSuccessor` is what distinguishes the two: without it an attempt that happens to
- * end exactly at the axis end is indistinguishable from one followed by another call.
+ * The union is what makes the attempt's **real** endpoint a vertex even when it does
+ * not fall on the cadence: a call whose final delta arrives at 510 ms is sampled at
+ * `0, 250, 500, 510`, not at `0, 250, 500`, so the instant the model stopped
+ * producing is always drawn. Deduplication is what keeps an on-cadence endpoint from
+ * being emitted twice.
  *
- * A real stall **inside** the attempt is preserved in full: the grid runs across it
- * and the trailing rate decays to zero, because a model that stops delivering for
- * more than a window is a throughput fact the chart exists to show. That is
- * different from a tool wait or an inter-attempt wait, which own no coordinate at
- * all and are the reason the grid stops at the attempt's own bound.
+ * Every attempt obeys this identically, so the final attempt is not a special case
+ * and no attempt receives synthetic width merely for being last. Tool waits,
+ * inter-attempt waits and next-call TTFT still own no coordinate at all: they lie
+ * between one attempt's last delta and the next one's first, where this trace has no
+ * vertex and the next trace's local zero is the same compressed coordinate.
+ *
+ * A real stall **inside** the attempt is preserved in full, because it lies between
+ * two deltas rather than after the last one: the grid runs across it and the trailing
+ * rate decays to zero. That is the fact the chart exists to show, and it is different
+ * in kind from a decay drawn past the point where the model stopped.
  *
  * @param {{attemptId?:string|null, step?:number|null, startMs:number, endMs?:number,
- *   localEndMs?:number, nextStartMs?:number, hasSuccessor?:boolean}} segment
+ *   localEndMs?:number}} segment
  * @param {readonly object[]} samples compressed samples carrying `attemptId` and `activeTimeMs`
  * @param {{
  *   windowMs?:number, sampleEveryMs?:number, attemptId?:string|null, calibrated?:boolean,
@@ -308,14 +341,19 @@ export function attemptTrace(segment, samples, options = {}) {
       && (sample.attemptId ?? null) === attemptId
       && Number.isFinite(sample.activeTimeMs)
     ))
-    .map(sample => ({
+    .map((sample, index) => ({
       ...sample,
       activeTimeMs: Number.isFinite(sample.attemptTimeMs)
         ? Math.max(0, sample.attemptTimeMs)
         : Math.max(0, (sample.activeTimeMs ?? 0) - startMs),
+      /** The authoritative ordinal, carried explicitly into the sort below. */
+      sampleOrder: ordinalOf(sample, index),
     }))
-    /** The same deterministic tie-break `totalRollingTpsSeries` applies, so the two agree. */
-    .sort((a, b) => a.activeTimeMs - b.activeTimeMs || comparePhase(a.phase, b.phase))
+    /**
+     * The same tie-break `totalRollingTpsSeries` applies — instant, then authoritative
+     * ordinal — so the two agree on which simultaneous sample supplied a vertex's label.
+     */
+    .sort((a, b) => a.activeTimeMs - b.activeTimeMs || a.sampleOrder - b.sampleOrder)
 
   let tokens = 0
   let calibratedTokens = null
@@ -344,11 +382,27 @@ export function attemptTrace(segment, samples, options = {}) {
 
   const lastSampleMs = perAttempt[perAttempt.length - 1].activeTimeMs
   const boundedEndMs = Math.max(0, endMs - startMs)
+  /**
+   * **The trace stops where the attempt stopped producing.** `bodyEndMs` is the attempt's
+   * own last model-producing instant — the coordinate `curve.durationMs` already accounts
+   * for — and it is the only bound, for every attempt including the last.
+   *
+   * The previous revision gave the final attempt `bodyEndMs + windowMs` and sampled a
+   * one-window decay past it. Those vertices are post-generation time: the axis is model
+   * generation (`docs/METRICS_SPEC.md` §8.1), the host settlement tail is excluded from
+   * generation duration (§7), and a vertex carrying a coordinate larger than the chart's
+   * own duration is clamped onto `x = 100` by `xOf(timeMs, durationMs)`. Several distinct
+   * instants therefore landed on one x coordinate and the SVG closed with a vertical stroke
+   * the evidence does not contain (`test/curve-axis-endpoint.test.js`).
+   *
+   * What this does **not** remove: a silence between two deltas *inside* the attempt. That
+   * straddles real model-generation time, the grid runs across it, and the trailing rate
+   * decays to zero and climbs again — the stall stays visible at full width (§8.2.1).
+   * The distinction is "between deltas" versus "after the last one", not "short" versus
+   * "long".
+   */
   const bodyEndMs = Math.max(0, Math.min(lastSampleMs, boundedEndMs))
-  const tailLimitMs = segment?.hasSuccessor === true && Number.isFinite(segment?.nextStartMs)
-    ? Math.max(bodyEndMs, segment.nextStartMs - startMs)
-    : bodyEndMs + windowMs
-  const toMs = Math.max(bodyEndMs, tailLimitMs)
+  const toMs = bodyEndMs
 
   const points = totalRollingTpsSeries(perAttempt, {
     windowMs,
@@ -381,25 +435,26 @@ export function attemptTrace(segment, samples, options = {}) {
  * This is the whole of the colour model. Each vertex carries the phase of the latest generated
  * sample at or before it, and the trace is cut where that label changes.
  *
- * ## Where the cut goes, and why it is not simply "where the label changes"
+ * ## Why the cut is the outgoing stretch's own last vertex
  *
- * Two facts pull in opposite directions. A tone change must **not** be drawn as a blank
- * horizontal gap, so consecutive runs have to meet; and a run must not claim coordinates its
- * own phase did not produce, or a long silence inside one phase would be painted with the
- * *wrong* tone for its whole length.
+ * `activePhase` persists until new phase evidence arrives, so a label is carried by **every**
+ * vertex of the trace: there is no vertex without a phase, and therefore no silence between two
+ * stretches. The maximal stretches of one label are contiguous by construction —
+ * `next.first === stretch.last + 1` — and the boundary of a change is the last vertex still
+ * labelled with the outgoing phase.
  *
- * Cutting at the first vertex of the new label satisfies the first and fails the second: an
- * attempt that reasons, falls silent for four seconds and then writes a tool call has a
- * four-second stretch of measured zero that would be attributed entirely to reasoning. Cutting
- * at the last vertex of the old label fails the first: the runs would then be separated by
- * exactly the silence, which on the 250 ms grid is a visible hole in an otherwise continuous
- * polyline — the defect this structure exists to remove.
+ * The incoming coloured path opens on that same vertex, which is what makes a tone change a
+ * seam rather than a hole: the two subpaths meet at one instant, one measured rate, one object.
+ * The next vertex then carries the new phase.
  *
- * The boundary is therefore the **midpoint** of the change, rounded down: the outgoing run
- * keeps the earlier half of the silence and the incoming run the later half, and the two meet
- * on one shared vertex. A phase change with no silence between its samples — the ordinary
- * case, because a call reasons and then writes — still produces exactly adjacent runs sharing
- * the transition vertex, so nothing about the common shape changes.
+ * A long silence is **not** divided between the two tones, and no rule here could divide it: a
+ * silence inside one phase is simply a stretch of zero-valued vertices that all carry that
+ * phase, and it is drawn in that phase's tone at full width, because a stall inside a model call
+ * is a throughput fact the chart exists to show (`docs/METRICS_SPEC.md` §8.2.1). An earlier
+ * revision described the cut as "the midpoint of the label change"; for a trace whose every
+ * vertex is labelled, the midpoint of two adjacent indices is `floor((last + last + 1) / 2)`,
+ * which is `last` — the same index. The formula was correct and its description was not, so the
+ * formula is gone and the rule is stated directly.
  *
  * The invariants this produces, and the ones the renderer and its tests rely on:
  *
@@ -433,30 +488,18 @@ export function visualRunsOf(points) {
   for (const [index, stretch] of stretches.entries()) {
     const previous = runs[runs.length - 1]
     /**
-     * A run opens on the vertex the previous one closed on, so the two subpaths meet there.
-     * That vertex is shared, not duplicated: it is one index in the trace's own grid, emitted
-     * by both paths and charged to both by the render budget.
+     * A run opens on the vertex the previous one closed on, so a tone change is a seam rather
+     * than a blank horizontal gap. That vertex is shared, not duplicated: it is one index in
+     * the trace's own grid, emitted by both paths and charged to both by the render budget.
      */
     const from = previous === undefined ? stretch.first : previous.endIndex
-    const next = stretches[index + 1]
-    const to = next === undefined
-      ? stretch.last
-      /**
-       * The shared vertex: the last one still labelled with this stretch's phase when the
-       * silence is even, and the first one labelled with the next phase when it is not. It is
-       * the same index either way, which is what makes the two subpaths meet.
-       */
-      : Math.floor((stretch.last + next.first) / 2)
+    /**
+     * The shared vertex: the final vertex carrying this stretch's phase, which is also the
+     * vertex in front of the next stretch. It is one index either way, which is what makes the
+     * two subpaths meet.
+     */
+    const to = stretch.last
     runs.push({ phase: stretch.phase, startIndex: from, endIndex: to, pointCount: to - from + 1 })
-  }
-  /**
-   * The final run must reach the trace's last vertex. A trailing silence whose midpoint falls
-   * before the end would otherwise leave the closing zeros undrawn.
-   */
-  const final = runs[runs.length - 1]
-  if (final !== undefined && final.endIndex < list.length - 1) {
-    final.endIndex = list.length - 1
-    final.pointCount = final.endIndex - final.startIndex + 1
   }
   return runs
 }

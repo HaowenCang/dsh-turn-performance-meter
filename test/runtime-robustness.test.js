@@ -352,8 +352,14 @@ test('a retry before a tool resets the window on both sides of the boundary', ()
    */
   const ratio = traces[0].tokens / traces[1].tokens
   assert.ok(ratio >= 9.5, `the two attempts differ by ${ratio.toFixed(2)}×`)
-  assert.equal(traces[1].points.length, traces[0].points.length + 4,
-    'the replacement owns the axis tail, so it carries four more vertices')
+  /**
+   * Both attempts end on their own last delta, so the two traces have the **same** length.
+   * The previous expectation read `traces[0].points.length + 4` and called the extra four
+   * vertices "the axis tail the replacement owns"; since Phase 7C.1 no attempt owns one, and
+   * which attempt is last may not change how many vertices its evidence produces.
+   */
+  assert.equal(traces[1].points.length, traces[0].points.length,
+    'the same script produces the same number of vertices in either placement')
   for (let index = 0; index < traces[0].points.length; index += 1) {
     const mine = traces[1].points[index]
     const theirs = traces[0].points[index]
@@ -398,8 +404,8 @@ test('a retry after a tool resets the window again, and the tool keeps zero widt
   assert.deepEqual(runs.map(run => run.attemptId), ['a', 'b', 'c'],
     'the abandoned attempt and its replacement are separate runs')
   assert.equal(settled.curve.durationMs, 500 + 500 + 500, 'the 4.4 s tool contributes no width')
-  assert.deepEqual(runs[2].points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0],
-    'the second retry starts empty, whatever the first two attempts measured')
+  assert.deepEqual(runs[2].points.map(p => p.tps), [10, 10, 20],
+    'the second retry starts empty, whatever the first two attempts measured, and ends on its own last delta')
   assert.ok(settled.curve.peakTps >= 1000)
 })
 

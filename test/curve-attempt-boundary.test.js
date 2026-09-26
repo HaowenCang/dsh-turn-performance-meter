@@ -214,7 +214,7 @@ test('the completed rolling window is reset at an attempt boundary, not bridged 
     'attempt A reads only its own measurements and reaches 200 tokens/s at its own end')
 
   assert.equal(traceB.points[0].timeMs, 500, 'attempt B opens at the shared compressed coordinate')
-  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0],
+  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20],
     'B climbs on its own evidence alone and never borrows A\'s 100')
 
   /**
@@ -224,12 +224,20 @@ test('the completed rolling window is reset at an attempt boundary, not bridged 
    * 10 from the single delta it had produced by then. The rejected pipeline produced
    * one value for that coordinate, 210, for an attempt whose entire output was 20
    * tokens, and still reported 120 at 1000 against B's honest 20.
+   *
+   * Phase 7C.1 removed the final attempt's one-window decay, so B's trace stops at its
+   * own last delta — 1000, which is also the axis end — rather than drawing four more
+   * vertices past it. Those vertices measured 20, 10, 10, 0 and were clamped onto
+   * `x = 100`; the peak they were compared against is unchanged, which the assertion at
+   * the end of this test states.
    */
   assert.equal(traceA.points.at(-1).tps, 200)
   assert.equal(traceB.points[0].tps, 10)
   assert.equal(curve.series.find(series => series.key === 'output').runs[1].peak, 20)
-  assert.equal(traceB.points.at(-1).tps, 0,
-    'B\'s own decay is drawn, and it is B\'s: the tail is not clamped to a shorter axis')
+  assert.equal(traceB.points.at(-1).timeMs, 1000,
+    'B ends on its own last delta, which is the last coordinate the axis owns')
+  assert.equal(traceB.points.at(-1).tps, 20,
+    'and the closing measurement is the one its own window produced')
   assert.equal(legacy.series.find(p => p.timeMs === 500).tps, 210,
     'the bridged pipeline adds the two calls together at the coordinate they share')
   assert.equal(legacy.series.find(p => p.timeMs === 1000).tps, 120,
@@ -334,7 +342,7 @@ test('a retry is a hard window reset for the completed curve too', () => {
 
   assert.deepEqual(first.points.map(p => p.tps), [200, 200, 400],
     'the abandoned attempt keeps its own 200 tokens per measurement')
-  assert.deepEqual(second.points.map(p => p.tps), [20, 20, 40, 40, 20, 20, 0],
+  assert.deepEqual(second.points.map(p => p.tps), [20, 20, 40],
     'a retry resets the measurement window: the abandoned prefix may not seed it')
   assert.equal(second.points[0].timeMs, 500,
     'and the retry\'s first vertex sits at the shared coordinate, where it reads its own 20 and not 420')
@@ -374,8 +382,8 @@ test('a retry whose abandoned prefix produced one delta shares the coordinate wi
   assert.equal(second.startMs, 0, 'so both attempts occupy the coordinate zero')
   assert.deepEqual(first.points.map(p => p.tps), [500],
     'the abandoned attempt is one measurement, drawn as one vertex')
-  assert.deepEqual(second.points.map(p => p.tps), [10, 10, 10, 10, 0],
-    'and the retry is its own trace, never 510')
+  assert.deepEqual(second.points.map(p => p.tps), [10],
+    'and the retry is its own trace of one measurement, never 510')
   /**
    * Two attempts on one coordinate is the sharpest form of the invariant: the
    * compressed axis cannot separate them at all, so only a per-attempt window can
@@ -396,12 +404,13 @@ test('each attempt is sampled on the same 250 ms grid, over one window of 1000 m
   const traceA = attemptOf(curve, 'attempt-a')
   const traceB = attemptOf(curve, 'attempt-b')
   /**
-   * A trace is sampled on its own 250 ms grid, from its own local zero out to its
-   * decay limit. A's limit is B's start, because B begins exactly where A ends.
+   * A trace is sampled on its own 250 ms grid, from its own local zero to its own last
+   * delta. That endpoint is B's start for A, and the axis end for B: the two rules are one
+   * rule, and neither attempt draws past the coordinate it owns.
    */
   assert.deepEqual(traceA.points.map(p => p.timeMs), [0, 250, 500],
     'the first attempt is sampled on the same grid the single-attempt case always used')
-  assert.deepEqual(traceB.points.map(p => p.timeMs), [500, 750, 1000, 1250, 1500, 1750, 2000],
+  assert.deepEqual(traceB.points.map(p => p.timeMs), [500, 750, 1000],
     'A stops at the boundary; B is re-based to its own start and re-offset to the shared clock')
   assert.equal(traceA.points.at(-1).localMs, 500)
   assert.equal(traceB.localEndMs, 500, 'an attempt reports its own width for the sampler')
@@ -409,7 +418,7 @@ test('each attempt is sampled on the same 250 ms grid, over one window of 1000 m
   assert.equal(traceB.points[0].timeMs, 500, 'and it is drawn at the shared coordinate')
 })
 
-test('an attempt\'s decay tail is drawn, clamped to the next attempt rather than to its own end', () => {
+test('an attempt\'s trace ends on its own last delta, and the silence inside it stays drawn', () => {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
 
@@ -427,14 +436,19 @@ test('an attempt\'s decay tail is drawn, clamped to the next attempt rather than
    * it. The previous revision instead split the evidence into two episodes and left a
    * blank region between them; the region is now part of the trace, and what it says is
    * that the trailing rate fell to zero and stayed there until the model resumed.
+   *
+   * The trace stops on the closing delta. The four vertices the previous expectation
+   * carried past it — 3250, 3500, 3750, 4000 — were a one-window decay on an attempt that
+   * had stopped producing, and they all mapped onto `x = 100`
+   * (`test/curve-axis-endpoint.test.js`).
    */
   assert.deepEqual(trace.points.map(p => p.localMs), [
     0, 250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750,
-    3000, 3250, 3500, 3750, 4000,
+    3000,
   ])
   assert.deepEqual(trace.points.map(p => p.tps), [
     100, 100, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0,
-    100, 100, 100, 100, 0,
+    100,
   ], 'two bursts, one continuous trace, and a real zero between them')
   /**
    * The second burst opens on its own delta alone, at 100 and not 200.
@@ -452,7 +466,7 @@ test('an attempt\'s decay tail is drawn, clamped to the next attempt rather than
     'no window ever holds both deltas three seconds apart, so neither a run peak nor the turn peak is 200')
 })
 
-test('an intermediate attempt draws no decay tail, because the next call owns those coordinates', () => {
+test('a one-delta attempt is one vertex, whether or not a successor follows it', () => {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
 
@@ -471,17 +485,54 @@ test('an intermediate attempt draws no decay tail, because the next call owns th
   const traceB = attemptOf(curve, 'b')
 
   /**
-   * A produced one delta, so A's own width is zero and B begins at the same
-   * coordinate. A's single measurement is drawn as one vertex and stops there: the
-   * tail it would otherwise draw belongs to coordinates B is about to use.
+   * A produced one delta, so A's own width is zero and B begins at the same coordinate. A's
+   * single measurement is drawn as one vertex and stops there.
+   *
+   * Phase 7C.1 made this the rule for **every** attempt rather than only for one with a
+   * successor: the previous revision gave the last attempt a one-window tail, so an
+   * otherwise identical single-delta attempt drew five vertices when it happened to be
+   * final and one when it did not. Which attempt an attempt is may not change what its own
+   * evidence is worth.
    */
-  assert.equal(traceA.points.length, 1, 'no tail for an attempt whose coordinates are already taken')
+  assert.equal(traceA.points.length, 1, 'no tail for a one-delta attempt')
   assert.deepEqual(traceA.points.map(p => p.tps), [100])
   assert.equal(traceA.points.at(-1).timeMs, 0)
-  assert.deepEqual(traceB.points.map(p => p.timeMs), [0, 250, 500, 750, 1000, 1250, 1500])
-  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0])
+  assert.deepEqual(traceB.points.map(p => p.timeMs), [0, 250, 500])
+  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20])
   assert.equal(curve.series.find(series => series.key === 'output').runs[1].peak, 20)
   assert.equal(curve.peakTps, 100)
+})
+
+test('a single-delta attempt is the same trace whether it is last or not', () => {
+  /**
+   * The "no attempt receives synthetic width merely because it is last" rule, asserted as an
+   * equality between two placements of one script. The only difference between them is that a
+   * successor exists in the second, and nothing about the attempt's own trace may depend on it.
+   */
+  const store = new TurnTelemetryStore()
+  const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
+
+  const solo = store.beginAttempt(record, { attemptId: 'solo', step: 1, startedAtMs: 0 })
+  store.acceptChunk(record, solo, { timeMs: 0, chunk: outputChunk('x'.repeat(400)) })
+  store.settleAttempt(solo, { settledAtMs: 50, settlementKind: 'message', surfaceCommitted: true, attemptOutcome: 'committed' })
+  const soloCurve = store.endTurn(record, { timeMs: 100, status: 'completed' }).curve
+
+  const store2 = new TurnTelemetryStore()
+  const record2 = store2.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
+  const first = store2.beginAttempt(record2, { attemptId: 'first', step: 1, startedAtMs: 0 })
+  store2.acceptChunk(record2, first, { timeMs: 0, chunk: outputChunk('x'.repeat(400)) })
+  store2.settleAttempt(first, { settledAtMs: 50, settlementKind: 'message', surfaceCommitted: true, attemptOutcome: 'committed' })
+  const second = store2.beginAttempt(record2, { attemptId: 'second', step: 2, startedAtMs: 9000 })
+  store2.acceptChunk(record2, second, { timeMs: 9000, chunk: outputChunk('y'.repeat(40)) })
+  store2.settleAttempt(second, { settledAtMs: 9050, settlementKind: 'message', surfaceCommitted: true, attemptOutcome: 'committed' })
+  const withSuccessor = store2.endTurn(record2, { timeMs: 9100, status: 'completed' }).curve
+
+  const alone = soloCurve.attempts[0]
+  const embedded = attemptOf(withSuccessor, 'first')
+  assert.deepEqual(embedded.points.map(p => [p.localMs, p.tps, p.activePhase]),
+    alone.points.map(p => [p.localMs, p.tps, p.activePhase]),
+    'the same evidence produces the same trace in either placement')
+  assert.equal(embedded.points.length, 1)
 })
 
 test('a rendering budget still cannot move the reported peak, whatever the attempt split', () => {
@@ -604,8 +655,8 @@ test('the completed curve preserves the live meter\'s shape, and rescales its ma
   assert.equal(traceA.calibrated, true)
 
   assert.deepEqual(liveB.map(r => r.tps), [10, 10, 20])
-  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0],
-    'an attempt with no usage keeps the live magnitudes exactly')
+  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20],
+    'an attempt with no usage keeps the live magnitudes exactly, and stops on its own last delta')
   assert.equal(traceB.calibratedTokens, null)
   assert.equal(traceB.calibrated, false)
 

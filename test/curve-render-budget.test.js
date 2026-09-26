@@ -137,18 +137,20 @@ test('the budget is unchanged from the per-run cap when the chart is small', () 
    * what it always drew: the budget only ever binds when the run count makes it necessary.
    *
    * The attempt spans 1750 ms (eight deltas on the 250 ms grid), so its own series is 1750 /
-   * 250 + 1 = 8 vertices and its one-window decay adds four more, for twelve. All twelve are
-   * kept, which is the point: `MAX_RENDER_POINTS_TOTAL` is 512 and this turn uses twelve.
+   * 250 + 1 = 8 vertices. Eight is what it now keeps: the four further vertices the previous
+   * expectation carried were a one-window decay past the attempt's last delta, which the axis
+   * of `docs/METRICS_SPEC.md` §8.1 does not own. `MAX_RENDER_POINTS_TOTAL` is 512 and this turn
+   * uses eight.
    */
   const curve = driveAlternating({ stretches: 1, spanMs: 2000 })
   const runs = runsOf(curve)
   assert.equal(runs.length, 1)
   assert.deepEqual(runs[0].points.map(p => p.timeMs),
-    [0, 250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750])
+    [0, 250, 500, 750, 1000, 1250, 1500, 1750])
   assert.equal(runs[0].fullResolution, true, 'a small chart is drawn at full resolution')
   assert.equal(runs[0].degraded, false)
   assert.equal(curve.renderBudget.degradedRuns, 0)
-  assert.equal(curve.drawnPoints, 12, 'the full series is under the budget, so nothing is thinned')
+  assert.equal(curve.drawnPoints, 8, 'the full series is under the budget, so nothing is thinned')
 })
 
 /* ------------------------------------------------------- retention under pressure */
@@ -253,17 +255,15 @@ test('run order and run boundaries survive total budgeting', () => {
    * interval — two attempts can share a compressed coordinate, and only the attempt
    * identity can tell them apart.
    *
-   * The coordinates an attempt owns are its own body plus one window of tail, cut where the
-   * next call begins. The previous expectation compared against `endMs` alone, which is the
-   * attempt's last **delta**: an attempt's own decay legitimately reaches past it, and a test
-   * that forbade that would forbid the tail the chart exists to show.
+   * The coordinates an attempt owns end on its own last delta. The expectation before Phase
+   * 7C.1 was "its own body plus one window of tail, cut where the next call begins": the
+   * final attempt was allowed to reach `endMs + windowMs` and every earlier one was cut at
+   * its successor's start. Both halves of that rule are gone, and the bound is now the
+   * segment's own `endMs` for every attempt.
    */
   const ownsOf = (trace) => {
     const segment = curve.segments.find(candidate => candidate.attemptId === trace.attemptId)
-    const limit = segment.hasSuccessor
-      ? segment.nextStartMs
-      : segment.endMs + curve.windowMs
-    return { startMs: trace.startMs, endMs: limit }
+    return { startMs: trace.startMs, endMs: segment.endMs }
   }
   for (const entry of curve.series) {
     for (const run of entry.runs) {

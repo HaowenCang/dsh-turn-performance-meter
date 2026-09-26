@@ -112,20 +112,39 @@ function referenceTps(chunks, attemptStartMs, atMs, windowMs = DEFAULT_WINDOW_MS
   return tokens * 1000 / windowMs
 }
 
-/** The 250 ms grid an attempt's trace is drawn on, from local zero to `toMs`. */
+/** The 250 ms cadence ladder an attempt's trace is drawn on, from local zero to `toMs`. */
 function gridTo(toMs) {
   const out = []
   for (let at = 0; at <= toMs + 1e-9; at += DEFAULT_SAMPLE_EVERY_MS) out.push(at)
   return out
 }
 
-/** Assert every vertex of one attempt's trace against the script-derived window. */
-function assertTraceMatchesScript(curve, spec, { toMs, expect = null } = {}) {
+/**
+ * The attempt's sampled instants: the cadence ladder to its last delta, unioned with that
+ * last delta when it does not fall on a whole step.
+ *
+ * The anchor is what makes the attempt's real endpoint a vertex; deduplication is what keeps
+ * an on-cadence endpoint from appearing twice. There is no second ladder — since Phase 7C.1
+ * every attempt, the final one included, stops where the model stopped producing.
+ */
+function instantsTo(lastSampleMs) {
+  const out = gridTo(lastSampleMs)
+  if (out[out.length - 1] < lastSampleMs - 1e-9) out.push(lastSampleMs)
+  return out
+}
+
+/**
+ * Assert every vertex of one attempt's trace against the script-derived window.
+ *
+ * `lastSampleMs` is the attempt's own last model-producing instant on its local clock, which
+ * is both the endpoint anchor and the trace's final coordinate.
+ */
+function assertTraceMatchesScript(curve, spec, { toMs, lastSampleMs = toMs, expect = null } = {}) {
   const attempt = attemptOf(curve, spec.id)
   assert.ok(attempt !== undefined, `the curve carries attempt ${spec.id}`)
-  assert.deepEqual(attempt.points.map(point => point.localMs), gridTo(toMs),
-    `${spec.id}: the trace is sampled on the attempt's own 250 ms grid`)
-  const expected = gridTo(toMs).map(at => referenceTps(spec.chunks, spec.at, at))
+  assert.deepEqual(attempt.points.map(point => point.localMs), instantsTo(lastSampleMs),
+    `${spec.id}: the trace is sampled on the attempt's own cadence, ending on its last delta`)
+  const expected = instantsTo(lastSampleMs).map(at => referenceTps(spec.chunks, spec.at, at))
   assert.deepEqual(attempt.points.map(point => point.tps), expected,
     `${spec.id}: every vertex is the trailing one-second total over the script`)
   if (expect !== null) assert.deepEqual(attempt.points.map(point => point.tps), expect, `${spec.id}: named expectation`)
@@ -147,13 +166,13 @@ test('the window resets at an attempt boundary', () => {
   })
 
   const traceA = assertTraceMatchesScript(curve, a, { toMs: 1000 })
-  const traceB = assertTraceMatchesScript(curve, b, { toMs: 2000 })
+  const traceB = assertTraceMatchesScript(curve, b, { toMs: 2000, lastSampleMs: 1000 })
   assert.deepEqual(traceA.points.map(point => point.tps), [100, 100, 100, 100, 100],
     'attempt A is measured on its own clock; at the shared coordinate its window is `(0, 1000]`, '
     + 'which holds the second delta alone because the first expired at exactly 0')
   assert.equal(traceB.points[0].timeMs, traceA.points.at(-1).timeMs,
     'the two traces meet at one compressed coordinate and share no window')
-  assert.deepEqual(traceB.points.map(point => point.tps), [10, 10, 10, 10, 10, 10, 10, 10, 0],
+  assert.deepEqual(traceB.points.map(point => point.tps), [10, 10, 10, 10, 10],
     'attempt B starts from an empty window, whatever attempt A measured')
   assert.equal(runsOf(curve, 'output')[1].peak, 10)
   assert.equal(curve.peakTps, 100, 'the peak is a per-attempt maximum')
@@ -230,8 +249,8 @@ test('a retry resets the completed window', () => {
   const first = attemptOf(curve, 'first')
   const second = attemptOf(curve, 'second')
   assert.deepEqual(first.points.map(p => p.tps), [200, 200, 400])
-  assert.deepEqual(second.points.map(p => p.tps), [20, 20, 40, 40, 20, 20, 0],
-    'the retry is measured on its own window')
+  assert.deepEqual(second.points.map(p => p.tps), [20, 20, 40],
+    'the retry is measured on its own window, from its own first delta to its own last')
   assert.equal(second.points[0].timeMs, first.points.at(-1).timeMs,
     'and it still opens at the abandoned attempt\'s last coordinate')
   assert.equal(runsOf(curve, 'output')[1].peak, 40)
@@ -283,7 +302,7 @@ test('a phase falling silent inside one attempt is one continuous trace, not two
   }
   const { curve } = build({ attempts: [spec], endMs: 10_000 })
   assert.equal(curve.attempts.length, 1, 'one model call, one trace')
-  const trace = assertTraceMatchesScript(curve, spec, { toMs: 9500 })
+  const trace = assertTraceMatchesScript(curve, spec, { toMs: 8500 })
 
   /**
    * The output stretch is a **colour change**, not a break: the reasoning run ends on
@@ -292,16 +311,20 @@ test('a phase falling silent inside one attempt is one continuous trace, not two
    */
   const reasonRuns = runsOf(curve, 'reasoning')
   /**
-   * Two reasoning stretches of one trace, two coloured runs. The seam is the midpoint of each
-   * label change, so a long silence is split between the tone that ended and the tone that
-   * began rather than being painted entirely in one of them — and the two runs still meet.
+   * Two reasoning stretches of one trace, two coloured runs. The seam is the outgoing
+   * stretch's last labelled vertex, so a long silence is carried by the tone that was
+   * active across it rather than being repainted — and the two runs still meet, so no blank
+   * horizontal gap is introduced. (The previous revision described this cut as the
+   * "midpoint of the label change"; the two stretch boundaries are adjacent indices, so the
+   * midpoint the formula computed was algebraically that same last vertex. The formula was
+   * removed in Phase 7C.1 and the seam is unchanged.)
    */
   assert.equal(reasonRuns.length, 2, 'two reasoning stretches of one trace, two coloured runs')
-  assert.deepEqual(reasonRuns.map(run => [run.startMs, run.endMs]), [[0, 2750], [7750, 9500]])
+  assert.deepEqual(reasonRuns.map(run => [run.startMs, run.endMs]), [[0, 2750], [7750, 8500]])
   const outputRuns = runsOf(curve, 'output')
   assert.equal(outputRuns.length, 1)
   assert.equal(outputRuns[0].startMs, reasonRuns[0].points.at(-1).timeMs,
-    'and the output run starts exactly where the first reasoning run ends: the phase transition\'s midpoint')
+    'and the output run starts exactly where the first reasoning run ends: the phase-transition seam')
   /** Consecutive runs of the attempt meet on one shared vertex throughout. */
   for (let index = 1; index < trace.runs.length; index += 1) {
     assert.equal(trace.runs[index - 1].points.at(-1), trace.runs[index].points[0],
@@ -346,8 +369,8 @@ test('an output stretch that falls silent is one run whose rate decays to zero',
   const trace = attemptOf(curve, 'a')
   const outRuns = runsOf(curve, 'output')
   assert.equal(outRuns.length, 2, 'two output stretches, two coloured runs of one trace')
-  assert.deepEqual(outRuns.map(run => [run.startMs, run.endMs]), [[0, 4750], [8750, 10_500]])
-  /** The transitions in between are midpoints of the label changes, not gaps. */
+  assert.deepEqual(outRuns.map(run => [run.startMs, run.endMs]), [[0, 4750], [8750, 9500]])
+  /** The transitions in between are shared seams on adjacent vertices, not gaps. */
   for (let index = 1; index < trace.runs.length; index += 1) {
     assert.equal(trace.runs[index - 1].points.at(-1), trace.runs[index].points[0])
   }
@@ -357,7 +380,9 @@ test('an output stretch that falls silent is one run whose rate decays to zero',
    * one-window tail and the reasoning stretch in between was left blank. The trace now
    * runs continuously across it, so the first output run reaches the reasoning
    * transition and the blank region is gone — the reasoning run occupies it, and the
-   * rate over it is the attempt's own.
+   * rate over it is the attempt's own. Phase 7C.1 then removed the closing tail the run
+   * used to carry past the attempt's last delta, so the second output run now ends on
+   * 9500 rather than 10 500.
    */
   assert.equal(trace.points.find(point => point.localMs === 3000).tps, 0,
     'the silent stretch is a zero on the trace, not a hole in it')
@@ -404,15 +429,16 @@ test('a same-phase gap is a decay on one run, whatever its length', () => {
   const touchingSamples = attemptOf(touching, 'a').samples
   assert.equal(touchingSamples[1].activeTimeMs, DEFAULT_WINDOW_MS)
   assert.deepEqual(attemptOf(touching, 'a').points.map(point => point.tps),
-    [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0],
-    'a gap of exactly one window keeps the window open until the far edge, then the trace decays')
+    [0.5, 0.5, 0.5, 0.5, 0.5],
+    'a gap of exactly one window keeps the window open through the whole attempt, which ends on its last delta')
 
   const split = gapOf(10 * DEFAULT_WINDOW_MS).curve
   const trace = attemptOf(split, 'a')
   const silent = trace.points.filter(point => point.tps === 0)
   assert.ok(silent.length >= 30, `a ten-window silence is a long visible zero: ${silent.length} vertices`)
   assert.equal(trace.points[0].tps, 0.5)
-  assert.equal(trace.points.at(-1).tps, 0, 'and the trace still decays to zero at the end')
+  assert.equal(trace.points.at(-1).tps, 0.5,
+    'and the trace ends on the resumed delta rather than on a decay past it')
 })
 
 test('runs never merge across an attempt boundary', () => {
@@ -433,16 +459,15 @@ test('runs never merge across an attempt boundary', () => {
   assert.equal(curve.attempts[0].startMs, 0)
   assert.equal(curve.attempts[1].startMs, 0, 'both attempts occupy the same coordinate, and still do not merge')
   assert.deepEqual(curve.attempts[0].points.map(p => p.tps), [10])
-  assert.deepEqual(curve.attempts[1].points.map(p => p.tps), [10, 10, 10, 10, 0],
+  assert.deepEqual(curve.attempts[1].points.map(p => p.tps), [10],
     'and neither inherits the other\'s tokens')
 })
 
 test('a later attempt\'s sample cannot be absorbed into an earlier attempt\'s trace', () => {
   /**
    * Attempt A produces a single delta, so its own width is zero and attempt B begins on
-   * the very coordinate A owns. A's trace is that one measurement and nothing else: it
-   * has no coordinate of its own to decay over, and the tail it would otherwise draw
-   * belongs to B.
+   * the very coordinate A owns. A's trace is that one measurement and nothing else: it has
+   * no coordinate of its own to decay over, and every coordinate past it belongs to B.
    */
   const { curve } = build({
     attempts: [
@@ -456,7 +481,7 @@ test('a later attempt\'s sample cannot be absorbed into an earlier attempt\'s tr
   assert.equal(traceA.points.length, 1, 'attempt A is one vertex and stops there')
   assert.equal(traceA.points[0].timeMs, 0, 'it owns no coordinate beyond its single measurement')
   assert.equal(traceB.startMs, 0, 'attempt B opens on the coordinate A owned')
-  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20, 20, 10, 10, 0])
+  assert.deepEqual(traceB.points.map(p => p.tps), [10, 10, 20])
   assert.equal(curve.peakTps, 100)
 })
 
@@ -472,8 +497,8 @@ test('the SVG receives one subpath per coloured run and no line joins two attemp
   const runs = runsOf(curve, 'output')
   assert.equal(runs.length, 2)
   assert.deepEqual(runs.map(run => run.attemptId), ['a', 'b'])
-  assert.deepEqual(runs.map(run => [run.startMs, run.endMs]), [[0, 500], [500, 2000]],
-    'A stops where B begins; B owns the axis up to its own one-window tail')
+  assert.deepEqual(runs.map(run => [run.startMs, run.endMs]), [[0, 500], [500, 1000]],
+    'A stops on its own last delta; B opens on that coordinate and ends on its own, which is the axis end')
 
   /**
    * The boundary test that matters: every vertex belongs to exactly one attempt,
@@ -517,9 +542,11 @@ test('a colour transition shares its boundary vertex rather than leaving a gap',
   assert.equal(transitions.length, 2, 'two phase transitions on this trace')
 
   /**
-   * Both transitions produce a **seam**, and it is the one vertex the two tones share. It is the
-   * midpoint of the label change, so when a silence precedes the change it belongs to the
-   * outgoing tone rather than to the transition vertex itself.
+   * Both transitions produce a **seam**, and it is the one vertex the two tones share: the last
+   * vertex still carrying the outgoing phase. The previous description called it the midpoint of
+   * the label change; since every vertex carries a phase the two stretch boundaries are adjacent
+   * indices, so the midpoint formula evaluated to exactly that vertex. The formula is gone from
+   * the implementation and the seam is asserted here as what it always was.
    */
   const seams = []
   for (let index = 1; index < trace.runs.length; index += 1) {
@@ -534,7 +561,7 @@ test('a colour transition shares its boundary vertex rather than leaving a gap',
     [['reasoning', 'output'], ['output', 'reasoning']])
   /**
    * The seam sits at or before the transition vertex, and never more than one sampling step
-   * before it: it is the midpoint of the change, not the whole silence.
+   * before it: it is the outgoing stretch's last labelled vertex.
    */
   for (const [index, seam] of seams.entries()) {
     assert.ok(seam.at <= transitions[index].localMs,
@@ -606,11 +633,12 @@ test('an internal stall keeps its full width inside the attempt and is drawn as 
   const { curve } = build({ attempts: [spec], endMs: 6000 })
   assert.equal(curve.durationMs, 4000, 'the stall is part of the attempt\'s width')
 
-  const trace = assertTraceMatchesScript(curve, spec, { toMs: 5000 })
+  const trace = assertTraceMatchesScript(curve, spec, { toMs: 4000 })
   assert.deepEqual(trace.points.map(point => point.tps),
-    [100, 100, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 100, 100, 100, 0],
+    [100, 100, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100],
     'the whole four-second silence is drawn at full width, one zero per 250 ms vertex, '
-    + 'and the trace climbs again on the resumed delta alone')
+    + 'and the trace climbs again on the resumed delta alone — which is also where it ends, '
+    + 'because after that delta the model stopped producing')
   assert.equal(trace.points.find(point => point.localMs === 4000).tps, 100,
     'and the trace climbs again when the model resumes, on its own window alone')
   /**
@@ -645,7 +673,14 @@ test('every run reports a peak equal to its own strongest vertex', () => {
 test('the SSE-free turn shape — plain single attempt — is unchanged from the simple definition', () => {
   /**
    * The regression matrix must not have redefined the ordinary case. One attempt, two
-   * measurements half a window apart: 100, then 200, over the attempt's own 500 ms.
+   * measurements half a window apart: 100, then 200, over the attempt's own 500 ms — and the
+   * trace stops there.
+   *
+   * The previous expectation carried four further vertices, `750, 1000, 1250, 1500`, with the
+   * rates `200, 100, 100, 0`. They were a one-window decay drawn past the attempt's last
+   * delta, and because `curve.durationMs` is 500 every one of them was clamped onto `x = 100`
+   * — the right-edge vertical stroke Phase 7C.1 removed. The shape this test exists to protect
+   * is the rise to the peak, and it is intact.
    */
   const { curve } = build({
     attempts: [{ id: 'a', step: 1, at: 0, chunks: [[0, 'output', 'x'.repeat(400)], [500, 'output', 'x'.repeat(400)]] }],
@@ -653,11 +688,13 @@ test('the SSE-free turn shape — plain single attempt — is unchanged from the
   })
   const runs = runsOf(curve, 'output')
   assert.equal(runs.length, 1, 'one phase, one run')
-  assert.deepEqual(runs[0].points.map(p => p.timeMs), [0, 250, 500, 750, 1000, 1250, 1500])
-  assert.deepEqual(runs[0].points.map(p => p.tps), [100, 100, 200, 200, 100, 100, 0],
-    'the single-attempt series the project has always drawn: rise, peak, one-window decay')
+  assert.deepEqual(runs[0].points.map(p => p.timeMs), [0, 250, 500])
+  assert.deepEqual(runs[0].points.map(p => p.tps), [100, 100, 200],
+    'the single-attempt series the project has always drawn: rise, then the peak at the attempt\'s own end')
   assert.equal(runs[0].peak, 200)
-  assert.equal(runs[0].endMs, 1500, 'the run covers the attempt plus its own one-window tail')
-  assert.equal(curve.durationMs, 500, 'and the axis itself is still only the attempt\'s own width')
+  assert.equal(runs[0].endMs, 500, 'the run covers the attempt, which is its own last delta')
+  assert.equal(curve.durationMs, 500, 'and the axis is exactly the attempt\'s own width')
+  assert.equal(runs[0].endMs, curve.durationMs,
+    'the final run ends precisely on the axis end, drawing nothing past it')
   assert.equal(curve.peakTps, 200)
 })

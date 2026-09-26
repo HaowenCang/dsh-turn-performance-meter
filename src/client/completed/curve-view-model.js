@@ -281,12 +281,29 @@ function runsOfAll(curve) {
 /**
  * Whether the curve's magnitudes were anchored to provider usage.
  *
- * It is carried onto the view model rather than printed, because the chart shows it
- * through the peak's `≈` and the panel's quality axes; a caller that wants to
- * annotate "this curve is calibrated" reads it here instead of re-deriving it.
+ * Narrow on purpose: `curve.source.calibrated` is `true` only when **every**
+ * contributing attempt was anchored. A partially calibrated curve is not a calibrated
+ * curve, and a caller that wants the finer statement reads `calibrationCoverage`.
  */
 function calibratedOf(curve) {
   return curve?.source?.calibrated === true
+}
+
+/**
+ * How much of the curve a provider total anchored: `full`, `partial`, `none` or
+ * `fallback` (`src/core/curve-source.js`).
+ *
+ * It is carried onto the view model rather than printed, because the compact card
+ * already shows the peak with its `≈` and the panel shows the quality axes — a third
+ * line of provenance would be clutter. A caller that wants to annotate the chart reads
+ * it here instead of re-deriving it from the per-attempt flags.
+ *
+ * A curve with no `source` at all — a pre-Phase-7C snapshot — reports `null` rather
+ * than a level it cannot substantiate.
+ */
+function calibrationCoverageOf(curve) {
+  const coverage = curve?.source?.calibrationCoverage
+  return typeof coverage === 'string' ? coverage : null
 }
 
 /**
@@ -366,6 +383,13 @@ export function curveViewModel(settled) {
     }
   }
   const markers = [...singletonByMeasurement.values()]
+  /**
+   * The same list, divided by series. It is a **filter of the enriched markers**, not the raw
+   * `run.marker` list `buildSeries` collected, so a caller reading `series[].markers` gets the
+   * tone and the originating series name each marker was de-duplicated under — and so the two
+   * access paths cannot drift into describing the same dot differently.
+   */
+  const markersOf = key => markers.filter(marker => marker.series === key)
   const drawnPoints = reasoning.points + output.points
   const drawnRuns = reasoning.runs.filter(run => run.present).length
     + output.runs.filter(run => run.present).length
@@ -415,15 +439,23 @@ export function curveViewModel(settled) {
      * `markersOnly` instead, so the two are never conflated.
      */
     series: [
-      { key: 'reasoning', tone: 'neutral', ...reasoning },
-      { key: 'output', tone: 'accent', ...output },
+      { key: 'reasoning', tone: 'neutral', ...reasoning, markers: markersOf('reasoning') },
+      { key: 'output', tone: 'accent', ...output, markers: markersOf('output') },
     ],
     /**
-     * Whether the curve's magnitudes were anchored to authoritative provider usage
-     * (`curve.source`). The chart shows this only through the peak's `≈`; a caller
-     * that wants to annotate provenance reads it here rather than re-deriving it.
+     * Whether the **whole** curve's magnitudes were anchored to authoritative provider
+     * usage (`curve.source.calibrated`). The chart shows this only through the peak's
+     * `≈`; a caller that wants to annotate provenance reads it here rather than
+     * re-deriving it. It is `true` for `full` coverage only.
      */
     calibrated: calibratedOf(curve),
+    /**
+     * The same provenance, stated as coverage: `full`, `partial`, `none` or `fallback`.
+     * `calibrated === false` covers three different situations — no usage at all, some
+     * attempts anchored, and a join that could not be trusted — and they are not
+     * interchangeable.
+     */
+    calibrationCoverage: calibrationCoverageOf(curve),
     /**
      * Per-phase colour segmentation of the same traces, carried through for
      * diagnostics and for tests that assert no drawable path crosses a stretch where

@@ -180,9 +180,13 @@ test('the completed total trace equals a live meter fed the same calibrated magn
    * attempt over **every** generated sample, whatever its phase. This is
    * `SlidingWindowMeter` restated rather than called, so the comparison cannot be
    * satisfied by two copies of the same bug.
+   *
+   * The instants run to the attempt's own last delta and no further, which is the one
+   * place Phase 7C.1 narrowed this comparison: the live pill can be read at any wall
+   * instant, while the completed axis is model generation and ends where the model did.
    */
   const live = []
-  for (let at = 0; at <= 1500; at += 250) {
+  for (let at = 0; at <= 500; at += 250) {
     let total = 0
     samples.forEach((sample, index) => {
       const localMs = index === 0 ? 0 : 500
@@ -205,8 +209,14 @@ test('each vertex names the phase of the latest sample at or before it, and only
     'at the opening instant the newest sample is the reasoning delta')
   assert.equal(byLocal.get(250).activePhase, 'reasoning', 'and it stays so until the next sample')
   assert.equal(byLocal.get(500).activePhase, 'output',
-    'at the transition the newest sample is the output delta')
-  assert.equal(byLocal.get(1000).activePhase, 'output', 'the tail keeps the closing phase')
+    'at the transition the newest sample is the output delta, which is also the attempt\'s last one')
+  /**
+   * There is no vertex past the last delta to carry a closing phase: the axis is model
+   * generation, so the trace stops where the model stopped producing. The label Phase 7C
+   * expected at a one-window tail vertex is asserted at the trace's own end instead.
+   */
+  assert.equal(points.at(-1).localMs, 500, 'the trace ends on the attempt\'s final delta')
+  assert.equal(points.at(-1).activePhase, 'output', 'and that vertex carries the closing phase')
 
   /**
    * The phase is a label, not a filter: the vertex at the transition carries both
@@ -226,10 +236,11 @@ test('phase colour is a rendering seam, not a statistical reset or a blank gap',
   const [first, second] = visual
   /**
    * The two runs share their boundary vertex: same instant, same measurement, one object
-   * identity. The boundary is the **midpoint** of the label change, so a phase change with no
-   * silence between its samples puts the seam on the last vertex of the outgoing label —
-   * which is what removes the artificial one-step blank a strict label partition would leave,
-   * while keeping a long silence from being painted entirely in one tone.
+   * identity. Since Phase 7C.1 that boundary is stated directly rather than computed as a
+   * midpoint — `activePhase` is carried by every vertex, so the maximal stretches of one
+   * label are adjacent and the cut is simply the outgoing stretch's last vertex. For adjacent
+   * indices the old `floor((last + next.first) / 2)` was algebraically the same index; the
+   * formula is gone, the seam is not.
    */
   const seamA = first.points.at(-1)
   const seamB = second.points[0]
@@ -241,7 +252,7 @@ test('phase colour is a rendering seam, not a statistical reset or a blank gap',
   /** The shared vertex is a real measurement of the single total window. */
   assert.equal(seamA, seamB, 'and it is one object, drawn by both paths')
   assert.equal(seamA.localMs, 250,
-    'the label change is between local 250 and 500, so the seam is its midpoint rounded down')
+    'the label change is between local 250 and 500, so the seam is the last vertex still labelled reasoning')
   assert.equal(seamA.tps, 600)
   assert.equal(seamA.activePhase, 'reasoning', 'the seam keeps the phase the newest sample gave it')
   assert.equal(second.points[1].activePhase, 'output',

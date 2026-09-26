@@ -11,6 +11,10 @@ test('compressed chart removes tool/inter-attempt wall gaps and next-call TTFT',
   // Attempt A: local 0 and 2000. Attempt B starts immediately at 2000.
   assert.deepEqual(result.samples.map(x => x.activeTimeMs), [0, 2000, 2000, 3000])
   assert.equal(result.durationMs, 3000)
+  /**
+   * A segment ends on its own last model-producing delta, which is also the coordinate the
+   * next attempt opens on — the same instant, stated once.
+   */
   assert.deepEqual(result.segments, [
     {
       attemptId: 'a',
@@ -18,8 +22,6 @@ test('compressed chart removes tool/inter-attempt wall gaps and next-call TTFT',
       endMs: 2000,
       localEndMs: 2000,
       sampleCount: 2,
-      nextStartMs: 2000,
-      hasSuccessor: true,
     },
     {
       attemptId: 'b',
@@ -27,8 +29,6 @@ test('compressed chart removes tool/inter-attempt wall gaps and next-call TTFT',
       endMs: 3000,
       localEndMs: 1000,
       sampleCount: 2,
-      nextStartMs: 3000,
-      hasSuccessor: false,
     },
   ])
 })
@@ -52,19 +52,66 @@ test('every sample carries both clocks, and only the first attempt\'s coincide',
   }
 })
 
-test('the last attempt is bounded by its own end, earlier ones by the next start', () => {
+test('every attempt is bounded by its own last delta, the final one included', () => {
   const result = compressAttempts([
     { attemptId: 'a', samples: [{ timeMs: 0 }, { timeMs: 500 }] },
     { attemptId: 'b', samples: [{ timeMs: 900 }, { timeMs: 1400 }] },
     { attemptId: 'c', samples: [{ timeMs: 2000 }, { timeMs: 2500 }] },
   ])
-  assert.deepEqual(result.segments.map(s => [s.startMs, s.endMs, s.nextStartMs]), [
-    [0, 500, 500],
-    [500, 1000, 1000],
-    [1000, 1500, 1500],
+  assert.deepEqual(result.segments.map(s => [s.startMs, s.endMs]), [
+    [0, 500],
+    [500, 1000],
+    [1000, 1500],
   ])
-  assert.equal(result.segments.at(-1).nextStartMs, result.segments.at(-1).endMs,
-    'an attempt may never be drawn past the coordinate it owns')
+  assert.equal(result.segments.at(-1).endMs, result.durationMs,
+    'the final attempt ends on its own last delta, at the axis end and never past it')
+  for (let index = 1; index < result.segments.length; index += 1) {
+    assert.equal(result.segments[index - 1].endMs, result.segments[index].startMs,
+      'and each attempt opens on the coordinate its predecessor closed on')
+  }
+  assert.equal('nextStartMs' in result.segments[0], false,
+    'the successor bound is gone: it was the same coordinate as endMs, and it existed only to give the final attempt a tail')
+  assert.equal('hasSuccessor' in result.segments[0], false)
+})
+
+test('the authoritative stream ordinal survives compression', () => {
+  /**
+   * Array position in the stored attempt **is** the stream order, and `compressAttempts` is
+   * where it becomes explicit: the ordinal is captured before any timestamp sort and
+   * published as `sampleOrder`, so the curve layer never has to infer an order from a phase
+   * name or from whichever array a caller hands in.
+   */
+  const result = compressAttempts([{
+    attemptId: 'a',
+    samples: [
+      { timeMs: 0, phase: 'output', tokens: 20 },
+      { timeMs: 0, phase: 'reasoning', tokens: 10 },
+      { timeMs: 500, phase: 'output', tokens: 5 },
+    ],
+  }])
+  assert.deepEqual(result.samples.map(sample => sample.sampleOrder), [0, 1, 2])
+  assert.deepEqual(result.samples.map(sample => sample.phase), ['output', 'reasoning', 'output'],
+    'two samples at one instant keep the order they were stored in')
+
+  /** A sample that already carries an ordinal keeps it rather than being renumbered. */
+  const restamped = compressAttempts([{
+    attemptId: 'a',
+    samples: [
+      { timeMs: 0, phase: 'output', sampleOrder: 7 },
+      { timeMs: 0, phase: 'reasoning', sampleOrder: 2 },
+    ],
+  }])
+  assert.deepEqual(restamped.samples.map(sample => sample.sampleOrder), [2, 7],
+    'and the samples are emitted in that ordinal order, not in array order')
+  assert.deepEqual(restamped.samples.map(sample => sample.phase), ['reasoning', 'output'])
+})
+
+test('a zero-width attempt with two simultaneous deltas keeps both', () => {
+  const result = compressAttempts([
+    { attemptId: 'a', samples: [{ timeMs: 0, phase: 'output' }, { timeMs: 0, phase: 'reasoning' }] },
+  ])
+  assert.equal(result.durationMs, 0)
+  assert.deepEqual(result.samples.map(sample => [sample.attemptTimeMs, sample.sampleOrder]), [[0, 0], [0, 1]])
 })
 
 test('a long tool delay adds no horizontal width at all', () => {

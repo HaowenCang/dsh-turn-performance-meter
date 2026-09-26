@@ -8,8 +8,16 @@
  *     attempt's own TTFT consumes no width;
  *   - distances between deltas inside one attempt are preserved exactly, which
  *     keeps real intra-stream stalls visible;
+ *   - an attempt's local x ends at its **last** generated delta. Nothing is
+ *     allocated after it — not for the host settlement, not for the next call's
+ *     TTFT and not for the one-second window the last tokens decay over;
  *   - the next attempt starts at the previous attempt's last delta, so tools,
  *     inter-attempt waiting and the next call's TTFT consume no width.
+ *
+ * The last two rules are one rule applied to every attempt, including the final
+ * one: the axis is model generation, and a per-attempt window decay is a
+ * measurement convention rather than generation. The final attempt is not a
+ * special case.
  *
  * Formally this is a piecewise-linear remap of wall time. It is implemented as
  * explicit per-attempt concatenation rather than as one global clock minus
@@ -46,7 +54,7 @@
  *   durationMs: number,
  *   segments: {
  *     attemptId:string|null, startMs:number, endMs:number, localEndMs:number,
- *     nextStartMs:number, hasSuccessor:boolean, sampleCount:number,
+ *     sampleCount:number,
  *   }[],
  * }}
  */
@@ -58,22 +66,45 @@ export function compressAttempts(attempts) {
 
   for (const attempt of attempts) {
     if (!attempt) continue
-    const samples = Array.isArray(attempt.samples)
-      ? attempt.samples.filter(s => s && Number.isFinite(s.timeMs)).slice().sort((a, b) => a.timeMs - b.timeMs)
+    const stored = Array.isArray(attempt.samples)
+      ? attempt.samples.filter(s => s && Number.isFinite(s.timeMs))
       : []
+    /**
+     * **The stored arrays are the authoritative order.** `TurnTelemetryStore.acceptChunk`
+     * appends, and both reconstruction paths preserve the decoded member order —
+     * `attemptFromDecoded` walks `decoded.chunks` in order and the live path appends each
+     * frame as it arrives. Position in the array is therefore the order the model's stream
+     * delivered the deltas in, and it is the only evidence of that order this project has.
+     *
+     * The ordinal is captured **before** any timestamp sort, so a delta that arrives later
+     * but carries an earlier clock still sorts after its predecessor at the same instant.
+     * It is published as `sampleOrder` so nothing downstream has to infer the order from a
+     * phase name or from whichever array a caller happens to hand in.
+     */
+    const ordered = stored.map((sample, index) => ({
+      sample,
+      sampleOrder: Number.isFinite(sample.sampleOrder) ? sample.sampleOrder : index,
+    }))
+    ordered.sort((a, b) => (
+      a.sample.timeMs - b.sample.timeMs
+      || a.sampleOrder - b.sampleOrder
+    ))
+    const samples = ordered.map(entry => entry.sample)
     if (samples.length === 0) continue
     const first = samples[0].timeMs
     const last = samples[samples.length - 1].timeMs
     const attemptId = attempt.attemptId ?? null
-    for (const sample of samples) {
-      const localMs = Math.max(0, sample.timeMs - first)
+    for (const entry of ordered) {
+      const localMs = Math.max(0, entry.sample.timeMs - first)
       out.push({
-        ...sample,
+        ...entry.sample,
         attemptId,
         /** Attempt-local instant: the clock the rolling window is measured on. */
         attemptTimeMs: localMs,
         /** Turn-compressed coordinate: the clock the chart is drawn against. */
         activeTimeMs: offsetMs + localMs,
+        /** Authoritative stream ordinal, so the tie-break at one instant is stated, not implied. */
+        sampleOrder: entry.sampleOrder,
       })
     }
     const span = Math.max(0, last - first)
@@ -84,34 +115,27 @@ export function compressAttempts(attempts) {
       /** The attempt's own width, so a caller need not re-derive it. */
       localEndMs: span,
       sampleCount: samples.length,
-      /** Assigned below, once the following attempt is known. */
-      nextStartMs: offsetMs + span,
-      hasSuccessor: false,
     })
     offsetMs += span
   }
 
   /**
-   * Publish where each attempt's compressed stretch stops. Every attempt but the
-   * last is bounded by the attempt that follows it; the last one is bounded by its
-   * own end, so an attempt is never drawn past the coordinate it owns.
+   * **Every segment's `endMs` is the attempt's last model-producing delta**, and therefore
+   * also the coordinate at which the next attempt opens. Those are the same instant by
+   * construction — the concatenation is what removes tool wait and next-call TTFT from the
+   * axis — so no separate "where the next attempt starts" field is published, and no field
+   * distinguishes the final attempt from any other.
    *
-   * `hasSuccessor` is the separate flag that says whether `nextStartMs` is a real
-   * cap or merely the axis end. Without it an attempt that happens to end exactly at
-   * the axis end is indistinguishable from one followed by another call, and the
-   * final attempt would lose the window decay that shows its last tokens expiring.
-   *
-   * `attemptTrace` reads both. An attempt that ends where another begins — the
-   * common tool-separated case, and the degenerate case where both share a
-   * coordinate — therefore draws no tail, which is correct: the next call's
-   * vertices own those coordinates. The final attempt alone is free to draw its
-   * one-second decay, because nothing follows it to compete for the axis.
+   * The previous revision published `hasSuccessor`/`nextStartMs` and used the pair to give
+   * the **final** attempt one window of extra sampled tail, on the reasoning that nothing
+   * followed it to compete for those coordinates. That rule was wrong about what the axis
+   * measures: a vertex past the last delta is post-generation time, which `docs/METRICS_SPEC.md`
+   * §7 excludes from generation duration and §8.1 excludes from the axis. Because
+   * `curve.durationMs` is the sum of these spans, those vertices carried coordinates above
+   * the chart's own duration and every one of them was clamped onto `x = 100` — a vertical
+   * stroke at the right edge that no delta produced
+   * (`test/curve-axis-endpoint.test.js`).
    */
-  for (let index = 0; index < segments.length; index += 1) {
-    const next = segments[index + 1]
-    segments[index].hasSuccessor = next !== undefined
-    segments[index].nextStartMs = next === undefined ? segments[index].endMs : next.startMs
-  }
 
   return { samples: out, durationMs: offsetMs, segments }
 }

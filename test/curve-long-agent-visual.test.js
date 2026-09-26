@@ -221,16 +221,17 @@ test('the long turn keeps its attempt resets and its zero-width tools', () => {
     `the ${CALLS - 1} tools cost real time that the axis does not carry: `
     + `turn ${settled.turnElapsedMs} ms against axis ${curve.durationMs} ms`)
   /**
-   * Every call decays inside its own trace. An intermediate call is cut where its successor
-   * begins, so its tail is bounded rather than dropped: the last vertex it draws is still the
-   * value its own window measured.
+   * Every call ends on its own last delta, so an attempt draws nothing past the coordinate it
+   * owns. That is now one rule rather than two: the previous revision gave the **final** call a
+   * one-window tail and cut every earlier one at its successor's start, which meant an attempt's
+   * own evidence was drawn differently depending on where it happened to sit in the turn.
    */
   const finalAttempt = curve.attempts[curve.attempts.length - 1]
-  assert.equal(finalAttempt.points.at(-1).tps, 0,
-    'the last call owns its own one-window tail, so its trace reaches zero')
-  for (const [index, attempt] of curve.attempts.slice(0, -1).entries()) {
-    assert.ok(attempt.points.at(-1).timeMs <= curve.segments[index + 1].startMs + 1e-9,
-      `${attempt.attemptId} draws no vertex past the coordinate its successor owns`)
+  assert.equal(finalAttempt.points.at(-1).timeMs, curve.durationMs,
+    'the last call ends on its own last delta, which is the axis end')
+  for (const [index, attempt] of curve.attempts.entries()) {
+    assert.equal(attempt.points.at(-1).timeMs, curve.segments[index].endMs,
+      `${attempt.attemptId} ends on the last coordinate it owns`)
   }
 
   /** The peak is a per-call maximum, so no multi-call sum can exceed any call's own ceiling. */

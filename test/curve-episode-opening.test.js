@@ -69,10 +69,10 @@ function driveTwoEpisodeAttempt(store, { secondSampleMs = 3000, toMs = null } = 
   const curve = store.endTurn(record, { timeMs: secondSampleMs + 100, status: 'completed' }).curve
   const trace = curve.attempts[0]
   /**
-   * Every vertex the window rule can place, from local zero to one window past the last
-   * sample. The tail is one sampling step out from the last sample rather than on the
-   * body's own grid, so the instants are collected as the union of both rather than
-   * assumed to be a plain 250 ms ladder.
+   * Every vertex the window rule places, from local zero to the attempt's **own last
+   * sample**. Since Phase 7C.1 there is one ladder and no tail: the axis is compressed model
+   * generation, so it stops where the model stopped producing, and a resumption that falls
+   * between two cadence instants is reached through the endpoint anchor instead.
    */
   const points = toMs === null
     ? trace.points
@@ -99,7 +99,8 @@ test('a resumption after a long silence measures only its own trailing window', 
   assert.equal(runs.length, 1, 'one call, one phase, one continuous coloured run')
   assert.equal(runs[0].attemptId, 'episode-attempt')
   assert.equal(points[0].localMs, 0)
-  assert.equal(points.at(-1).localMs, 4000, 'the trace covers the attempt and its own one-window tail')
+  assert.equal(points.at(-1).localMs, 3000,
+    'the trace covers the attempt and stops on its own last delta; it draws no one-window tail')
 
   /**
    * The decisive assertion. The model resumes at local 3000, so the window there is
@@ -108,8 +109,7 @@ test('a resumption after a long silence measures only its own trailing window', 
    */
   assert.equal(tpsAt(points, 3000), 100,
     `expected resumption TPS = 100, actual = ${tpsAt(points, 3000)}`)
-  assert.equal(tpsAt(points, 3250), 100, 'and one window after it, the same single delta is measured')
-  assert.equal(tpsAt(points, 4000), 0, 'then it expires')
+  assert.equal(tpsAt(points, 2750), 0, 'and the silence before it is a real zero on the same run')
 })
 
 test('the attempt\'s opening vertex still includes the attempt\'s own first sample', () => {
@@ -148,33 +148,28 @@ test('a silence longer than one window is drawn, and the eviction at its edge is
    * sample at zero to be measured one window late, the very defect Phase 7 corrected.
    */
   assert.deepEqual(oneWindow.points.map(point => point.tps),
-    [100, 100, 100, 100, 100, 100, 100, 100, 0],
+    [100, 100, 100, 100, 100],
     'abutting samples keep the trace continuous, with no fabricated zero and no double count')
   assert.equal(Math.max(...oneWindow.points.map(point => point.tps)), 100)
 
   /** One millisecond more and the window really did reach zero in between. */
-  const pastWindow = driveTwoEpisodeAttempt(new TurnTelemetryStore(), { secondSampleMs: 1001, toMs: 2001 })
+  const pastWindow = driveTwoEpisodeAttempt(new TurnTelemetryStore(), { secondSampleMs: 1001, toMs: 1001 })
   assert.equal(pastWindow.runs.length, 1, 'the silence does not split the run')
-  assert.equal(pastWindow.points.at(-1).localMs, 2001,
-    'past the last sample the trace is sampled one step out from it, keeping every window whole')
+  assert.equal(pastWindow.points.at(-1).localMs, 1001,
+    'the trace ends on the attempt\'s own final instant, off the cadence, because the endpoint is an anchor')
   /**
-   * The vertices are the body grid `0, 250, 500, 750, 1000` plus the tail grid
-   * `1251, 1501, 1751, 2001` — the tail is anchored one step past the last **sample**,
-   * not on the body's own ladder, so every window it measures is a whole
-   * `(t - windowMs, t]`.
+   * The vertices are the cadence ladder `0, 250, 500, 750, 1000` plus the attempt's own final
+   * instant `1001`, which the anchor appends because it does not fall on a whole step.
    *
-   * The tail vertex at 1251 measures `(251, 1251]`, which contains the sample at 1001 and
-   * excludes the one at 0 — half-open on the left, as the live meter's
-   * `SlidingWindowMeter` implements and `docs/METRICS_SPEC.md` §8.1 specifies. There is no
-   * vertex at 1001 itself, because a sample between two grid instants is measured on the
-   * first instant at or after it.
+   * The vertex at 1001 measures `(1, 1001]`, which contains the sample at 1001 and excludes
+   * the one at 0 — half-open on the left, as the live meter's `SlidingWindowMeter` implements
+   * and `docs/METRICS_SPEC.md` §8.1 specifies. The previous expectation carried a tail ladder
+   * out to `2001`; that ladder was post-generation time and is what Phase 7C.1 removed.
    */
   assert.deepEqual(pastWindow.points.map(point => [point.localMs, point.tps]), [
-    [0, 100], [250, 100], [500, 100], [750, 100], [1000, 0],
-    [1251, 100], [1501, 100], [1751, 100], [2001, 0],
-  ], 'gap = window + 1 opens on its own sample alone, after a real zero at the silence, '
-    + 'and the resumed burst expires exactly one window after it arrived (the window at 2001 '
-    + 'is `(1001, 2001]`, which excludes the sample at 1001)')
+    [0, 100], [250, 100], [500, 100], [750, 100], [1000, 0], [1001, 100],
+  ], 'gap = window + 1 opens on its own sample alone, after a real zero at the silence, and the '
+    + 'trace ends where the model stopped producing')
 })
 
 test('the correction does not depend on the silence length, only on the window', () => {

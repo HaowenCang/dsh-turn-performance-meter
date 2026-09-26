@@ -233,10 +233,12 @@ two views at every width and host font size — measured identical in both views
   (`docs/METRICS_SPEC.md` §8.2);
 - tool execution consumes zero x-axis width;
 - next model invocation starts immediately where previous attempt's chart segment ends;
-- **attempt boundaries break the path rather than joining it.** An attempt's one-window decay is clamped at the
-  coordinate the next attempt owns, and the two attempts are separate subpaths; a single line across the boundary would
-  interpolate between two calls' measurements. No marker is drawn — the break is the whole signal, and `attemptId`
-  stays on every run for diagnostics;
+- **the axis stops at each attempt's last generated delta**, the final attempt included. Nothing is allocated after it,
+  so no vertical stroke forms at the right edge from several distinct instants being clamped onto `x = 100 %`. An
+  off-grid final delta is appended to the cadence ladder, so the attempt's real endpoint is always drawn;
+- **attempt boundaries break the path rather than joining it.** The two attempts are separate subpaths, and a single
+  line across the boundary would interpolate between two calls' measurements. No marker is drawn — the break is the
+  whole signal, and `attemptId` stays on every run for diagnostics;
 - optional attempt/tool boundary markers are disabled by default;
 - one horizontal guide/scale label is sufficient; avoid a dense chart grid;
 - peak label is computed from the **full** per-attempt total trace, before downsampling, and is rendered with `≈`;
@@ -252,10 +254,20 @@ two views at every width and host font size — measured identical in both views
 ### 6.1 Phase transitions
 
 At a reasoning→output change the two coloured runs meet on **one shared vertex** — the same instant, the same measured
-rate, emitted by both subpaths. Where the change is separated by a silence, the boundary is the midpoint of that
-silence, so neither tone is painted over a stretch its own phase did not produce and the two still meet. No horizontal
-blank is introduced at a tone change, and no vertex is duplicated: the shared vertex is one measurement, charged to
-both subpaths by the render budget.
+rate, emitted by both subpaths. That vertex is the outgoing stretch's own last labelled vertex, and the incoming run
+opens on it, so no horizontal blank is introduced at a tone change and no vertex is duplicated: the shared vertex is one
+measurement, charged to both subpaths by the render budget.
+
+`activePhase` is carried by every vertex, so a phase's stretches are contiguous and there is no silence between two
+tones for a drawing rule to divide. A silence **inside** one phase — the model stopped delivering for longer than the
+window — is a run of zero-valued vertices that all carry that phase and are drawn in its tone at full width, because a
+stall inside a model call is a throughput fact the chart exists to show. The distinction is "between deltas" versus
+"after the last one", not "short" versus "long".
+
+When two deltas share an instant, the label is the phase of the **last authoritative stream sample** at that instant —
+DSH's transient frame index and durable compact stream member order (`docs/METRICS_SPEC.md` §8.2). Delivery order
+therefore decides the tone and never the number: the two orders produce the same TPS and legitimately different labels,
+which is what `LiveMeter.streamingPhase` reports for the same stream.
 
 ### 6.2 What the curve is not
 
