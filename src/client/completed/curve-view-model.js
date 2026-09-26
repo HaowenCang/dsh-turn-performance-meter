@@ -289,6 +289,25 @@ export function curveViewModel(settled) {
    */
   const leader = (output.peak?.tps ?? -1) > (reasoning.peak?.tps ?? -1) ? 'output' : 'reasoning'
   const leaderSeries = leader === 'output' ? output : reasoning
+  /**
+   * The marker is placed only when the leading series' strongest **drawn** vertex is the
+   * measurement the card prints.
+   *
+   * `peak.value` is the full-series maximum, measured before any budget is applied,
+   * because a drawing limit may not move a reported statistic. The position, by contrast,
+   * can only come from a vertex that survived onto the chart. Those two coincide whenever
+   * the peak-bearing run is drawn — `allocateRunBudgets` seats it first, whatever its
+   * length, and `downsampleSeries` keeps its maximum — but they come apart if it is not,
+   * and the failure is silent and misleading: the card prints `≈1000` and the dot lands on
+   * a 400 tokens/s vertex, one pixel apart, with nothing on screen to distinguish them.
+   *
+   * Placing nothing is the honest degradation: a missing dot is visibly missing, and it is
+   * what `curve.renderBudget.peakRetained` reports in words. Placing a different
+   * measurement is not.
+   */
+  const placedPeak = leaderSeries.peak !== null && Math.abs(leaderSeries.peak.tps - peakValue) < 1e-9
+    ? leaderSeries.peak
+    : null
 
   return {
     kind: 'curve',
@@ -314,7 +333,8 @@ export function curveViewModel(settled) {
      * The peak is a sample of a shape-estimated series, so it is `≈` even when
      * the generated total is exact — a curve point is not a provider-certified
      * maximum (`docs/METRICS_SPEC.md` §9). `x`/`y` place the marker on the
-     * leader series; they are `null` when nothing is drawable.
+     * measurement itself, and they are `null` when that measurement is not on the
+     * chart — never a position borrowed from a weaker vertex.
      */
     peak: {
       value: peakValue,
@@ -322,10 +342,14 @@ export function curveViewModel(settled) {
       unit: 'tokens/s',
       approximate: true,
       leader,
-      x: leaderSeries.peak === null ? null : round(leaderSeries.peak.x),
-      y: leaderSeries.peak === null ? null : round(leaderSeries.peak.y),
+      x: placedPeak === null ? null : round(placedPeak.x),
+      y: placedPeak === null ? null : round(placedPeak.y),
     },
-    /** Drawn vertex count, so a test can assert the SVG input is bounded. */
+    /**
+     * Drawn **path** vertices, so a test can assert the SVG input is bounded. A run of one
+     * vertex contributes zero: it is drawn as a point marker, not as a vertex of a line,
+     * and counting it here would make this number mean two different things.
+     */
     drawnPoints: reasoning.points + output.points,
     /** Rendered subpath count: one per drawable run, never one per series. */
     drawnRuns: reasoning.runs.filter(run => run.present).length
@@ -336,12 +360,23 @@ export function curveViewModel(settled) {
      * Each carries the tone of its own series, so a reasoning singleton and an output
      * singleton are distinguishable by the same channel the legend already uses. They
      * are markers, not data: the SVG is `aria-hidden` and so are they, and no count on
-     * this object includes them.
+     * this object includes them — `renderElementPoints` below adds them explicitly.
      */
     markers: [
       ...reasoning.markers.map(marker => ({ ...marker, series: 'reasoning', tone: 'neutral' })),
       ...output.markers.map(marker => ({ ...marker, series: 'output', tone: 'accent' })),
     ].map(marker => ({ ...marker, x: round(marker.x), y: round(marker.y) })),
+    /**
+     * The quantity the chart-wide render budget bounds: line vertices **plus** singleton
+     * markers, its own named sum.
+     *
+     * `drawnPoints` counts one half of what the plot emits and `markers.length` the other,
+     * and naming the first `drawnPoints` invited a bound assertion that measured the chart
+     * while leaving every marker outside it. The two remain separate because they are
+     * different things — a vertex of a polyline and a standalone dot — but no caller has to
+     * add them up by hand to check the bound.
+     */
+    renderElementPoints: reasoning.points + output.points + reasoning.markers.length + output.markers.length,
     /**
      * True when the only evidence a phase has is single-vertex runs. The renderer
      * needs it because `drawnRuns === 0` with `markers.length > 0` is a chart that has

@@ -113,7 +113,21 @@ export function createController({
         // A `replace` swapped the window (reload/reconnect). Local live state
         // belongs to the superseded window; replay begins from a clean machine
         // rather than fabricating continuity.
+        //
+        // The store is reset **first**, and it is the step that matters. The
+        // presenter machine and the two identifiers below are presentation state;
+        // the evidence is `store.turns` (attempts, samples, usage, tool intervals)
+        // and the per-session `LiveMeter`, and both outlive a presenter reset.
+        // Leaving them in place makes the replay land inside attempts the
+        // superseded generation already filled — `beginTurn` is idempotent and
+        // `beginAttempt` returns the existing attempt — so a replayed delta is
+        // appended rather than replacing, and the turn reports one sample per
+        // republication of the window.
+        //
+        // The reset is scoped to this session: a rebaseline of one conversation is
+        // not evidence about any other.
         log('stream gap/rebaseline', sessionId)
+        store.rebaselineSession(sessionId)
         state.presenter.apply({ type: 'reset' })
         state.currentRecord = null
         state.openAttemptId = null

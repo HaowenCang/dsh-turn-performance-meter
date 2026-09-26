@@ -529,6 +529,26 @@ function rateOf(point) {
 }
 
 /**
+ * What a run costs to draw **at all**, which is not what it could be thinned to.
+ *
+ * A run of one or two vertices is already at full resolution: `downsampleSeries`
+ * refuses a budget below `MIN_MAX_POINTS` precisely because it cannot honour the
+ * three anchors, and duplicating a vertex to reach the minimum would draw a segment
+ * the data does not contain. Its irreducible cost is therefore its own length. Every
+ * longer run costs `MIN_MAX_POINTS`, the smallest allowance that keeps its first
+ * point, its last point and its maximum.
+ *
+ * This is the unit the allocation is denominated in, and stating it as a function of
+ * length alone is what makes the priority order total: every run is comparable to
+ * every other, whatever their lengths, so no priority band can end at a length
+ * boundary.
+ */
+export function minimumRunCost(length) {
+  if (!Number.isFinite(length) || length <= 0) return 0
+  return length < MIN_MAX_POINTS ? length : MIN_MAX_POINTS
+}
+
+/**
  * Divide one chart-wide rendering budget across the runs that will be drawn.
  *
  * `downsampleSeries` bounds *one* run. Nothing bounded the sum, so the SVG could
@@ -540,20 +560,40 @@ function rateOf(point) {
  * Three constraints, in priority order, because a budget smaller than the number of
  * runs must degrade predictably rather than silently:
  *
- *   1. **The global peak keeps a drawable budget.** The run whose series carries the
- *      chart's maximum rate is allocated first and is never thinned to a point per
- *      run. Without this, a many-run turn could drop the one vertex the card's
- *      printed peak refers to, and the chart would contradict its own number.
+ *   1. **The global peak keeps a drawable budget — whatever length its run is.** The
+ *      run whose series carries the chart's maximum rate is seated first and is never
+ *      thinned to a point per run. Without this, a many-run turn could drop the one
+ *      vertex the card's printed peak refers to, and the chart would contradict its
+ *      own number.
  *   2. **Every run keeps its own first and last vertex.** `downsampleSeries` treats
- *      those as unconditional anchors, so a run whose allocation is below
- *      `MIN_MAX_POINTS` cannot honour the anchors its own contract promises.
- *      Allocations are therefore `0` or `>= MIN_MAX_POINTS`, and a `0` is an
- *      explicit "not drawable", not a silently truncated run.
+ *      those as unconditional anchors, so a run whose allocation is below its
+ *      irreducible cost cannot honour the anchors its own contract promises.
+ *      Allocations are therefore `0` or at least `minimumRunCost(length)`, and a `0`
+ *      is an explicit "not drawable", not a silently truncated run.
  *   3. **Remaining budget is shared proportionally to length**, with shorter runs
- *      served first at equal fairness. A long flat stretch can be described by
- *      fewer vertices than a dense one; ranking by length is the cheapest
- *      approximation of vertex density that does not require inspecting the values
- *      here, and it is deterministic.
+ *      served first at equal fairness. A long flat stretch can be described by fewer
+ *      vertices than a dense one; ranking by length is the cheapest approximation of
+ *      vertex density that does not require inspecting the values here, and it is
+ *      deterministic.
+ *
+ * ## One priority order, not one per run length
+ *
+ * Phase 7A implemented the above as two passes partitioned by length: long runs were
+ * seated in ranked order, then the one- and two-vertex runs were served **in raw index
+ * order**. The peak band existed only inside the first pass, so it vanished exactly at
+ * the class boundary. A chart whose maximum lived in a one-vertex run — a single heavy
+ * delta in an attempt of zero width, which `compressAttempts` produces routinely — was
+ * skipped by the anchor pass for being short and then competed in the second pass as an
+ * ordinary run, on index alone. Two ordinary short runs ahead of it consumed the last
+ * vertices of a saturated budget and the peak was refused:
+ *
+ *     170 runs x 3 vertices = 510 allocated; remaining 2
+ *     index 170 (tps 10) -> 1, index 171 (tps 20) -> 1, index 172 (tps 9999) -> 0
+ *
+ * The repair is not a third pass. It is a single order over all runs, ranked by
+ * retention priority and denominated in `minimumRunCost`, so "the peak-bearing run is
+ * first" is a property of the whole allocation rather than of one of its stages. A
+ * one-vertex run is not a lesser citizen of that order; it is simply the cheapest one.
  *
  * The allocation is a **pure function of run lengths and the budget**, and it is
  * applied per run. Flattening the runs into one series, downsampling that and
@@ -568,11 +608,20 @@ function rateOf(point) {
  * it as absent. The policy is stated rather than implied because an unbounded DOM is
  * the failure mode this function exists to remove.
  *
+ * `peakRetained` reports whether the maximum actually survived. It is `false` only in
+ * the formal corner where `minimumRunCost` of the peak-bearing run exceeds the whole
+ * budget — unreachable at `MAX_RENDER_POINTS_TOTAL` (512), where the cost is at most
+ * `MIN_MAX_POINTS` — and it exists so that corner cannot be reported as a preservation.
+ *
  * @param {readonly {points?: readonly unknown[]}[]} runs in draw order
  * @param {number} [totalBudget] chart-wide vertex budget
- * @returns {{budgets:number[], total:number, allocated:number, degraded:number[]}}
+ * @returns {{
+ *   budgets:number[], total:number, allocated:number, degraded:number[],
+ *   peakIndex:number, peakRetained:boolean,
+ * }}
  *   `budgets[i]` is the allowance for `runs[i]`, `degraded` lists the indices that
- *   received `0`
+ *   received `0`, `peakIndex` names the run carrying the chart maximum (`-1` when no
+ *   run holds a finite rate) and `peakRetained` says whether it was seated
  */
 export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) {
   const list = Array.isArray(runs) ? runs : []
@@ -585,6 +634,9 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
       total: budget,
       allocated: 0,
       degraded: lengths.map((_, index) => index),
+      peakIndex: -1,
+      /** Nothing was drawn, so nothing can be claimed as retained. */
+      peakRetained: false,
     }
   }
 
@@ -613,49 +665,38 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
    */
   const conveysPeak = index => index === peakIndex
 
-  /** Ranked by band descending: the peak-bearing run first, then the longer runs. */
-  const ranked = lengths.map((length, index) => ({ index, length }))
+  /**
+   * **The one priority order.** After the peak band, runs are ranked by what they
+   * irreducibly cost (so the most runs survive a tight budget), then by length (so a
+   * dense run is preferred over a flat one of the same cost), then by original index,
+   * which makes the result a pure function of the input.
+   */
+  const ranked = lengths.map((length, index) => ({ index, length, cost: minimumRunCost(length) }))
     .sort((left, right) => (
       Number(conveysPeak(right.index)) - Number(conveysPeak(left.index))
-      || right.length - left.length
+      || left.cost - right.cost
+      || left.length - right.length
       || left.index - right.index
     ))
 
   /**
-   * **Anchors first, for every drawable run, in priority order.** A run that does not fit is
-   * left at `0` — refused outright rather than thinned below its own anchor contract — and the
-   * ranking guarantees the peak-bearing run is the last one that could ever be refused.
+   * **Minimum cost first, for every run, in that one order.** A run that does not fit is
+   * left at `0` — refused outright rather than thinned below its own anchor contract —
+   * and the ranking guarantees the peak-bearing run is the last one that could ever be
+   * refused, whatever its length.
    *
-   * This pass runs before any class of run is locked, and that ordering is a correctness
-   * requirement rather than a style choice. `MIN_MAX_POINTS` is the *minimum drawable*
-   * allowance: giving a run less than it — which a pass that committed short runs first would
-   * do whenever the budget ran out mid-list — produces an allowance that `downsampleSeries`
-   * refuses, so the run would reach the renderer with an allowance its own contract cannot
-   * honour. A run is either drawable at the minimum or not drawable at all.
+   * Seating a run at its own minimum is also what keeps an unrunnable allowance off the
+   * wire: `minimumRunCost` is the smallest value `downsampleSeries` can honour for that
+   * length, so nothing between one and three is ever published for a longer run.
    */
   let allocated = 0
-  const anchored = new Set()
+  const seated = new Set()
   for (const entry of ranked) {
-    if (lengths[entry.index] < MIN_MAX_POINTS) continue
-    if (allocated + MIN_MAX_POINTS > budget) continue
-    budgets[entry.index] = MIN_MAX_POINTS
-    allocated += MIN_MAX_POINTS
-    anchored.add(entry.index)
-  }
-
-  /**
-   * Then the runs that are simply too short to thin: one or two vertices cannot be reduced
-   * without deleting the only measurements they hold, so their allowance is their whole length.
-   * They are served after the anchors because serving them first could consume budget the
-   * anchor pass needs, and an unrunnable allowance is worse than a refused short run.
-   */
-  const locked = new Set()
-  for (let i = 0; i < lengths.length; i += 1) {
-    if (lengths[i] === 0 || lengths[i] >= MIN_MAX_POINTS) continue
-    if (allocated + lengths[i] > budget) continue
-    budgets[i] = lengths[i]
-    allocated += lengths[i]
-    locked.add(i)
+    if (entry.cost === 0) continue
+    if (allocated + entry.cost > budget) continue
+    budgets[entry.index] = entry.cost
+    allocated += entry.cost
+    seated.add(entry.index)
   }
 
   /**
@@ -664,11 +705,11 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
    * from being starved by a four-hundred-vertex one. The loop terminates because
    * every pass either grants a vertex or finds nothing left to grant.
    *
-   * Locked runs are skipped, and so is every run the anchor pass refused. That second guard is
-   * the one that matters: a run the anchor pass could not seat at `MIN_MAX_POINTS` must stay at
-   * `0`, because topping it up with whatever surplus remains would hand it an allowance below
-   * `MIN_MAX_POINTS` — an allowance `downsampleSeries` refuses outright and which cannot honour
-   * the first, last and peak anchors it promises. A run is drawable at the minimum or it is not
+   * Refused runs are skipped, and that guard is the one that matters: a run the seating
+   * pass could not seat at its minimum must stay at `0`, because topping it up with
+   * whatever surplus remains would hand it an allowance below its own irreducible cost —
+   * an allowance `downsampleSeries` refuses outright and which cannot honour the first,
+   * last and peak anchors it promises. A run is drawable at its minimum or it is not
    * drawable at all; there is no third state.
    */
   let remaining = budget - allocated
@@ -676,7 +717,7 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
     let served = false
     for (const entry of ranked) {
       if (remaining <= 0) break
-      if (!anchored.has(entry.index)) continue
+      if (!seated.has(entry.index)) continue
       const capacity = lengths[entry.index] - budgets[entry.index]
       if (capacity <= 0) continue
       const share = Math.max(1, Math.floor(remaining / ranked.length))
@@ -697,6 +738,13 @@ export function allocateRunBudgets(runs, totalBudget = MAX_RENDER_POINTS_TOTAL) 
     total: budget,
     allocated: budgets.reduce((sum, value) => sum + value, 0),
     degraded,
+    peakIndex,
+    /**
+     * Vacuously true when there is no maximum to keep: a chart of nothing but zeros has
+     * not lost anything. The only `false` is "the run carrying the chart's maximum could
+     * not be drawn", which a caller must not present as a preserved peak.
+     */
+    peakRetained: peakIndex === -1 || budgets[peakIndex] > 0,
   }
 }
 

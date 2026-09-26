@@ -200,6 +200,37 @@ Acceptance gate: no NaN/Infinity, no stale cross-session state, no falsely exact
 
 Acceptance gate: end-to-end multi-tool turn passes functional and visual checks.
 
+## Phase 7A.1 — Final correctness closure (external audit)
+
+Two correctness blockers found by an independent audit of the Phase 7A commit `c0d2a60`. Each was reproduced by a test
+observed to fail before the production change, and each is recorded in `docs/IMPLEMENTATION_LOG.md` with its
+counterexample, the behaviour that shipped and the invariant that replaces it.
+
+- [x] BLOCKER A — a global peak living in a one- or two-vertex run could be starved: the allocation was partitioned by
+      run length, so the peak's priority band vanished at the class boundary and two ordinary short runs could take
+      the last vertices of a saturated budget (`[1,1,0]`).
+- [x] Replace the two length-partitioned passes with one priority order denominated in `minimumRunCost(length)`, so
+      the peak-bearing run is seated first whatever its length and no run is handed an allowance below its own cost.
+- [x] Publish `peakIndex`/`peakRetained`, and place the view model's peak dot only on the vertex that measured the
+      printed value (`null` otherwise) — never on a weaker vertex of the drawn series.
+- [x] Freeze the chart-wide element bound as `lineVertices + markers = elementPoints <= MAX_RENDER_POINTS_TOTAL`, with
+      both `drawnPoints` meanings documented where they are defined.
+- [x] BLOCKER B — a window `replace` replayed evidence into a `TurnTelemetryStore` that still owned the previous
+      generation, duplicating samples into attempts the superseded window had already filled.
+- [x] Add `TurnTelemetryStore.rebaselineSession(sessionId)` and call it before the presenter reset on
+      `window-rebaseline`, scoped to one session.
+- [x] Establish and test `controller-after-replace == fresh-controller-over-replacement-window` for an open turn, a
+      completed turn and a mid-turn tail.
+- [x] `npm run build:client` + `npm run verify`: 508 baseline tests retained, 27 added, **535 pass / 0 fail**, bundle
+      fresh.
+- [x] Phase 5–7 frozen behaviours re-run and unregressed: 0 ms / 3000 ms episode opening = 100 (never 200), attempt
+      reset and retry, mid-turn adoption, authoritative turn-start upgrade, completed reconstruction,
+      `SLOT_ORDER === -10`.
+- [x] Push to `origin/main` without rewriting `05ffd0d`, `c4c8ef0` or `c0d2a60`.
+
+Acceptance gate: the turn-meter correctness gate is ready for external audit. Phase 7B (browser/E2E/visual matrix) is
+deliberately **not** started.
+
 ## Phase 8 — Release readiness
 
 - [ ] Update README from scaffold status to implemented status.

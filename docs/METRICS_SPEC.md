@@ -277,11 +277,27 @@ If `reasoningTokens` is absent, do not claim the reasoning/output split is exact
 
 The token and split axes are not discarded — they govern the numbers printed beside the chart and travel with the curve in `curve.qualityAxes`. What they may not do is decide the chart's own quality.
 
+### 8.5 Chart-wide render budget and peak retention (frozen in Phase 7A.1)
+
+The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_TOTAL` = 512, divided by `allocateRunBudgets` across every run of both phases. `DEFAULT_MAX_POINTS` (512) bounds one run; a chart is not one run, and a turn that alternates reasoning and output a hundred times would otherwise emit a hundred series of up to 512 vertices each. Downsampling is a drawing operation and never moves a reported statistic: `peakTps` is measured on the **full** series before any allowance is applied, and the axis is scaled by that value.
+
+**Every run is denominated in its irreducible cost.** `minimumRunCost(length)` is `0` for an empty run, `1` or `2` for a run of one or two vertices, and `MIN_MAX_POINTS` (3) for anything longer. A one- or two-vertex run is already at full resolution: `downsampleSeries` refuses a budget below the minimum because it cannot honour the first, last and maximum anchors, and duplicating a vertex to reach three would draw a segment the data does not contain. An allowance is therefore `0` — an explicit refusal, reported in `degraded` — or at least the run's own irreducible cost; nothing between one and three is ever published for a longer run.
+
+**One priority order, and the peak is first in it whatever its length.** Runs are ranked by peak band, then by cost (so the greatest number of runs survives a tight budget), then by length, then by original index, which keeps the allocation a pure function of the input. The peak-bearing run — the run whose series carries the chart's maximum rate — is seated first and is the last run that could ever be refused. This is a whole-allocation property, not a stage: an earlier revision partitioned the seating into a long-run pass and a short-run pass, and the peak band existed only in the first, so a global maximum living in a one-vertex run was skipped for being short and then competed on index alone. Under a saturated budget two ordinary short runs ahead of it took the last two vertices and the peak was refused at `0`. The counterexample and both allocations are recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 7A.1 §1).
+
+**Degradation is explicit.** A run that cannot be seated is emptied (`points: []`, `degraded: true`) rather than handed an allowance its own anchors cannot honour, and a caller must render it as absent. `renderBudget.peakRetained` is `false` only when the peak-bearing run's irreducible cost exceeds the whole budget — unreachable at 512, where the cost is at most 3 — so the corner cannot be reported as a preservation. `renderBudget.peakRun` names the run carrying the maximum in `series.flatMap(entry => entry.runs)`, or `-1` when no run holds a finite rate.
+
+**What the budget bounds is the plot's elements, not one of its two halves.** `curve.drawnPoints` is the allocator's accounting and counts every budgeted vertex, a one-vertex run included. `curveViewModel.drawnPoints` counts **path vertices only** — a one-vertex run is drawn as a point marker rather than as a vertex of a line — and the markers are published separately in `curveViewModel.markers`. The bounded quantity is their sum, published as `renderBudget.elementPoints` (with `lineVertices` and `markers` beside it) in the settled snapshot and as `renderElementPoints` in the view model. Asserting `drawnPoints <= 512` alone would leave every marker outside the bound.
+
+**The printed peak and the placed peak dot are one measurement.** `curveViewModel.peak.value` is the full-series maximum, but `peak.x`/`peak.y` are taken only from a vertex that survived onto the chart *and* carries that same rate; when the peak-bearing run is not drawable they are `null`. The rejected behaviour took the position from whichever series led the *drawn* points, which after a starved peak printed `≈9,999` and placed the dot on a 400 tokens/s vertex — two different measurements one pixel apart. A missing dot is visibly missing; a dot on a weaker vertex is a false claim about where the chart's maximum was.
+
 ## 9. Peak TPS
 
 `peakTps` is the maximum value of the **full** per-attempt rolling series across the reasoning and output phases, computed before any downsampling. It is the maximum over those series, never their sum and never their average: the turn's peak rate is the fastest any single call ran, not a quantity assembled from two calls.
 
 Label it as the peak of the shape-estimated series, not as a provider-certified instantaneous maximum. Because every vertex is a shape weight, the peak inherits `temporalShapeQuality` and never exceeds `reconstructed`; it therefore renders with `≈` at every quality level.
+
+The peak is a **number** and, when the chart is drawn, a **position**. The number is fixed by the series alone and no rendering decision may change it; the position exists only if the run carrying that number survived the chart-wide budget of §8.5, and it is then that very measurement rather than the strongest one that happened to be drawn. `peakRetained` and a `null` position are the two ways the chart says the maximum is not on it.
 
 ## 10. Total elapsed time
 
@@ -444,3 +460,25 @@ A card must be reachable from a window that contains **only** the durable plane.
 2. When the window still holds transient rows for the same attempt, the durable settlement is correlated to that attempt by its `(turn, step)` **only if exactly one unsettled attempt matches**. With two candidates the correlation is unprovable, and the durable row is restored as its own attempt rather than attached to a guess.
 
 The card a reload produces must equal the card the live session produced. This is tested per recorded fixture in `test/completed-lifecycle.test.js` (durable-only window versus live-observed window, compared through the view model) and, for the underlying metrics, in `test/dsh-equivalence.test.js`.
+
+### 13.3 Window generations: `replace` rebaselines the store (frozen in Phase 7A.1)
+
+The client window publishes four change kinds, and `replace` means the **complete contiguous window was swapped** — initial snapshot, reload, reconnect. It is a new *generation*: the rows it publishes are that session's authoritative evidence, and whatever the superseded window contributed is not evidence about the same generation. `SessionEventFeed` therefore drops its dedupe sets, its open-turn and open-attempt state and its turn-ordering watermarks, and replays the replacement window from scratch.
+
+The metric state must observe the same boundary, because the evidence lives there and not in the feed: `TurnTelemetryStore` holds the attempts, samples, usage and tool intervals (`turns`), and the rolling window, frozen TTFT stage, turn start and running tool set (`liveBySession`). Replaying a window into a store that still owns the previous generation re-enters attempts that already exist — `beginTurn` is idempotent by design, so a re-observed durable `turn/start` does not discard samples, and `beginAttempt` returns the existing attempt for a known `attemptId` — and each replayed delta is appended rather than replacing it. The turn then reports one sample per republication of the window: tokens, curve, TTFT-adjacent evidence and the completed card all follow.
+
+`TurnTelemetryStore.rebaselineSession(sessionId)` is that boundary. It removes one session's turn records and its `LiveMeter`, and it is called **before** the presenter reset:
+
+```text
+store.rebaselineSession(sessionId)   evidence: attempts, samples, usage, tools, live window
+presenter.reset()                    presentation: the UI state machine
+currentRecord / openAttemptId = null routing
+invalidate()                         memoized projections
+... the feed replays the replacement window ...
+```
+
+Three properties are normative:
+
+1. **The scope is one session.** Two sessions run concurrently with independent windows; a rebaseline of one is not evidence about the other. `dispose()` is the store-wide reset and a different operation.
+2. **The reset is a generation boundary, not a dedupe.** A cross-generation key over `timeMs + text` or `attemptId + time` would hide the duplicate while leaving the superseded generation's state in memory. Stable dedupe is a wire-safety measure and does not replace generation ownership.
+3. **After a replace, the controller equals a fresh controller over the replacement window.** `controller-after-replace == fresh-controller-over-replacement-window`, on the telemetry and on the rendered card. This is what makes a rebaseline a re-derivation rather than a repair, and it is asserted in `test/rebaseline-generation.test.js` for an open turn, a completed turn and a mid-turn tail. Phase 7A's adoption and authoritative-upgrade paths are unchanged by it: a replacement window with no `turn/start` still adopts the open turn with an unknown start, and a durable `turn/start` arriving in the new generation still upgrades that record one way.

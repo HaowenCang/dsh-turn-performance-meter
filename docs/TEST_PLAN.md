@@ -15,6 +15,35 @@ The initial scaffold already covers:
 
 Add tests for every bug discovered during integration.
 
+Phase 7A.1 additions (all in `npm run verify`) — the second external audit's two blockers, each test file written and
+observed failing against `c0d2a60` before the production change, so the counterexample is demonstrated rather than
+asserted:
+
+- `test/curve-peak-priority.test.js` — the chart budget's retention priority across **all** run lengths. The
+  counterexample is the pure allocator over 170 three-vertex runs plus three singletons whose last one carries 9999
+  tokens/s (old budgets `[1,1,0]` — the peak refused; new budgets `[1,1,1]` with an ordinary long run yielding). It
+  then pins the matrix: a two-vertex and a long peak run under the same saturated budget, the peak first and last in
+  input order, an equal peak resolving to the earliest run, repeated-call determinism, `allocated <= 512`, refused runs
+  staying exactly `0`, and no run receiving an unrunnable one- or two-vertex allowance when it holds three or more.
+  Four further tests drive the same scenario through `TurnTelemetryStore -> settled.curve -> curveViewModel ->
+  completedTree`, with the singleton peak produced by the real clock (200 output stretches, 200 reasoning stretches,
+  three one-delta attempts and the successor attempt that collapses the peak episode to one instant): the peak run is
+  drawn, `renderBudget.peakRun` names it, `peakTps` is its rate, the printed `≈9,999` sits on the marker whose
+  `data-tps` is `9999`, and no other marker or vertex shares the peak dot's coordinate. The chart-wide element
+  accounting is asserted as `lineVertices + markers === elementPoints <= 512` rather than on `drawnPoints` alone;
+- `test/rebaseline-generation.test.js` — window generations. Every case is controller-level through
+  `fakeSessionsService()` + `createController()`, not the feed alone, because the defect was in what the store owned
+  across the boundary: the counterexample (generation 1's single sample becoming two after a `replace` with the same
+  two rows); rebuilt sample counts equal to a fresh controller's; a shorter replacement window not retaining the delta
+  it dropped; a replacement window beginning mid-turn re-adopting the open turn with an unknown start and a rebuilt
+  live rate; a recovered record still upgrading when the authoritative `turn/start` arrives in the new generation; a
+  completed turn rebuilt by a replace comparing **deep-equal** to a fresh controller over the same window on both the
+  telemetry and the rendered card; a completed-only window yielding the card and no live meter; tool state absent from
+  the window not surviving it; a rebaseline of session A leaving session B's record, settled snapshot and rendering
+  identical by identity; idempotence over three consecutive replaces; an empty replacement window leaving nothing
+  behind; and `rebaselineSession` itself, including its no-op on an unknown session and its refusal to disturb an
+  unrelated one.
+
 Phase 3 additions (all in `npm run verify`):
 
 - `test/live-state.test.js` — the eight-state machine: entry/exit conditions, TTFT frozen once, parallel tools,
@@ -35,7 +64,8 @@ Phase 3 additions (all in `npm run verify`):
   windows never crash;
 - `test/client-bundle.test.js` — deterministic bundle, committed `client.js` freshness, module-table contract
   (React the only external, no `@deepseek-ai/*`), slot registration (`id: turn-performance-meter`,
-  `conversation.input.dock`, order 30), the absence of the superseded composer-dock literal, `ctx.effect`
+  `conversation.input.dock`, order `-10`, asserted both as a literal and by sorting against the shipped occupants),
+  the absence of the superseded composer-dock literal, `ctx.effect`
   setup/disposer semantics, remount shape, and the no-charting-dependency assertion;
 - audit tests inside existing files — settlement concepts (`assistant/attempt` ≠ `abandoned`), `llm/retry` →
   `retried`, `reasoningTokens=0` + reasoning stream consistency conflict (unit, aggregate, and fixture-patched), the

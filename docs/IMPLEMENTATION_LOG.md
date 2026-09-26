@@ -1695,8 +1695,9 @@ Keep this current. Every approximation that can affect displayed numbers belongs
 13. A run of one vertex is not drawable **as a line**, so an attempt that produced a single measured instant inside a
     phase contributes a peak with no segment. Phase 7 closed the mismatch that used to follow from this: the
     measurement is now placed as a point marker of its own series, so a card can no longer print a turn peak whose
-    vertex has no position on the chart. The vertex count is unaffected — a marker is not a path vertex and does not
-    count toward the render budget.
+    vertex has no position on the chart. A marker is not a path vertex, so it does not enter `drawnPoints`; Phase 7A.1
+    established that it *is* an element of the plot all the same, and the quantity the chart-wide budget bounds is now
+    `renderBudget.elementPoints` = path vertices + markers (§"Phase 7A.1" below).
 
 ## Phase 7 — curve correctness, chart budget, dock placement (2026-09-26)
 
@@ -1741,6 +1742,11 @@ bound at 10 / 25 / 100 / 150 / 200 runs through both the settled snapshot and th
 properties that make the bound safe: the global peak survives on a drawn run, run order and run intervals are
 preserved, endpoints are kept, a small chart is untouched, and the allocation is deterministic and never raises a
 measured value.
+
+**The two-pass structure described above is superseded.** An external audit of `c0d2a60` found that partitioning the
+allocation by run length removed the peak's priority band exactly at the class boundary, so a global peak living in a
+one- or two-vertex run could be starved by ordinary short runs. The bound and the retention properties above still
+hold; the passes do not. See §"Phase 7A.1" for the counterexample and the single-order replacement.
 
 ### 3. A one-vertex run was invisible
 
@@ -1850,3 +1856,139 @@ event order (an attempt boundary must not reach a presenter that is still `inact
 finished-turn drop, future-turn adoption, unknown-not-zero elapsed, the authoritative upgrade and its refusal to
 downgrade, and both completed-card TTFT paths. In the browser, reloading the page mid-turn now renders the live pill
 (`data-kind="live"`, tool-stage timer and TPS from observed deltas) with no fabricated turn elapsed.
+
+## Phase 7A.1 — Final correctness closure (external audit, 2026-09-26)
+
+A second independent audit, run against the pushed Phase 7A history (`05ffd0d`, `c4c8ef0`, `c0d2a60`), confirmed the
+Phase 7A work is on `origin/main` and found two further correctness defects. Both are recorded below with the
+counterexample that establishes them, the behaviour that shipped, and the invariant that replaces it. Neither is a
+styling or preference question: in both cases the code did something other than what its own documentation said.
+
+### 1. A global peak in a one- or two-vertex run could be starved (BLOCKER A)
+
+**Counterexample.** `allocateRunBudgets(runs, 512)` over 173 runs: 170 ordinary three-vertex runs at indices `0..169`,
+then three singleton runs at indices `170`, `171`, `172` carrying 10, 20 and **9999** tokens/s. The last one is the
+chart's global maximum.
+
+    old budgets      indices 170,171,172 = [1, 1, 0]      <-- the peak run is refused
+                     allocated 512, degraded [172]
+    new budgets      indices 170,171,172 = [1, 1, 1]
+                     allocated 510, degraded [169]        <-- an ordinary long run yields instead
+
+**Old behaviour.** The allocation ran in two passes partitioned by run length. The first seated every run with
+`length >= MIN_MAX_POINTS` (3) in priority order, where the peak-bearing run ranked first; the second served the one-
+and two-vertex runs **in raw index order**, with no priority at all. `MIN_MAX_POINTS` is a property of run *length*,
+so the peak band existed only inside the first pass and vanished exactly at the class boundary: a singleton was
+skipped by the anchor pass for being short, then competed as an ordinary run on index alone. The 170 long runs consumed
+510 of the 512 vertices, and the two singletons ahead of the peak took the remaining two. The chart printed `≈9,999`
+and drew no vertex at that rate — the precise failure `MAX_RENDER_POINTS_TOTAL` was introduced to prevent, and the same
+defect the marker work in the log's limitation 13 had closed one layer down.
+
+The scenario is not exotic. `compressAttempts` gives an attempt zero width when it produced a single delta, so a
+one-vertex run is what a retry, an abandoned prefix or a single heavy delta produces routinely — and a *saturated*
+chart, where the allocation decides anything at all, is exactly the chart with many such runs.
+
+**New invariant.** There is one priority order over all runs, and the peak band is a property of it rather than of a
+stage. Every run is denominated in its irreducible cost `minimumRunCost(length)`: `0` for an empty run, `1` and `2`
+for a run of one or two vertices (already at full resolution — `downsampleSeries` refuses a smaller budget, and
+duplicating a vertex to reach three would draw a segment the data does not contain), and `MIN_MAX_POINTS` for anything
+longer. Runs are ranked by peak band first, then by cost, then by length, then by original index, and the seating pass
+hands out that cost in that order. A run is therefore either refused (`0`) or drawable at a value its own anchor
+contract can honour, and **the peak-bearing run has the highest retention priority whatever its length**: if any run is
+drawable, it is.
+
+**Explicit degradation.** `allocateRunBudgets` now also publishes `peakIndex` and `peakRetained`. The second is `false`
+only in the formal corner where the peak run's own irreducible cost exceeds the entire budget — unreachable at
+`MAX_RENDER_POINTS_TOTAL` = 512, where the cost is at most 3 — and it exists so that corner cannot be reported as a
+preservation. `curveViewModel.peak` follows the same rule from the other side: `value` is still the full-series maximum
+(a drawing budget may not move a reported statistic), but `x`/`y` are placed only when the leading series' strongest
+*drawn* vertex is that same measurement, and are `null` otherwise. A missing dot is visibly missing; a dot on a weaker
+vertex is the misleading outcome the position guard removes.
+
+**Chart-wide element bound.** `curve.drawnPoints` counted every budgeted vertex, singleton runs included, while
+`curveViewModel.drawnPoints` counted path vertices only and published markers separately — the same name for two
+different quantities, and the bound `drawnPoints <= 512` could be asserted while every marker sat outside it. Both
+meanings are now stated where they are defined, and the bounded sum is its own published field:
+`renderBudget.elementPoints` = `lineVertices` + `markers` in the settled snapshot, and `renderElementPoints` in the
+view model. Through the real pipeline with 404 runs the accounting is `lineVertices` 509 + `markers` 3 = **512**.
+
+**Verification.** `test/curve-peak-priority.test.js` (15 tests): the frozen cost ladder, the counterexample above as a
+pure-function regression; a two-vertex and a long peak run under the same saturated budget; the peak first and last in
+input order;
+an equal peak resolving to the earliest run; determinism across repeated calls; and the contract sweep over
+1/2/3/40-vertex runs at 1, 3, 17, 100, 170, 200 and 400 runs, asserting the bound, the absence of an unrunnable 1- or
+2-vertex allowance for a longer run, and that refused runs stay exactly `0`. Four further tests drive the same
+counterexample through `TurnTelemetryStore -> settled.curve -> curveViewModel -> completedTree`, where the peak is a
+genuine one-vertex run produced by the real clock: 200 output stretches, 200 reasoning stretches, three one-delta
+attempts and a successor attempt (the successor is what collapses the peak attempt's episode to a single instant, so
+the construction uses the pipeline rather than a hand-built snapshot). They assert that the peak run is drawn, that
+`renderBudget.peakRun` names it, that `peakTps` is its rate and not a long run's, that the printed `≈9,999` sits on the
+marker whose own `data-tps` is `9999`, and that no other marker or vertex shares the peak dot's coordinate.
+
+### 2. A window `replace` replayed evidence into the store that owned the previous generation (BLOCKER B)
+
+**Counterexample.** One controller, one session.
+
+    generation 1     durable turn/start(turn 1, 1000)
+                     transient a@1100 "x"                 -> attempt a holds 1 sample
+    replace          the same two rows, republished as a new window generation
+    old result       attempt a holds 2 samples
+    new result       attempt a holds 1 sample
+
+**Old behaviour.** `SessionEventFeed.rebaseline()` clears its durable-sequence dedupe, its transient identity set, its
+open-turn and open-attempt state and its turn-ordering watermarks, then replays the replacement window — and
+`test/dsh-client-feed.test.js` asserts exactly that, because a `replace` is defined as a new authoritative window
+generation. The controller honoured the presentation half of the same boundary (`presenter.reset()`,
+`currentRecord = null`, `openAttemptId = null`, `invalidate()`) but left `TurnTelemetryStore` untouched. The evidence
+lives in the store: `store.turns` holds the attempts, samples, usage and tool intervals, and `store.liveBySession`
+holds the rolling window, the frozen TTFT stage, the turn start and the running tool set. Replaying into that state
+re-entered attempts that already existed — `beginTurn` is deliberately idempotent so that re-observing a durable
+`turn/start` does not discard samples, and `beginAttempt` returns the existing attempt for a known `attemptId` — so each
+replayed delta was **appended** rather than replacing. The turn then reported one sample per republication of the
+window, and every derived quantity followed: tokens, the curve, the settling attempt's stream, the completed card.
+
+**Why not a dedupe key.** A cross-generation key over `timeMs + text`, `attemptId + time` or a serialized chunk would
+mask the symptom while leaving the previous generation's state in memory, which is precisely the state the replacement
+window is authoritative about. Stable dedupe is a wire-safety measure; it is not generation ownership.
+
+**New invariant.** The store has the same generation boundary the feed has:
+`TurnTelemetryStore.rebaselineSession(sessionId)` removes that session's turn records and its `LiveMeter`, and the
+controller calls it **before** the presenter reset:
+
+    store.rebaselineSession(sessionId)   evidence: attempts, samples, usage, tools, live window
+    presenter.reset()                    presentation: the UI state machine
+    currentRecord = null                 routing
+    openAttemptId = null                 routing
+    invalidate()                         memoized projections
+    ... the feed replays the replacement window from scratch ...
+
+The scope is one session. Two sessions run concurrently with independent windows, so a rebaseline of one is not
+evidence about the other; `dispose()` remains the store-wide reset and is a different operation with a different
+meaning. Clearing only `currentRecord` would not have been enough — it is a pointer, not the evidence — and clearing
+the whole store would have been wrong for the same reason the session key exists.
+
+**The property that matters.** After a `replace`, a controller must be indistinguishable from a fresh controller that
+loaded the replacement window directly:
+
+    controller-after-replace  ==  fresh-controller-over-replacement-window
+
+**Verification.** `test/rebaseline-generation.test.js` (12 tests, all controller-level through
+`fakeSessionsService()` + `createController()`, not the feed alone): the counterexample; sample counts equal to a fresh
+controller's; a shorter replacement window not retaining the delta it dropped; a replacement window that begins
+mid-turn re-adopting the open turn with an unknown start (`elapsedMs === null`, never `0`) and a rebuilt live rate; a
+recovered record still upgrading when the authoritative `turn/start` arrives in the new generation; a completed turn
+rebuilt by a replace comparing **deep-equal** to a fresh controller over the same window, on both the telemetry and
+the rendered card, with one attempt, the settlement's own delta timestamps and `generatedTokens === 40` rather than
+double; a completed-only window yielding the card and no live meter; tool state absent from the window not surviving
+it; a rebaseline of session A leaving session B's record, settled snapshot and rendering identical by identity;
+idempotence over three consecutive replaces; an empty replacement window leaving nothing behind; and
+`rebaselineSession` itself, including its no-op on an unknown session and its refusal to disturb an unrelated one.
+
+### 3. Verification for this round
+
+`npm run build:client` rebuilds `client.js` and `lib/client.js` (371 340 bytes) from the repaired source, and
+`npm run verify` reports the structure check green with **535 tests, 535 pass, 0 fail**. The 508 tests of the
+`c0d2a60` baseline are all retained and passing; the 27 added here are the two files above. The frozen behaviours of
+Phase 5–7 were re-run unchanged: the 0 ms / 3000 ms episode-opening arithmetic (100 tokens/s at the second opening,
+never 200), the attempt-boundary and retry matrix, the mid-turn adoption and authoritative-upgrade suite, the
+completed-card reconstruction suite, and `SLOT_ORDER === -10`.

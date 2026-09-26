@@ -136,6 +136,12 @@ dsh-turn-performance-meter/
 │   ├── curve-quality.test.js          Phase 6: curve quality is the temporal-shape axis
 │   ├── cadence-contract.test.js       Phase 6: source-level core/client timing separation
 │   ├── runtime-robustness.test.js     Phase 6: tools, retries, errors, reload, duplicate frames
+│   ├── curve-reference-window.test.js Phase 7: O(n^2) brute-force reference for the window definition
+│   ├── curve-episode-opening.test.js  Phase 7: the epoch-local clamp counterexample (100, never 200)
+│   ├── curve-render-budget.test.js    Phase 7: the chart-wide budget and its retention properties
+│   ├── mid-turn-reload-recovery.test.js Phase 7: adoption, guards, authoritative upgrade, TTFT paths
+│   ├── curve-peak-priority.test.js    Phase 7A.1: retention priority across every run length (BLOCKER A)
+│   ├── rebaseline-generation.test.js  Phase 7A.1: window generations and session-scoped store reset (BLOCKER B)
 │   └── completed-format.test.js       Formatter edge cases (no NaN/Infinity/-0 in UI)
 │
 └── scripts/
@@ -152,7 +158,9 @@ Expected evolution during implementation:
 src/client/    — landed in Phase 5 as src/client/completed/{curve-view-model,curve-tree,view-mode}.js
 test/          — landed in Phase 5 as curve-view-model.test.js and completed-interaction.test.js;
                  Phase 6 added curve-attempt-boundary, curve-regression-matrix, curve-quality,
-                 cadence-contract and runtime-robustness
+                 cadence-contract and runtime-robustness; Phase 7 added curve-reference-window,
+                 curve-episode-opening, curve-render-budget and mid-turn-reload-recovery; Phase 7A.1
+                 added curve-peak-priority and rebaseline-generation
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
                  JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
                  Phase 6 verified the *served* client bundle in the live page instead of taking

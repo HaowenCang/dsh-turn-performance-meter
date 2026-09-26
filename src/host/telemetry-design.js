@@ -437,6 +437,23 @@ export class TurnTelemetryStore {
     const degradedRuns = allocation.degraded.length
 
     /**
+     * The same allocation, counted the way the chart is drawn. `lineVertices` is the
+     * number of path vertices the SVG will receive — runs of two or more points — and
+     * `markers` is the number of one-vertex runs, each of which becomes a point marker
+     * rather than a vertex of a line. Their sum is what `MAX_RENDER_POINTS_TOTAL`
+     * bounds; see `renderBudget` below for why the two are never published as one
+     * number called `drawnPoints`.
+     */
+    let lineVertices = 0
+    let markers = 0
+    for (const entry of budgeted) {
+      for (const run of entry.runs) {
+        if (run.points.length >= 2) lineVertices += run.points.length
+        else if (run.points.length === 1) markers += 1
+      }
+    }
+
+    /**
      * `peakTps` is measured on the **full** series, before downsampling. The
      * order of the two expressions in `curve` below is the specification, not an
      * accident: the rendered point count is a drawing budget, and a drawing
@@ -482,16 +499,44 @@ export class TurnTelemetryStore {
          * or below `total`, and `degradedRuns` counts the runs refused outright when
          * the anchors did not fit — the documented degradation, published rather
          * than silent.
+         *
+         * `lineVertices` and `markers` split the same allocation the way the chart is
+         * actually built: a run of two or more vertices becomes a path vertex, and a
+         * run of one becomes a point marker
+         * (`src/client/completed/curve-view-model.js`). `elementPoints` is their sum,
+         * and it — not `drawnPoints` alone — is the quantity `MAX_RENDER_POINTS_TOTAL`
+         * bounds, because a marker is an SVG-adjacent element just as a vertex is.
+         * Publishing the two separately keeps the bound measurable without making
+         * either count mean two things at once.
+         *
+         * `peakRun` is the flat index of the run carrying the chart maximum in
+         * `series.flatMap(entry => entry.runs)`, or `-1` when no run holds a finite
+         * rate. `peakRetained` is false only when that run could not be seated at all,
+         * which at a budget of 512 cannot happen; a caller that reads it must not
+         * present a refused peak as a drawn one.
          */
         renderBudget: {
           total: allocation.total,
           allocated: allocation.allocated,
           runs: allocation.budgets.length,
           degradedRuns,
+          lineVertices,
+          markers,
+          elementPoints: lineVertices + markers,
+          peakRun: allocation.peakIndex,
+          peakRetained: allocation.peakRetained,
         },
         /**
-         * Total vertices the SVG will receive, summed over both phases and every
-         * run. This is the quantity `MAX_RENDER_POINTS_TOTAL` bounds.
+         * Every budgeted vertex, summed over both phases and every run. This is the
+         * allocation's own total, so it counts a one-vertex run as the single vertex it
+         * holds — which is what the allocator charged for it.
+         *
+         * It is therefore **not** the same quantity as `curveViewModel.drawnPoints`,
+         * which counts path vertices only and reports markers separately. The two names
+         * were once the same and the coincidence hid half the SVG from the bound: a
+         * chart could assert `drawnPoints <= 512` while carrying any number of markers
+         * on top. `renderBudget.elementPoints` is the sum that is actually bounded;
+         * this field remains the allocator's accounting.
          */
         drawnPoints: budgeted.reduce(
           (sum, entry) => sum + entry.runs.reduce((inner, run) => inner + run.points.length, 0),
@@ -540,6 +585,52 @@ export class TurnTelemetryStore {
       const victim = settled.shift()
       this.turns.delete(turnKey(victim.sessionId, victim.turn))
     }
+  }
+
+  /**
+   * Drop everything one session owns, because the window that produced it has been
+   * superseded.
+   *
+   * A `replace` on the session event window is a **rebaseline**: the complete contiguous
+   * window was swapped (reload, reconnect, window generation change), so the rows the feed
+   * republishes are that session's authoritative evidence and whatever the previous
+   * generation contributed is not. `SessionEventFeed` drops its own generation state for
+   * exactly that reason; this method is the same boundary on the metric side, where the
+   * evidence actually lives.
+   *
+   * Without it the replay re-enters attempts that already exist. `beginTurn` is
+   * deliberately idempotent — re-observing the same durable `turn/start` must not discard
+   * samples — and `beginAttempt` returns the existing attempt for a known `attemptId`, so
+   * a replayed delta is appended to the very attempt the superseded window filled. The
+   * turn then reports whatever the window happened to publish, counted once per
+   * republication.
+   *
+   * Two things are removed, and both are needed. The turn records
+   * (`this.turns`, keyed by `(sessionId, turn)`) carry attempts, samples, usage, tool
+   * intervals and the computed settled snapshot; the `LiveMeter` in `this.liveBySession`
+   * carries the rolling window, the frozen TTFT stage, the turn start and the running
+   * tool set. Clearing one and keeping the other would leave a live rate assembled from a
+   * window the client no longer believes in.
+   *
+   * The scope is one session. Two sessions run concurrently and their windows are
+   * independent, so a rebaseline of one is not a reason to discard the other's evidence;
+   * `dispose()` is the store-wide reset, and it is a different operation with a different
+   * meaning.
+   *
+   * @param {string} sessionId
+   * @returns {number} how many turn records were removed
+   */
+  rebaselineSession(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return 0
+    let removed = 0
+    /** Deleting during `Map` iteration is safe: entries not yet visited are still reached. */
+    for (const [key, record] of this.turns) {
+      if (record.sessionId !== sessionId) continue
+      this.turns.delete(key)
+      removed += 1
+    }
+    this.liveBySession.delete(sessionId)
+    return removed
   }
 
   /**

@@ -107,6 +107,25 @@ ToolCallRecord = {
 
 `attemptId` is the live identity for one assistant streaming attempt. A retry/new attempt must create a new live rolling-window epoch.
 
+### Window generation reset (frozen in Phase 7A.1)
+
+`TurnTelemetryStore` is keyed by `(sessionId, turn)` and also owns one `LiveMeter` per session, so it holds the
+*evidence* rather than a pointer to it. That makes it the owner of the client's window-generation boundary: a
+`replace` on the session event window is a rebaseline (reload, reconnect, window swap), and
+`TurnTelemetryStore.rebaselineSession(sessionId)` drops that session's turn records and its live meter so the
+replacement window is rebuilt rather than merged.
+
+The reason the ownership sits here and not in the controller: `beginTurn` is deliberately idempotent — a replayed
+durable `turn/start` must not discard samples already observed — and `beginAttempt` returns the existing attempt for a
+known `attemptId`. Both are correct for an `append` and wrong for a new generation, because a replayed delta would be
+*appended* to the attempt the superseded window filled. Resetting only the controller's `currentRecord` would leave
+that state in place; resetting the whole store would discard other sessions, whose windows are independent.
+
+The generation boundary is therefore one operation with one scope, and the controller's order on
+`window-rebaseline` is: `store.rebaselineSession(sessionId)`, `presenter.reset()`, clear `currentRecord` and
+`openAttemptId`, `invalidate()`. See `docs/METRICS_SPEC.md` §13.3 for the invariants this must satisfy and
+`docs/IMPLEMENTATION_LOG.md` (Phase 7A.1 §2) for the counterexample that established it.
+
 ## 5. Normalized delta accounting
 
 A timestamped `StreamChunk` contributes to model-output telemetry only if it carries non-empty generated content:
@@ -225,6 +244,10 @@ SessionEventWindow (change payloads)
        └─ CompletedMeter card
 ```
 
+A `replace` change enters that pipeline as a generation boundary: the feed resets and replays, and the store resets the
+same session's evidence (`rebaselineSession`) before the presenter is reset, so the replay rebuilds the projection
+instead of merging into the superseded one. The order and its rationale are in §4.
+
 Rejected alternatives and their reasons are recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 0 §"Host→client telemetry
 seam"): plugin-owned session projection (committed-event-driven, cannot publish at transient cadence), host push
 socket (re-implements shipped transport, HMR-fragile), `sessionStats`/`tokenUsage` projections (whole-session scope),
@@ -259,10 +282,13 @@ so an unchanged settled turn returns the same object and a static card is never 
 ## 10. Client/UI architecture
 
 Mount in `conversation.input.dock` — DSH's list seat above the composer card — as an independent entry
-`turn-performance-meter` (`order: 30`, additive; the native `stats` occupant keeps its own seat in
+`turn-performance-meter` (`order: -10`, additive; the native `stats` occupant keeps its own seat in
 `conversation.composer.dock` and is untouched). Phase 3 mounted in the composer dock, which is *below* the
-composer; Phase 5B moved it. The order is derived from that seat's shipped occupants (`todo` 0, `goal` 10,
-`queue` 20), so the meter renders last — immediately above the composer card.
+composer; Phase 5B moved it into the list seat and Phase 7 fixed the order. `order` is ascending and that seat's
+shipped occupants are `todo` (0), `goal` (10) and `queue` (20), so `-10` places this entry **first**: telemetry, task
+state, composer. The value is finite on purpose — no slot contract defines a top pin, so the honest claim is "first
+among all currently shipped occupants", which `test/client-bundle.test.js` asserts by sorting this entry against the
+shipped occupant list rather than by asserting the literal alone.
 
 One root component projects an explicit state machine onto one view:
 

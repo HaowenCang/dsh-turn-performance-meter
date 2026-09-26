@@ -21,8 +21,9 @@ Phase 3 used `conversation.composer.dock` ("Ambient entries below the composer c
 between the composer and the native statistics it competed with. Phase 5B moved it; the composer dock is no
 longer registered at all.
 
-`order: 30` is derived from the seat's shipped occupants — `todo` 0, `goal` 10, `queue` 20 — so the meter lands
-last, immediately above the composer card, rather than above the native state panels.
+`order: -10` places the meter **first** in that seat — telemetry, task state, composer — because `order` is ascending
+and the seat's shipped occupants are `todo` 0, `goal` 10 and `queue` 20. The value is finite on purpose: no slot
+contract defines a top pin, so the claim stays "first among all currently shipped occupants".
 
 The component must share the composer card's width constraint
 (`max-width: var(--dsh-composer-card-max-width)`) and must not use a floating overlay. It must not inspect

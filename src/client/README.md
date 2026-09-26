@@ -2,8 +2,8 @@
 
 The production component lives in `conversation.input.dock` — DSH's session-scoped list seat documented as
 "Full-width entries above the composer card" — registered as the independent entry `turn-performance-meter` with
-`order: 30` (the seat's shipped occupants are `todo` 0, `goal` 10, `queue` 20, so 30 lands last, immediately above
-the composer card).
+`order: -10` (the seat's shipped occupants are `todo` 0, `goal` 10, `queue` 20, and `order` is ascending, so `-10`
+places the meter **first**: telemetry, task state, composer).
 
 The native statistics keep their own seat: `client-ui-chat` `StatsPills` stays in `conversation.composer.dock`, below
 the composer, at its own id `stats`. This plugin does not register there at all.
