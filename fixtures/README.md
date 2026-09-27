@@ -33,6 +33,28 @@ location supplied the tool-result identity in the bytes it captured:
 so the shape a capture proves is visible in the fixture rather than asserted only
 by a test.
 
+### What this corpus does not contain
+
+One capture, and the corpus is **not complete**. It is deliberately not described
+as complete, because a recorded fixture cannot cover everything the project needs
+evidence for, and claiming otherwise is how a synthetic contract test gets
+mistaken for an observation.
+
+The recorder observes two host seams — `ctx.on('session/event')` and
+`ctx.on('agent/assistant-stream')`. The `settle-assistant` window change is
+neither: the browser-side client fold emits it when it supersedes an attempt's
+transient rows, and the host process never sees it as a row. No fixture here (or
+obtainable from this recorder) therefore exercises the normal-retirement path or a
+true abandonment, and `t01` must not be cited for that lifecycle. That distinction
+is carried by `test/dsh-017-settlement.test.js`, which is **synthetic** and says so:
+its expectations come from `test/helpers/assistant-stream-fold.js`, a port of the
+shipped `ClientAssistantStream` algebra, rather than from recorded bytes.
+
+What `t01` does prove, in recorded bytes: the 0.1.7 tool-role result shape and its
+identity location, sequential tool calls that must not accumulate, the step
+boundaries between them, a normally completed turn with its durable `turn/end`
+row, and three transient attempts each bounded by a `start` and an `end` frame.
+
 ## Legacy corpus (`dsh-turns/`)
 
 These eight captures were recorded on `0.1.5-rc.2` and are kept because they are

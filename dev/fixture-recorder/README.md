@@ -33,6 +33,29 @@ Raw JSONL, one file per session, three row kinds, no interpretation:
 Nothing is normalized, reordered, filtered or dropped. `dev/harvest-fixtures.mjs`
 does the selecting, and it preserves both planes verbatim.
 
+## What it cannot record: the `settle-assistant` window change
+
+The recorder observes two host seams — `ctx.on('session/event')` and
+`ctx.on('agent/assistant-stream')` — and the `settle-assistant` **change** is
+neither. It is produced by the browser-side client fold (`ClientAssistantStream`)
+when it supersedes an attempt's transient rows with a durable settlement, and it is
+delivered to the browser's window subscriber; the host process never sees it as a
+row. A recording therefore cannot contain a bare `settle-assistant`, however
+faithfully both planes are captured, and the retirement-versus-abandonment
+distinction cannot be evidenced from a fixture.
+
+Reproducing it inside this recorder would mean re-running the fold over the
+recorded planes, which would make the emitted row a *derived* artifact rather than
+observed evidence — a worse trade than recording the gap. The distinction is
+instead established by the fold's own algebra (`docs/DSH_API_NOTES.md` §13.4) and
+by synthetic contract tests in `test/dsh-017-settlement.test.js` against a port of
+it. Two further properties of this instrument follow from the same seam list and
+are worth stating for the same reason: it sees no `SessionEventWindow` snapshot, so
+a replay's window boundaries are reconstructed by the consumer rather than
+recorded; and it records both planes with `Date.now()` taken at the observation
+point, so an entry's position in a replayed window is derived from that clock
+rather than from a recorded `revision`.
+
 ## Control route
 
 Registered on the running web host's `webServer` service while the recorder is
