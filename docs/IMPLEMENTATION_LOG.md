@@ -3485,7 +3485,7 @@ showing no modification to either bundle. The success line now names the mirror.
 
 ### 5. Secret and privacy audit
 
-Family-A scan over the 174 tracked files found no sensitive artifact: no `.env`, credential store, `*.log`, `*.pem`,
+Family-A scan over the 175 tracked files found no sensitive artifact: no `.env`, credential store, `*.log`, `*.pem`,
 `*.key`, `*.p12`, `*.pfx`, `*.har`, `*.pcap`, `*.sqlite`, `*.db` and no archive. The only name-pattern hits were
 `token-allocation` (source and test) and `raw.js`, all legitimate.
 
@@ -3505,16 +3505,20 @@ in the sanitizer's forbidden-term list. `node scripts/verify-sanitization.mjs` e
 any published fixture value, the file set and structural scalars preserved (9 fixtures cross-checked against untracked raw
 originals at identical string lengths), and the sanitizer confirmed load-bearing. `fixtures/raw/` is git-ignored and not
 tracked. **No real secret was found, so nothing had to be removed from Git history.** 163 UUIDs inside fixtures are the
-recorded session/attempt/call identities the tests depend on; the sanitizer preserves them by design.
+recorded session/attempt/call identities the tests depend on; the sanitizer preserves them by design. Scan rerun after
+`CHANGELOG.md` entered the final tree: no new sensitive content found, so the classifications above stand unchanged and
+only the tracked-file count moved, from 174 to 175.
 
 ### 6. Package contents
 
 `npm pack --dry-run` under `private: true` prints the listing and writes no tarball (confirmed: no `.tgz` appeared and the
-tree stayed clean). 172 files, 2.5 MB packed / 8.9 MB unpacked: sources, tests, fixtures, docs, `dev/` tooling, both
+tree stayed clean). 173 files, 2.35 MB packed / 8.53 MB unpacked: sources, tests, fixtures, docs, `dev/` tooling, both
 bundle copies, `LICENSE`, and now `CHANGELOG.md`. Absent: `node_modules`, `fixtures/raw/`, logs, credentials,
-screenshots, archives. No `files` field and no `.npmignore` were added — the installed artifact is a local DSH file
-bundle that needs the repository layout, and restructuring packaging for a hypothetical registry distribution was out of
-scope. Version stays `0.1.0`, `private` stays `true`.
+screenshots, archives. The shortfall against the tracked tree is exactly the two `.gitignore` files npm withholds by the
+gitignore fallback (`.gitignore`, `dev/fixture-recorder/.gitignore`); no tracked file is silently dropped otherwise, and no
+untracked file entered the listing. No `files` field and no `.npmignore` were added — the installed artifact is a local DSH
+file bundle that needs the repository layout, and restructuring packaging for a hypothetical registry distribution was out
+of scope. Version stays `0.1.0`, `private` stays `true`.
 
 ### 7. Gates
 

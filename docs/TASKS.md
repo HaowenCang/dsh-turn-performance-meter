@@ -600,7 +600,7 @@ divergence `0 0`, working tree clean, `dsh --version` → `0.1.7-rc.2`, `npm lis
       `lib/client.js` mirror differs from `client.js` or is missing. Both paths were exercised: with `lib/client.js`
       sabotaged the check exited `1` with `lib/client.js differs from client.js — run: npm run build:client`, and after
       `npm run build:client` it exited `0` with the byte-identical mirror restored and no tracked modification.
-- [x] **Secret/privacy audit on the whole tracked tree, not just `.gitignore`.** 174 tracked files: no `.env`, no
+- [x] **Secret/privacy audit on the whole tracked tree, not just `.gitignore`.** 175 tracked files: no `.env`, no
       credential store, no `*.log`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.har`, `*.pcap`, `*.sqlite`, `*.db`, no archive.
       `fixtures/raw/` is not tracked. Content scan over tracked files found **no real secret**: the `password` / `Bearer
       token` / `Cookie` hits are verbatim upstream Chrome DevTools MCP tool-schema descriptions inside recorded fixtures,
@@ -610,7 +610,8 @@ divergence `0 0`, working tree clean, `dsh --version` → `0.1.7-rc.2`, `npm lis
       `C:\Users\20659\…` in `docs/DSH_API_NOTES.md:266`, `docs/IMPLEMENTATION_LOG.md:2641-2642,3101-3102`,
       `docs/TASKS.md:341` — which is documentation of a real local command, not a credential; it was classified rather
       than mechanically redacted, because rewriting those rows would falsify evidence. Nothing entered Git history that
-      needed to be removed.
+      needed to be removed. Scan rerun after `CHANGELOG.md` entered the final tree: no new sensitive content found, so the
+      classifications above stand unchanged and only the tracked-file count moved, from 174 to 175.
 - [x] **Fixture sanitization gate run.** `node scripts/verify-sanitization.mjs` exits `0`: none of 22 forbidden terms
       appears in any published fixture value; the 13 published fixtures keep their file set and every structural scalar,
       with 9 of them verified against untracked raw originals at identical string lengths; the sanitizer is confirmed
@@ -618,11 +619,12 @@ divergence `0 0`, working tree clean, `dsh --version` → `0.1.7-rc.2`, `npm lis
       identities the tests depend on, which the sanitizer preserves by design. The only reported residue is the declared
       public DSH surface names `wechat_notify` and `dsh-super-injector`.
 - [x] **Package contents audited without publishing.** `npm pack --dry-run` under `private: true` prints the tarball
-      listing and writes nothing: 172 files, 2.5 MB packed / 8.9 MB unpacked. Contents are the plugin sources, tests,
-      fixtures, docs, `dev/` tooling, both bundle copies and `LICENSE`. No `node_modules`, no `fixtures/raw/`, no logs, no
-      credentials, no screenshots, no stray archives. No `files` field or `.npmignore` was added: the installed artifact
-      is a local DSH file bundle that needs the repository layout, and restructuring packaging for a hypothetical
-      registry distribution was explicitly out of scope.
+      listing and writes nothing: 173 files, 2.35 MB packed / 8.53 MB unpacked.
+      Contents are the plugin sources, tests, fixtures, docs, `dev/` tooling, both bundle copies and `LICENSE`. No
+      `node_modules`, no `fixtures/raw/`, no logs, no credentials, no screenshots, no stray archives. The two tracked files
+      npm omits are the `.gitignore` files withheld by the gitignore fallback, and no untracked file entered the listing.
+      No `files` field or `.npmignore` was added: the installed artifact is a local DSH file bundle that needs the
+      repository layout, and restructuring packaging for a hypothetical registry distribution was explicitly out of scope.
 - [x] **No DSH core source modification is required.** `cordis.patch.yml` only inserts the bundle row
       (`id: turn-performance-meter`, `name: dsh-turn-performance-meter`); the three top-level insert rows in the `web`
       profile's own patch layer are the user's unrelated plugins, not this project's. `index.js` is a by-design no-op host
