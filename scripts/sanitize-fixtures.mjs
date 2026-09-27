@@ -169,7 +169,12 @@ const dirFlag = args.indexOf('--dir')
 const targetRoot = dirFlag >= 0 && args[dirFlag + 1] ? resolve(args[dirFlag + 1]) : join(REPO_ROOT, 'fixtures')
 
 const targets = []
-for (const sub of ['dsh-turns', 'derived']) {
+/**
+ * Every committed capture family. `dsh-0.1.7` was added in Phase 7D: a new
+ * corpus must be sanitized by the same pass as the old one, or the newest
+ * evidence would be the only evidence that never went through the filter.
+ */
+for (const sub of ['dsh-turns', 'dsh-0.1.7', 'derived']) {
   const dir = join(targetRoot, sub)
   if (!existsSync(dir)) continue
   for (const name of readdirSync(dir)) {

@@ -5,7 +5,8 @@
  * the evidence: it is never edited. This script only *selects and reshapes* it
  * into a stable, reviewable per-scenario file:
  *
- *   fixtures/dsh-turns/<name>.json
+ *   fixtures/dsh-turns/<name>.json      family `0.1.5` (recorded on 0.1.5-rc.2)
+ *   fixtures/dsh-0.1.7/<name>.json      family `0.1.7` (recorded on 0.1.7-rc.2)
  *
  * Usage:
  *   node dev/harvest-fixtures.mjs                 # all scenarios below
@@ -17,6 +18,12 @@
  *      record and every delta. No normalization, no reordering, no dropping.
  *   2. A fixture derived from another fixture records its provenance in
  *      `syntheticMutation`; it never overwrites or replaces the original.
+ *
+ * Phase 7D adds the `family` dimension. A fixture is evidence about the DSH
+ * version that produced it and nothing else: the 0.1.5 captures no longer
+ * describe the `tool/result` shape, `settle-assistant` semantics or the turn
+ * completion lifecycle, so they are kept in their own directory and the 0.1.7
+ * captures in theirs. Mixing them would let a reader cite the wrong baseline.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -27,7 +34,12 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 const rawDir = process.env.FIXTURE_RAW_DIR
   || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'turn-meter-fixtures', 'raw')
-const outDir = join(repoRoot, 'fixtures', 'dsh-turns')
+
+/** Where each capture family is published, keyed by family name. */
+const FAMILY_DIRS = {
+  '0.1.5': 'dsh-turns',
+  '0.1.7': 'dsh-0.1.7',
+}
 
 /** One committed scenario. `sessionId` selects the raw recording. */
 export const SCENARIOS = [
@@ -111,6 +123,24 @@ export const SCENARIOS = [
       'no llm/retry on this route under this prompt',
     ],
   },
+  // ---- Phase 7D additions: the 0.1.7-rc.2 authoritative corpus -------------
+  {
+    name: 't01-sequential-tools',
+    family: '0.1.7',
+    sessionId: 'fixture-mujjrw4r-1',
+    capturedAt: '2026-09-27',
+    dshVersion: '0.1.7-rc.2',
+    scenario: 'One turn, three model attempts, two strictly sequential pwsh calls and never more than one running at a time. Shape: model -> pwsh -> model -> pwsh -> model -> completed, with `turn/end` reason kind `completed`.',
+    covers: [
+      'the 0.1.7 first-class tool-role result message',
+      'message.toolCallId as the call identity (content blocks carry none)',
+      'message.isError at the top level of the tool-role message',
+      'sequential tool calls that must never accumulate as concurrent',
+      'step/end between each tool call and the next attempt',
+      'a normally completed turn whose turn/end row is present',
+      'three transient attempts, each with a start and an end frame',
+    ],
+  },
 ]
 
 const args = process.argv.slice(2)
@@ -127,24 +157,57 @@ if (wanted.length === 0) {
   process.exit(2)
 }
 
-mkdirSync(outDir, { recursive: true })
-const indexPath = join(outDir, '..', 'index.json')
-/**
- * The index is **merged**, not replaced. A selective harvest used to drop every
- * unselected fixture from the index, so `node dev/harvest-fixtures.mjs t6-...`
- * silently erased the record of t1–t5 even though their files were untouched.
- */
-const existingIndex = (() => {
-  try {
-    const parsed = JSON.parse(readFileSync(indexPath, 'utf8'))
-    return Array.isArray(parsed.fixtures) ? parsed.fixtures : []
-  } catch {
-    return []
+/** Family of one scenario; a scenario without an explicit family is a 0.1.5 capture. */
+function familyOf(scenario) {
+  return scenario.family ?? '0.1.5'
+}
+
+/** Per-family output directory and merged index, so the two corpora never mix. */
+const familyState = new Map()
+function stateFor(family) {
+  const existing = familyState.get(family)
+  if (existing !== undefined) return existing
+  const outDir = join(repoRoot, 'fixtures', FAMILY_DIRS[family] ?? family)
+  mkdirSync(outDir, { recursive: true })
+  /**
+   * The 0.1.5 index has always lived at `fixtures/index.json`; a later family
+   * keeps its index **inside** its own directory, because the sanitization
+   * verifier treats every `*.json` at the fixtures root as a published fixture
+   * (`scripts/verify-sanitization.mjs` `fixtureNames`). An index parked beside
+   * the corpora would be scanned as evidence and reported as missing redaction
+   * markers, which is a false alarm about a file that is not evidence at all.
+   */
+  const indexPath = family === '0.1.5'
+    ? join(repoRoot, 'fixtures', 'index.json')
+    : join(outDir, 'index.json')
+  /**
+   * The index is **merged**, not replaced. A selective harvest used to drop every
+   * unselected fixture from the index, so `node dev/harvest-fixtures.mjs t6-...`
+   * silently erased the record of t1–t5 even though their files were untouched.
+   */
+  const existingIndex = (() => {
+    try {
+      const parsed = JSON.parse(readFileSync(indexPath, 'utf8'))
+      return Array.isArray(parsed.fixtures) ? parsed.fixtures : []
+    } catch {
+      return []
+    }
+  })()
+  const state = {
+    outDir,
+    family,
+    indexPath,
+    merged: new Map(existingIndex.map(entry => [entry.fixture, entry])),
+    wrote: [],
   }
-})()
-const merged = new Map(existingIndex.map(entry => [entry.fixture, entry]))
+  familyState.set(family, state)
+  return state
+}
 
 for (const scenario of wanted) {
+  const family = familyOf(scenario)
+  const state = stateFor(family)
+  const outDir = state.outDir
   const rawPath = join(rawDir, `${scenario.sessionId}.jsonl`)
   let rows
   try {
@@ -170,6 +233,7 @@ for (const scenario of wanted) {
     fixture: scenario.name,
     capturedAt: scenario.capturedAt,
     dshVersion: scenario.dshVersion,
+    captureFamily: family,
     sessionId: scenario.sessionId,
     scenario: scenario.scenario,
     covers: scenario.covers,
@@ -189,6 +253,29 @@ for (const scenario of wanted) {
       firstEventTimeMs: firstEventTime,
       lastEventTimeMs: lastEventTime,
       turnEndReasons: turnEnds.map(row => row.event.data.reason?.kind ?? null),
+      /**
+       * `tool/result` call pairing, read the way the target DSH version stores
+       * it. Recorded per fixture so the shape a capture proves is visible in the
+       * fixture itself rather than asserted only by a test.
+       */
+      toolCallCount: durable.filter(row => row.event.type === 'tool/call').length,
+      toolResultCount: durable.filter(row => row.event.type === 'tool/result').length,
+      toolResultShape: (() => {
+        const first = durable.find(row => row.event.type === 'tool/result')
+        if (first === undefined) return null
+        const message = first.event.data?.message ?? {}
+        return {
+          role: message.role ?? null,
+          identityLocation: typeof message.toolCallId === 'string' ? 'message.toolCallId'
+            : Array.isArray(message.content) && typeof message.content[0]?.toolCallId === 'string'
+              ? 'message.content[0].toolCallId'
+              : 'none',
+          isErrorLocation: typeof message.isError === 'boolean' ? 'message.isError'
+            : Array.isArray(message.content) && typeof message.content[0]?.isError === 'boolean'
+              ? 'message.content[0].isError'
+              : 'none',
+        }
+      })(),
       settlements: settlements.map(row => {
         const data = row.event.data
         return {
@@ -212,16 +299,24 @@ for (const scenario of wanted) {
   writeFileSync(outPath, `${JSON.stringify(fixture, null, 2)}\n`, 'utf8')
   const bytes = readFileSync(outPath).length
   console.log(`wrote ${outPath} (${(bytes / 1024).toFixed(1)} KiB, durable ${durable.length}, transient ${transient.length})`)
-  merged.set(scenario.name, {
+  state.merged.set(scenario.name, {
     fixture: scenario.name,
     sessionId: scenario.sessionId,
     scenario: scenario.scenario,
+    dshVersion: scenario.dshVersion,
+    captureFamily: family,
     durableEventCount: durable.length,
     transientFrameCount: transient.length,
   })
+  state.wrote.push(scenario.name)
 }
 
-/** Newest scenario order, so the index reads in recording order. */
-const ordered = SCENARIOS.map(scenario => merged.get(scenario.name)).filter(entry => entry !== undefined)
-writeFileSync(indexPath, `${JSON.stringify({ fixtures: ordered }, null, 2)}\n`, 'utf8')
-console.log(`index: ${ordered.length} fixtures`)
+/** Newest scenario order, so each index reads in recording order. */
+for (const state of familyState.values()) {
+  const ordered = SCENARIOS
+    .filter(scenario => familyOf(scenario) === state.family)
+    .map(scenario => state.merged.get(scenario.name))
+    .filter(entry => entry !== undefined)
+  writeFileSync(state.indexPath, `${JSON.stringify({ fixtures: ordered }, null, 2)}\n`)
+  console.log(`index ${state.indexPath}: ${ordered.length} fixtures`)
+}

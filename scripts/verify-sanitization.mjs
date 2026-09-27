@@ -29,7 +29,11 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 const RAW = 'fixtures/raw'
-const SUBS = ['dsh-turns', 'derived']
+/**
+ * Every committed capture family, so the 0.1.7 corpus added in Phase 7D is held
+ * to the same absence and fixed-point checks as the 0.1.5 one.
+ */
+const SUBS = ['dsh-turns', 'dsh-0.1.7', 'derived']
 
 /**
  * Terms that name public DSH surfaces and are therefore inherent to the recorded
