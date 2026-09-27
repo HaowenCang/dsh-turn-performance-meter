@@ -3414,3 +3414,178 @@ conversation mounts only the turn currently being read, and a card therefore can
 is still running — so the card's rendering is covered by the test suite (`live-presenter` / `completed-lifecycle`) and by
 the Phase 7D.1.1 live observation rather than re-observed here. And the smoke ran against the running development
 workspace (`E:/Projects/...`), not a packaged install; packaging is Phase 8 work.
+
+## Phase 8 — release readiness (2026-09-27)
+
+Documentation, compatibility, packaging, privacy and runtime gates for a **local** plugin. No metric semantics, UI, curve
+arithmetic, DSH 0.1.7-rc.2 contract, retention policy or eviction behaviour changed. Two source edits exist and both are
+outside the metric engine: the `index.js` host-entry comment, and a release-hygiene assertion in
+`scripts/verify-structure.mjs`.
+
+### 1. Baseline, re-verified rather than quoted
+
+`git fetch origin` → `HEAD == origin/main == 82ec58abb658c7bb7d0eedcbf248b8f6c8e3d0db`,
+`git rev-list --left-right --count HEAD...origin/main` → `0 0`, working tree clean. `dsh --version` → `0.1.7-rc.2`;
+`& "$env:APPDATA\npm\dsh.cmd" --version` → `0.1.7-rc.2`; `npm list -g @deepseek-ai/dsh --depth=0` →
+`@deepseek-ai/dsh@0.1.7-rc.2`. The baseline had not moved, so no divergence audit was required and no reset, rebase or
+force operation was performed at any point in the round.
+
+### 2. Install syntax: measured, not assumed
+
+`dsh --help` documents the manager as `dsh plugin --profile <name> <pnpm-args…>`, and
+`dsh plugin --profile web --help` delegates verbatim to pnpm's own help (pnpm 11.7.0). Reading the shipped manager
+(`@deepseek-ai/dsh-plugin-manager` `lib/types/operations.js`) shows the sequence: pnpm runs in the profile directory,
+then `reconcile()` adds each **newly installed** direct dependency to `dsh.profile.bundles` if and only if that package
+declares `dsh.bundle`. This package declares `dsh.bundle.patch`, so the bundle row is written by the install itself and no
+hand edit of the profile is needed. `parseInstallSpec()` requires a local path to be absolute and accepts both the `file:`
+and `link:` prefixes.
+
+Three disposable profiles were created to turn that reading into a measurement, then deleted:
+
+| Probe | Command | Result |
+|---|---|---|
+| `p8-probe-file` | `dsh plugin --profile p8-probe-file add "file:E:/Projects/DSHarness/dsh-turn-performance-meter"` | initialized the profile; dependency `file:…`; `bundles: [@deepseek-ai/dsh-base, dsh-turn-performance-meter]`; `node_modules` entry a **real directory** |
+| `p8-probe-link` | `dsh plugin --profile p8-probe-link add "link:E:/Projects/DSHarness/dsh-turn-performance-meter"` | dependency `link:…`; same bundle reconciliation; `node_modules` entry a **SymbolicLink** to the checkout |
+| `p8-clone` | `dsh --profile p8-clone --from-default-profile web --dump-config`, then `add "link:…"` | bundle list `[@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app, dsh-turn-performance-meter]`; the 1,197-line composed tree contains `- id: turn-performance-meter` |
+
+The difference decides the documented form. A marker file created in the checkout **after** the `file:` install never
+appeared through the profile's `node_modules`, and re-running `pnpm install` reported `Already up to date` without
+resyncing it: `file:` freezes a copy, so it would serve the pre-rebuild `client.js` after the next `npm run build:client`.
+`link:` keeps the profile reading the checkout. `README.md` §3 therefore documents `link:` with that reason, and uses a
+portable placeholder path; the reference checkout path is given only as implementation evidence.
+
+The `web` profile was confirmed untouched by the whole probe lifecycle: `package.json` SHA-256
+`97A5BF676618293110BA7E38CC3692741FFE757F826DCC9B9B34E2B76544A703` before and after, and
+`node_modules/dsh-turn-performance-meter` still a `SymbolicLink` to the checkout.
+
+**Boundary:** no destructive uninstall/reinstall was performed, and the `web` profile was not cold-restarted. The session
+performing this phase runs inside that profile on `http://127.0.0.1:50001`; a restart would terminate it. The stronger
+substitutes are the disposable-profile install above and the served-bundle identity below.
+
+### 3. The served bundle is the repository bundle
+
+The client module is served inside a combined request:
+`GET /plugins/??…,@deepseek-ai/dsh-client-ui-directory-picker-native/client.js,dsh-turn-performance-meter/client.js&rev=9e8027cfe26a`.
+Isolating our module — from its `GENERATED FILE` banner to the closing `})` of its `__ModuleLoader__.load` wrapper —
+gives 481,580 characters / 482,478 UTF-8 bytes hashing to
+`5dd9159438c7d2e47d5b6646375a8f5369c9d822930bac44b31ceb039860e6fb`, which equals the repository `client.js` minus its one
+trailing newline (the separator byte the server consumes). The browser executed exactly the repository bytes.
+
+### 4. Bundle, mirror and freshness
+
+`npm run build:client` → `client.js rebuilt (481581 bytes, mirrored to lib/client.js)`. `Get-FileHash -Algorithm SHA256`
+gives `E45A0A738145AE7063C217F941E8E3F8D97E429DC3FE32E90D34D1F21D550A94` for **both** `client.js` and `lib/client.js`.
+
+`scripts/verify-structure.mjs` already failed on a `client.js` stale relative to `src/`. It did not assert the mirror, and
+`lib/client.js` is the file the local injector validates before a runtime injection, so a hand-edited or half-written
+mirror would have been injected as if built. A mirror assertion was added and exercised both ways: with one line appended
+to `lib/client.js` the check exited `1` printing `lib/client.js differs from client.js — run: npm run build:client`; after
+`npm run build:client` it exited `0` with `structure OK (…, client bundle fresh, lib/client.js mirrored)` and `git status`
+showing no modification to either bundle. The success line now names the mirror.
+
+### 5. Secret and privacy audit
+
+Family-A scan over the 174 tracked files found no sensitive artifact: no `.env`, credential store, `*.log`, `*.pem`,
+`*.key`, `*.p12`, `*.pfx`, `*.har`, `*.pcap`, `*.sqlite`, `*.db` and no archive. The only name-pattern hits were
+`token-allocation` (source and test) and `raw.js`, all legitimate.
+
+Content scan over tracked files, each hit classified rather than deleted:
+
+| Pattern | Hits | Classification |
+|---|---|---|
+| `password`, `Bearer token`, `Cookie` | inside `fixtures/**` | **SAFE FIXTURE** — verbatim upstream Chrome DevTools MCP tool-schema descriptions; the string is the placeholder example `{"Authorization": "Bearer token"}` in a recorded schema, not a credential of this project |
+| `BEGIN PRIVATE KEY`, `BEGIN RSA PRIVATE KEY`, `secret` | `scripts/verify-sanitization.mjs:53,57`; `docs/IMPLEMENTATION_LOG.md:1118-1119` | **DOCUMENTATION** — the sanitizer's own detector list and the log's record of an earlier scan |
+| `20659` in `fixtures/**` | 2 | not a disclosure — digit runs inside recorded epoch-millisecond timestamps (`1790229120659`), the exact class the sanitizer's value-level (not text-level) scan exists to avoid reporting |
+| `C:\Users\20659\…` | `docs/DSH_API_NOTES.md:266`, `docs/IMPLEMENTATION_LOG.md:2641-2642,3101-3102`, `docs/TASKS.md:341` | **DOCUMENTATION EXAMPLE** — recorded local verification paths (`dsh.cmd`, the running web process), not credentials. Left in place: they are the precise record of a real local command, and rewriting them would falsify evidence. Stated in the release report as the one accepted disclosure class. |
+| `D:\softwares\nodejs\node.exe`, `E:/Projects/…` | same rows | recorded local execution paths, same class |
+
+No real email address (0 hits for the mailbox local-part, `163.com` and `foxmail`), no machine hostname
+(`DESKTOP-FENG`: 0 hits), and no mailbox configuration. `HaowenCang` appears only in `LICENSE` (intended copyright) and
+in the sanitizer's forbidden-term list. `node scripts/verify-sanitization.mjs` exits `0`: none of 22 forbidden terms in
+any published fixture value, the file set and structural scalars preserved (9 fixtures cross-checked against untracked raw
+originals at identical string lengths), and the sanitizer confirmed load-bearing. `fixtures/raw/` is git-ignored and not
+tracked. **No real secret was found, so nothing had to be removed from Git history.** 163 UUIDs inside fixtures are the
+recorded session/attempt/call identities the tests depend on; the sanitizer preserves them by design.
+
+### 6. Package contents
+
+`npm pack --dry-run` under `private: true` prints the listing and writes no tarball (confirmed: no `.tgz` appeared and the
+tree stayed clean). 172 files, 2.5 MB packed / 8.9 MB unpacked: sources, tests, fixtures, docs, `dev/` tooling, both
+bundle copies, `LICENSE`, and now `CHANGELOG.md`. Absent: `node_modules`, `fixtures/raw/`, logs, credentials,
+screenshots, archives. No `files` field and no `.npmignore` were added — the installed artifact is a local DSH file
+bundle that needs the repository layout, and restructuring packaging for a hypothetical registry distribution was out of
+scope. Version stays `0.1.0`, `private` stays `true`.
+
+### 7. Gates
+
+Reported as a **local test result**: the tracked tree contains no `.github/` directory, so there is no CI runner and none
+was added.
+
+`npm run verify` → `structure OK (14 required files, 16 core modules, 63 test files, client bundle fresh, lib/client.js
+mirrored)` followed by **714 tests, 714 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo**, `duration_ms` 1078.3746. The count
+is unchanged from Phase 7D.1.2 because this phase's structural addition is an assertion in the verify script rather than a
+new test file. `git diff --check` is clean. `node scripts/verify-sanitization.mjs` passes.
+
+### 8. Runtime smoke on the real host
+
+Observed in the real DSH `0.1.7-rc.2` web client, with `dev_reload_package` and HMR deliberately not used as evidence.
+
+*Idle.* A newly created session with no turn renders no meter at all — `.dsh-tpm-root` count `0`, `[data-kind="live"]`
+count `0`, stable across 2.5 s. There is no live pill without an active turn, and no empty shell either.
+
+*Streaming and tool-running.* A 50 ms DOM recorder installed in a second tab on the Phase 8 session collected 1,390
+samples over 190,144 ms. State histogram: `pending-first-token` 11, `streaming-reasoning` 345, `streaming-output` 139,
+`tool-running` 233, `waiting-model` 657. Consecutive samples sit 46–61 ms apart, consistent with the frozen 50 ms
+presentation cadence. The transitions show the contract directly: `waiting-model 等待模型 2.06 s` →
+`streaming-reasoning 思考 ≈0.50 tokens/s` → `… ≈18.5 … ≈21.8 … ≈87.5 … ≈202 tokens/s` →
+`streaming-output 输出 ≈212 … ≈242 … ≈171 tokens/s`. Every live rate carries `≈`; the waiting-model state carries a
+stopwatch and no rate, so no stale TPS survives a tool call or an inter-step gap. A second observation of the
+tool-running state read `data-kind="live" data-state="tool-running" aria-label="工具 · 4m25s"`, text
+`mcp__chrome-devtool… · 0.6s 4m25s` — the running tool's own name and elapsed time plus the tool wall timer, with no TPS
+field. A late element screenshot of the live pill captured `data-state="streaming-output"`, `aria-label="输出 · 16m22s"`,
+`输出 ≈79.5 tokens/s`.
+
+*Completed card.* Re-opening the settled `# Phase 7D.1.2 — Generation-wide` session mounted
+`data-kind="completed" data-status="completed" data-quality="estimated" data-view="summary"
+data-session="session-e6b63be6-f770-4833-8664-fdf6ee9d29e6"` and rendered
+`思考 TPS ≈204 tokens/s · 111.0s · ≈22,625`, `输出 TPS ≈307 tokens/s · 143.5s · ≈44,044`,
+`生成 Tokens 66,669 tokens`, `总用时 643.3s`, `首响应 2.99 s`, footer `工具 113 · 101.7s`, `模型调用 109`. The card is
+static: its text and full attribute string were identical across three samples spanning 3,000 ms, and no
+`[data-kind="live"]` element existed alongside it. Generated Tokens and TTFT print bare while the two rates and their
+same-chain token counts print `≈`, which is the display rule working on a turn whose usage is authoritative but whose
+temporal shape is not.
+
+*Curve interaction.* Hovering `.dsh-tpm-card` flipped `data-view` `summary → curve` and swapped `aria-hidden` across the
+two `.dsh-tpm-view` elements from `["false","true"]` to `["true","false"]`; clearing hover returned both to `summary`.
+`card.focus()` produced the same `curve` state with `document.activeElement === card`; `blur()` returned to `summary`. The
+curve renders 178 non-empty phase-coloured `<path>` segments inside `viewBox="0 0 100 48"` (479×48 CSS px), with the peak
+marker `峰值 ≈646 tokens/s`. A viewport screenshot confirms the legend (`思考` grey, `输出` orange), the dense trace and
+the peak annotation, with the card seated above the composer.
+
+*Reload durability.* A cache-ignoring reload of the same tab re-rendered the same session
+(`session-e6b63be6-…`) and the same card with every number identical, and the card was static across a further 4,000 ms —
+no resumed ticker.
+
+*Console.* Three error classes remain after the reload, none from this plugin: a `Permissions policy violation: unload is
+not allowed in this document` shell message; 404 polling from the shell and other plugins (27 and 65 occurrences); and
+`TypeError: useSessionPendingInteraction is not a function`, whose stack is entirely inside the shell bundle
+`index-Q6zc2uHV.js:56` with no frame from `client.js` or `lib/client.js`, plus its consequent
+`slot entry crashed in 'conversation.session.header.utilities'` — a slot this plugin never registers in (it registers only
+`conversation.input.dock`, id `turn-performance-meter`). Both are the pre-existing DSH shell template artifact already
+recorded in the Phase 7D rounds.
+
+### 9. Evidence boundaries carried forward
+
+The Phase 7D.1 terminal-tail case (`turn/start` already slid out when `turn/end` arrives) remains **not reproduced in a
+browser**: it rests on real recorded durable bytes, a real feed/controller replay, and the DSH bounded-window contract.
+The `web` profile was not cold-restarted (the verifying session runs inside it), so the install evidence is the disposable
+web-template clone plus the served-bundle hash rather than a restart. The completed card and the curve interaction, which
+Phase 7D.1.2 could not re-observe, **were** observed in this phase. `npm run verify` remains a local test result. The
+documentation rows naming `C:\Users\20659\…` are an accepted, classified disclosure rather than a redacted one.
+
+### 10. Git gate
+
+One ordinary fast-forward push of the single Phase 8 commit; `HEAD == origin/main`, divergence `0 0`, working tree clean,
+`git diff --check` clean. No `--amend` after push, no rebase, no `--force`, no `--force-with-lease`, no reset of remote
+`main`. No npm publish, no `npm access`, no git tag, no GitHub Release, and `private: true` retained. Version stays
+`0.1.0`.

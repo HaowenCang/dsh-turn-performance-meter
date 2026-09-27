@@ -74,6 +74,22 @@ try {
   process.exitCode = 1
 }
 
+/**
+ * `lib/client.js` is the copy the local injector validates before a runtime
+ * injection, and `scripts/build-client.mjs` writes both files from a single
+ * string, so the two are byte-identical by construction. Nothing used to assert
+ * that: a hand-edited or half-written mirror would have been injected as if it
+ * were the built bundle. Release hygiene, not metric semantics.
+ */
+const mirroredClient = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8').catch(() => null)
+if (mirroredClient === null) {
+  console.error('lib/client.js is missing — run: npm run build:client')
+  process.exitCode = 1
+} else if (committedClient !== null && mirroredClient !== committedClient) {
+  console.error('lib/client.js differs from client.js — run: npm run build:client')
+  process.exitCode = 1
+}
+
 if (process.exitCode !== 1) {
-  console.log(`structure OK (${required.length} required files, ${coreModules.length} core modules, ${testFiles.length} test files, client bundle fresh)`)
+  console.log(`structure OK (${required.length} required files, ${coreModules.length} core modules, ${testFiles.length} test files, client bundle fresh, lib/client.js mirrored)`)
 }

@@ -29,7 +29,8 @@ dsh-turn-performance-meter/
 ├── fixtures/                         Recorded DSH turn evidence (offline; no DSH needed)
 │   ├── README.md                     Scenario table, file shape, regeneration steps
 │   ├── index.json                    Generated index of the recorded set
-│   ├── dsh-turns/                    Eight real turns: durable + transient planes verbatim
+│   ├── dsh-0.1.7/                    The rc.2 corpus: index.json + t01-sequential-tools.json
+│   ├── dsh-turns/                    Eight real turns (recorded on 0.1.5): durable + transient planes verbatim
 │   │   ├── t1-reasoning-tool-reasoning.json
 │   │   ├── t2-pwsh-write-edit.json
 │   │   ├── t3-interrupted-mid-reasoning.json
@@ -69,6 +70,7 @@ dsh-turn-performance-meter/
 │   │   ├── stream-decoder.js         Durable AssistantStreamRecord decoder + quality
 │   │   ├── live-path.js              Path A: transient frames + durable boundaries
 │   │   ├── durable-path.js           Path B: settlements only; tail measurement source
+│   │   ├── reconstruction.js         Durable evidence -> reconstructed turn record (terminal-tail route)
 │   │   └── client-feed.js            SessionEventWindow wire -> normalized events
 │   │
 │   ├── host/
@@ -150,6 +152,16 @@ dsh-turn-performance-meter/
 │   ├── curve-trace-matrix.test.js     Phase 7C: fourteen named scenarios for the total trace
 │   ├── curve-long-agent-visual.test.js Phase 7C: the 24-call visual regression and the rejected geometry's cost
 │   ├── phase-evidence.test.js         Phase 7C.2: the contradiction matrix, counterexamples A-D, the anchored integral
+│   ├── dsh-017-*.test.js              Phase 7D / 7D.1 / 7D.1.2: the rc.2 contract — completion, settlement, tool
+│   │                                  result and concurrency, durable identity, retention, terminal-tail recovery,
+│   │                                  reconstruction materialization, recorded corpus (8 files)
+│   ├── dsh-client-feed.test.js        SessionEventWindow wire -> normalized events
+│   ├── curve.test.js / curve-axis-endpoint / curve-stream-order /
+│   │   curve-calibration-coverage     Curve primitives: reduced arithmetic, endpoint retention, same-timestamp
+│   │                                  ordering, calibration coverage
+│   ├── live-presenter / live-state / live-format
+│   │                                  Live seams below the React pill
+│   ├── format.test.js                 Shared number/time formatting
 │   └── completed-format.test.js       Formatter edge cases (no NaN/Infinity/-0 in UI)
 │
 └── scripts/
@@ -157,7 +169,8 @@ dsh-turn-performance-meter/
     └── bundle-client.mjs / build-client.mjs
     └── sanitize-fixtures.mjs / verify-sanitization.mjs
 
-dev/screenshots/                      git-ignored evidence captures (phase3/, phase4/, phase5/)
+dev/screenshots/                      git-ignored evidence captures
+                                      (phase3/, phase5/, phase7b/, phase7c/, phase7c1/, phase7d/)
 ```
 
 Expected evolution during implementation:

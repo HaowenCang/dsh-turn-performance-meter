@@ -527,17 +527,166 @@ policy is unchanged for genuinely new evidence; every previous regression suite 
 0 failures; and the phase lands as an ordinary fast-forward push with `HEAD == origin/main` and a clean working tree,
 with no force operation of any kind.
 
-## Phase 8 — Release readiness
+## Phase 8 — Release readiness (2026-09-27)
 
-**NOT STARTED.** No task in this phase has been begun; the entries below remain the intended work, not a record. Two of
-its bullets — the current README status and the exact supported DSH version — were satisfied early by Phase 7D
-(`README.md` §0 and `docs/DSH_API_NOTES.md` §13); the rest are untouched.
+Release-readiness phase for a **local** plugin. No metric semantics, UI, curve arithmetic, DSH 0.1.7-rc.2 contract,
+retention policy or eviction behaviour was changed. Baseline
+`82ec58abb658c7bb7d0eedcbf248b8f6c8e3d0db`, re-verified at the start of the round rather than quoted (`HEAD == origin/main`,
+divergence `0 0`, working tree clean, `dsh --version` → `0.1.7-rc.2`, `npm list -g @deepseek-ai/dsh` → `0.1.7-rc.2`).
 
-- [ ] Update README from scaffold status to implemented status.
-- [ ] Document exact supported DSH version(s) tested.
-- [ ] Document known provider/token-quality limitations.
-- [ ] Add changelog/release notes if publishing.
-- [ ] Ensure package does not modify DSH core and has no accidental credentials/log dumps.
-- [ ] Final `npm run verify` and local reinstall/restart smoke test.
+- [x] **README rewritten as user documentation.** The top of the file is now what the plugin does, its support status and
+      its install/usage path; the historical defect chronology was left in this file and in
+      `docs/IMPLEMENTATION_LOG.md` rather than carried at the top. Stale status (`Phase 7D.1 complete; Phase 8 not
+      started`), the stale build order (`Phases 0–7D.1 complete`), the wrong test-file count (60 → 63) and the two
+      missing tree entries (`fixtures/dsh-0.1.7/`, `dev/recordings/`) were corrected; the key metric semantics (turn
+      boundary, ratio-of-sums, live attempt-local 1 s window, `≈`, token accounting, `toolWallMs`, curve definition)
+      were kept.
+- [x] **Obsolete scaffold instructions removed, after verifying the key is gone.** The `debugPlaceholder`
+      bootstrap-only slot-loading instructions and the "scaffold client is invisible by default" paragraph were deleted,
+      not reworded: `git grep` over `src/`, `client.js` and `lib/client.js` finds no `debugPlaceholder` reader or
+      writer anywhere. The surviving production diagnostics key `dsh-turn-performance-meter.debug` is documented as
+      diagnostic-only, explicitly "not required for normal use", with the per-delta logging guarantee and the
+      debug-gated `dsh-turn-performance-meter.refreshMs` override stated as its only reachable companion.
+- [x] **README phase references updated.** `Phases 0–8 complete` and `Phase 8 (release readiness) complete` replace the
+      old current-state claims; historical mentions of Phase 7D.1 inside dated phase records were left as history.
+- [x] **`index.js` comment corrected to the real architecture.** The scaffold text ("The initial scaffold intentionally
+      performs no interception. DeepSeek should implement the host-side telemetry bridge …") was wrong and is gone. The
+      entry now states that telemetry is consumed in the browser client from `ctx.sessions.binding(sessionId).eventSource`,
+      that `apply` registers nothing because there is nothing host-side to register, and that no DSH core source is
+      patched. `export function apply() {}` was kept — no host hook was invented to make the file look substantial.
+- [x] **Exact compatibility claim documented, and nothing wider.** `README.md` §2 states
+      `Supported/tested: DSH 0.1.7-rc.2` with public reference commit `477b4f420553e8a52c2fbccc464d7561b239c443`, and
+      explicitly refuses `0.1.7+`, `0.1.x` and "latest DSH". Re-verified this round against the local CLI, the locally
+      installed package and the composed profile tree. The `0.1.5` captures under `fixtures/dsh-turns/` stay labelled
+      historical metric/decoder evidence and **not** a supported runtime contract. No `package.json` peer range was
+      invented.
+- [x] **Known limitations written as a user-facing section.** `README.md` §6 records eight limits: live TPS is a
+      heuristic delta weighting marked `≈`; completed totals depend on provider usage; the temporal curve's ceiling is
+      `reconstructed`; a missing `turn/start` leaves TTFT and elapsed unavailable; retained durable evidence is bounded
+      by `MAX_RETAINED_TURNS = 32` least-recently-updated and holds bytes only; the `0.1.7` recorded corpus is two files;
+      the Phase 7D.1 terminal-tail case was not constructed in a browser; and verification is local because there is no
+      CI runner.
+- [x] **Install command verified against the real CLI instead of assumed.** `dsh --help` and
+      `dsh plugin --profile <name> --help` show the manager forwards the remaining arguments to pnpm in the profile
+      directory. Two disposable profiles were created for the probe and then deleted:
+      `dsh plugin --profile p8-probe-file add "file:…"` and `… add "link:…"`. Both installed and both were reconciled
+      into `dsh.profile.bundles` automatically, because this package declares `dsh.bundle.patch`. The measured
+      difference decides the documented form: `link:` produced a `SymbolicLink` to the checkout, while `file:` produced a
+      frozen copy through which a file created in the checkout afterwards never appeared — so `file:` would serve
+      yesterday's `client.js` after the next `npm run build:client`. `README.md` §3 therefore documents `link:` with the
+      reason, and uses a portable placeholder path rather than this machine's absolute path.
+- [x] **A from-scratch install path was verified in a disposable web-template profile.**
+      `dsh --profile p8-clone --from-default-profile web --dump-config` initializes a clone of the shipped web template
+      without booting it; adding the plugin with the documented command then yielded
+      `bundles: [@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app, dsh-turn-performance-meter]` and a 1,197-line composed
+      tree containing `- id: turn-performance-meter`. All three probe profiles were removed afterwards and the real `web`
+      profile was confirmed untouched: `package.json` SHA-256 `97A5BF67…A703` identical before and after, and
+      `node_modules/dsh-turn-performance-meter` still a `SymbolicLink` to the checkout.
+- [x] **No destructive uninstall/reinstall was performed, and no cold restart of the `web` profile.** The agent session
+      executing this phase runs *inside* the `web` profile on `http://127.0.0.1:50001`; restarting that profile would
+      terminate the session performing the verification. The stronger-than-loaded checks used instead are the
+      disposable-profile install above and a served-bundle identity check (next bullet). This is reported as a boundary,
+      not as a satisfied restart test.
+- [x] **The bundle the browser is actually served was verified byte-for-byte against the repository.** The plugin client
+      module is served inside a combined `GET /plugins/??…,dsh-turn-performance-meter/client.js&rev=9e8027cfe26a`
+      response. The module slice — from its generated-file banner to the closing `})` of its `__ModuleLoader__.load`
+      wrapper — hashes to SHA-256 `5dd9159438c7d2e47d5b6646375a8f5369c9d822930bac44b31ceb039860e6fb` over 481,580
+      characters / 482,478 UTF-8 bytes, which is exactly the repository `client.js` minus its single trailing newline
+      (the server's module-separator byte). The served artifact is the repository artifact.
+- [x] **Bundle identity and freshness.** `npm run build:client` rewrote 481,581 bytes and mirrored them;
+      `Get-FileHash client.js` and `Get-FileHash lib/client.js` are both
+      `E45A0A738145AE7063C217F941E8E3F8D97E429DC3FE32E90D34D1F21D550A94`. `scripts/verify-structure.mjs` fails on a
+      `client.js` stale relative to `src/`, and — new in this phase — also fails when the injector-validated
+      `lib/client.js` mirror differs from `client.js` or is missing. Both paths were exercised: with `lib/client.js`
+      sabotaged the check exited `1` with `lib/client.js differs from client.js — run: npm run build:client`, and after
+      `npm run build:client` it exited `0` with the byte-identical mirror restored and no tracked modification.
+- [x] **Secret/privacy audit on the whole tracked tree, not just `.gitignore`.** 174 tracked files: no `.env`, no
+      credential store, no `*.log`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.har`, `*.pcap`, `*.sqlite`, `*.db`, no archive.
+      `fixtures/raw/` is not tracked. Content scan over tracked files found **no real secret**: the `password` / `Bearer
+      token` / `Cookie` hits are verbatim upstream Chrome DevTools MCP tool-schema descriptions inside recorded fixtures,
+      the `BEGIN PRIVATE KEY` hits are the sanitizer's own detector patterns, and `secret` appears only in the log's
+      record of an earlier scan. No real email address, no machine hostname (`DESKTOP-FENG`: 0 hits), no mailbox identity.
+      The only disclosure class found is **recorded local verification paths** in documentation —
+      `C:\Users\20659\…` in `docs/DSH_API_NOTES.md:266`, `docs/IMPLEMENTATION_LOG.md:2641-2642,3101-3102`,
+      `docs/TASKS.md:341` — which is documentation of a real local command, not a credential; it was classified rather
+      than mechanically redacted, because rewriting those rows would falsify evidence. Nothing entered Git history that
+      needed to be removed.
+- [x] **Fixture sanitization gate run.** `node scripts/verify-sanitization.mjs` exits `0`: none of 22 forbidden terms
+      appears in any published fixture value; the 13 published fixtures keep their file set and every structural scalar,
+      with 9 of them verified against untracked raw originals at identical string lengths; the sanitizer is confirmed
+      load-bearing (raw originals are not a fixed point). 163 UUIDs inside fixtures are recorded session/attempt/call
+      identities the tests depend on, which the sanitizer preserves by design. The only reported residue is the declared
+      public DSH surface names `wechat_notify` and `dsh-super-injector`.
+- [x] **Package contents audited without publishing.** `npm pack --dry-run` under `private: true` prints the tarball
+      listing and writes nothing: 172 files, 2.5 MB packed / 8.9 MB unpacked. Contents are the plugin sources, tests,
+      fixtures, docs, `dev/` tooling, both bundle copies and `LICENSE`. No `node_modules`, no `fixtures/raw/`, no logs, no
+      credentials, no screenshots, no stray archives. No `files` field or `.npmignore` was added: the installed artifact
+      is a local DSH file bundle that needs the repository layout, and restructuring packaging for a hypothetical
+      registry distribution was explicitly out of scope.
+- [x] **No DSH core source modification is required.** `cordis.patch.yml` only inserts the bundle row
+      (`id: turn-performance-meter`, `name: dsh-turn-performance-meter`); the three top-level insert rows in the `web`
+      profile's own patch layer are the user's unrelated plugins, not this project's. `index.js` is a by-design no-op host
+      entry. `package.json`'s `dsh` section declares only `bundle.patch` and the client platform/inject keys. Nothing in
+      the install path edits DSH, any `node_modules` file, or the shipped package — verified by the disposable-profile
+      install, which produced a working composition from the shipped web template alone.
+- [x] **Runtime smoke on the real host, at release state.** Observed in the real DSH `0.1.7-rc.2` web client, without
+      `dev_reload_package` and without HMR as evidence. *Idle:* a session with no turn renders no meter at all
+      (`.dsh-tpm-root` count `0`, stable over 2.5 s), so there is no live pill without an active turn. *Streaming:* a
+      50 ms DOM recorder captured 1,390 samples over 190 s with states `pending-first-token` (11), `streaming-reasoning`
+      (345), `streaming-output` (139), `tool-running` (233), `waiting-model` (657); every live rate carried `≈`
+      (`思考 ≈202 tokens/s` → `输出 ≈212 tokens/s`), and an element screenshot captured
+      `data-kind="live" data-state="streaming-output" aria-label="输出 · 16m22s"` showing `输出 ≈79.5 tokens/s`.
+      *Tool-running:* `data-kind="live" data-state="tool-running"`, `aria-label="工具 · 4m25s"`, text
+      `mcp__chrome-devtool… · 0.6s 4m25s` — the running tool, its own elapsed time, the tool wall timer, and no TPS
+      value at all. The waiting-model samples show a stopwatch rather than a stale rate.
+- [x] **Completed card, curve interaction and reload durability observed.** A settled session was re-opened in a second
+      tab: `data-kind="completed" data-status="completed" data-quality="estimated" data-view="summary"
+      data-session="session-e6b63be6-f770-4833-8664-fdf6ee9d29e6"`, rendering
+      `思考 TPS ≈204 tokens/s · 111.0s · ≈22,625`, `输出 TPS ≈307 tokens/s · 143.5s · ≈44,044`,
+      `生成 Tokens 66,669 tokens`, `总用时 643.3s`, `首响应 2.99 s`, footer `工具 113 · 101.7s`, `模型调用 109`. The card
+      is static — its text and attributes were identical across three samples spanning 3 s — and contains no live pill.
+      Hovering the `.dsh-tpm-card` flipped `data-view` `summary → curve` with `aria-hidden` swapping from
+      `["false","true"]` to `["true","false"]`; clearing hover returned to `summary`; `card.focus()` produced the same
+      `curve` state with `document.activeElement === card`; `blur()` returned to `summary`. The curve renders 178
+      non-empty phase-coloured `<path>` segments at `viewBox="0 0 100 48"` with the peak marker `峰值 ≈646 tokens/s`.
+      After a cache-ignoring reload the same session re-rendered the same card with every number identical and no resumed
+      ticker (static across 4 s), and the served bundle hash above was captured in that same post-reload page.
+- [x] **No new plugin console error.** The reload left three error classes, all pre-existing and none from this plugin:
+      a `Permissions policy violation: unload` shell message, shell/other-plugin 404 polling, and
+      `TypeError: useSessionPendingInteraction is not a function` whose stack is entirely inside the DSH shell bundle
+      `index-Q6zc2uHV.js` with no frame from this plugin, plus its consequent
+      `slot entry crashed in 'conversation.session.header.utilities'` — a slot this plugin never registers in. Both were
+      already recorded as a pre-existing DSH shell template artifact in the Phase 7D rounds.
+- [x] **Gates, reported as a LOCAL TEST RESULT because this repository still has no CI runner** (verified: no `.github/`
+      in the tracked tree, so no workflow was added and none exists):
+      `npm run build:client` → `client.js rebuilt (481581 bytes, mirrored to lib/client.js)`;
+      `npm run verify` → **714 tests, 714 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo**, `duration_ms` 1078.3746, with
+      `structure OK (14 required files, 16 core modules, 63 test files, client bundle fresh, lib/client.js mirrored)`;
+      `git diff --check` clean; `node scripts/verify-sanitization.mjs` passes.
+- [x] **npm publication, git tag and GitHub Release: N/A — not requested.** The package remains `private: true` at
+      version `0.1.0`; no `npm publish`, no `npm access`, no `git tag`, and no `gh release create` was run, and the
+      README/CHANGELOG state the local-only distribution rather than implying a registry one.
+- [x] **Changelog added as a user-facing summary, kept short.** `CHANGELOG.md` carries one entry, `0.1.0 — local release
+      candidate (initial release)`, listing the features a user sees and the supported DSH version. The Phase 7D.x
+      internal defects are deliberately not restated there; they stay in `docs/IMPLEMENTATION_LOG.md`.
+- [x] **Stale current-state statements fixed repo-wide, historical ones left alone.** `docs/DIRECTORY_TREE.md` gained the
+      missing `fixtures/dsh-0.1.7/` corpus, `src/dsh/reconstruction.js`, the `dsh-017-*` contract test family, the
+      curve-primitive/live-seam test families, and the real `dev/screenshots/` phase set. The `docs/START_PROMPT.md`
+      "Phase 0 → Phase 8" instruction and the dated historical remarks inside Phase 7 sections were left untouched,
+      because they are history rather than current state.
 
-Final output to the user should include: changed files, exact test commands/results, DSH version, install command, known limitations, and screenshots or precise visual-verification notes.
+Acceptance gate: baseline verified and unchanged; DSH exactly `0.1.7-rc.2`; every frozen correctness semantic untouched;
+README current and user-facing rather than scaffold/stale; `index.js` describing the real client-only architecture; the
+install command verified against the local CLI and documented portably; known limitations and the exact compatibility
+claim documented honestly; no DSH core source modification required; the tracked-tree secret/privacy audit and the fixture
+sanitization gate passing with no raw originals tracked; package contents audited and the package still private; no
+external publish, tag or release performed; `client.js` and `lib/client.js` byte-identical and the bundle fresh; full
+`npm run verify` at 0 fail; `git diff --check` clean; the runtime smoke (idle, streaming, tool-running, completed card,
+curve hover/focus, reload durability) observed on the real host with no new plugin console error; and the phase landed as
+an ordinary fast-forward push with `HEAD == origin/main`, divergence `0 0` and a clean working tree, with no force
+operation of any kind.
+
+Known evidence boundaries carried into the release report: the Phase 7D.1 terminal-tail case is still **not reproduced in
+a browser** (real recorded durable bytes + real feed/controller replay + the DSH bounded-window contract); the completed
+card and curve were observed in this phase, so the Phase 7D.1.2 gap is closed; the `web` profile was **not** cold-restarted,
+because the verifying session runs inside it; and `npm run verify` remains a local result rather than CI.
