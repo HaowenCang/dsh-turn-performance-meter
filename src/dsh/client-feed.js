@@ -24,6 +24,31 @@
  *                    turns out of order, so it is deliberately ignored
  *   settle-assistant attemptId, with or without a durable settlement entry
  *
+ * ## Retained durable evidence, and why the feed holds it
+ *
+ * Every durable row the feed accepts is also retained, keyed by the turn it names,
+ * for the lifetime of the current window generation. The retention is not a second
+ * interpretation of the wire — the rows are kept exactly as they arrived, with their
+ * own `seq` — and it exists for one consumer:
+ *
+ *   a `turn/end` published for a turn whose record this client never opened (the
+ *   window is a tail; the opening `turn/start` may be outside it) must be able to
+ *   reconstruct the turn from the durable facts that *are* in the window, rather
+ *   than open an empty record and close it again.
+ *
+ * The feed is where this belongs because it is the only module that sees the wire
+ * shape, and because the alternative — having the controller keep every raw row it
+ * has ever routed — would put window bookkeeping and metric bookkeeping in one
+ * place. Consumers ask for a turn's rows through `turnEvents(turn)` and hand them to
+ * the canonical durable reconstruction; nothing is decoded here.
+ *
+ * Three properties keep the retention from becoming a leak or a contamination
+ * source. It is bounded per generation, the oldest turns being released first. It is
+ * **cleared** by `rebaseline()`, because a new window is a new generation and
+ * reconstructing one generation's settlement together with another's `turn/end`
+ * would be a metric assembled from two windows. And it is per `SessionEventFeed`, so
+ * a second session's feed cannot reach it.
+ *
  * ## `settle-assistant` is ambiguous in DSH 0.1.7-rc.2, and this is where it is resolved
  *
  * The published contract calls the entry optional and the 0.1.5 reading treated
@@ -90,6 +115,86 @@ function stepKey(turn, step) {
   return Number.isFinite(turn) && Number.isFinite(step) ? `${turn}:${step}` : null
 }
 
+/**
+ * How many turns' raw durable rows one window generation retains.
+ *
+ * The bound is a memory budget, not a semantic limit. It is expressed in turns
+ * rather than in rows because the reconstruction the retention serves is
+ * turn-scoped, and a turn's row count follows its model traffic rather than any
+ * constant. With eviction by insertion order — the oldest turn released first — the
+ * turns a tail could plausibly still be asked to reconstruct are the ones that
+ * survive.
+ */
+export const MAX_RETAINED_TURNS = 32
+
+/**
+ * Raw durable rows keyed by turn, in arrival order, bounded by turn count.
+ *
+ * Insertion order is the arrival order, so eviction can release the oldest turn with
+ * a single `keys().next()`. Re-recording a turn preserves its original position:
+ * that keeps the map an ordering of turns rather than of rows, and it means a turn
+ * observed over a long span is never evicted merely for being revisited.
+ */
+class DurableEvidencePool {
+  constructor(limit = MAX_RETAINED_TURNS) {
+    this.limit = limit
+    /** @type {Map<number, object[]>} turn -> raw `SessionEvent` rows */
+    this.byTurn = new Map()
+    /** Sequence numbers retained in the current generation; keeps retention duplicate-free. */
+    this.seqs = new Set()
+    this.eventCount = 0
+  }
+
+  /**
+   * Retain one raw durable row. Returns whether it was newly retained.
+   *
+   * A row naming no finite turn is not retained: the map is keyed by turn identity,
+   * and a row that cannot name one cannot be retrieved by the consumer this exists
+   * for. The row is still processed normally — retention is an addition to
+   * ingestion, never a condition on it.
+   */
+  record(event) {
+    if (event === null || typeof event !== 'object') return false
+    if (!Number.isFinite(event.seq) || this.seqs.has(event.seq)) return false
+    const turn = event.data?.turn
+    if (!Number.isFinite(turn)) return false
+    this.seqs.add(event.seq)
+    const rows = this.byTurn.get(turn)
+    if (rows === undefined) this.byTurn.set(turn, [event])
+    else {
+      // Delete before re-inserting so the turn keeps its arrival position and is
+      // therefore evicted in the order it was first seen.
+      this.byTurn.delete(turn)
+      rows.push(event)
+      this.byTurn.set(turn, rows)
+    }
+    this.eventCount += 1
+    this.evict()
+    return true
+  }
+
+  evict() {
+    while (this.byTurn.size > this.limit) {
+      const oldest = this.byTurn.keys().next()
+      if (oldest.done === true) return
+      for (const row of this.byTurn.get(oldest.value) ?? []) this.seqs.delete(row.seq)
+      this.byTurn.delete(oldest.value)
+    }
+  }
+
+  /** @returns {object[]} the turn's retained rows, in arrival order; `[]` when none. */
+  eventsFor(turn) {
+    if (!Number.isFinite(turn)) return []
+    return this.byTurn.get(turn) ?? []
+  }
+
+  clear() {
+    this.byTurn.clear()
+    this.seqs.clear()
+    this.eventCount = 0
+  }
+}
+
 export class SessionEventFeed {
   /**
    * @param {{
@@ -151,6 +256,13 @@ export class SessionEventFeed {
      * settlement from excusing a *later* attempt in the same step.
      */
     this.pendingSettlements = []
+    /**
+     * Raw durable rows of the current window generation, by turn. See
+     * `DurableEvidencePool` and the module docstring: this is what lets a
+     * `turn/end` with no open record be reconstructed from the turn's own durable
+     * evidence instead of closing an empty record.
+     */
+    this.durableEvidence = new DurableEvidencePool()
     this.issues = []
     /** Counts of deliberately skipped window changes, for diagnostics. */
     this.ignoredPrepends = 0
@@ -166,6 +278,8 @@ export class SessionEventFeed {
       malformedToolResults: 0,
       rawTurnEndSeen: 0,
       normalizedTurnEndSeen: 0,
+      /** Raw durable rows retained as reconstruction evidence in this generation. */
+      retainedDurableEvents: 0,
       bareSettleSeen: 0,
       settlementsWithEntry: 0,
       retirementsResolved: 0,
@@ -252,7 +366,54 @@ export class SessionEventFeed {
     this.attemptSteps = new Map()
     this.settledAttemptIds = new Set()
     this.pendingSettlements = []
+    /**
+     * A `replace` is a new window generation, so the retained durable rows of the
+     * superseded one are dropped with the rest of the generation state. The
+     * boundary is explicit rather than incidental: sequence numbers are not
+     * guaranteed to be disjoint across generations, and reconstructing one
+     * generation's settlement together with another's `turn/end` would produce a
+     * turn whose metrics were assembled from two windows.
+     */
+    this.durableEvidence.clear()
+    this.counters.retainedDurableEvents = 0
     this.emit({ kind: 'window-rebaseline', timeMs: null })
+  }
+
+  /**
+   * Retain one raw durable row as reconstruction evidence for its turn.
+   *
+   * Called on **every** route by which a durable row enters this feed — an appended
+   * window entry and the entry carried by a `settle-assistant` change alike — because
+   * DSH delivers a settlement by both, and a retention path that covered only one of
+   * them would silently lose the attempts that travelled the other.
+   *
+   * The row is stored exactly as it arrived: same object, same `seq`, no
+   * normalization and no decoding. Retention is duplicate-free within the generation,
+   * and the global `durableSeqs` dedupe is unaffected by it.
+   *
+   * @returns {boolean} whether the row was newly retained
+   */
+  retainDurable(event) {
+    const retained = this.durableEvidence.record(event)
+    if (retained) this.counters.retainedDurableEvents = this.durableEvidence.eventCount
+    return retained
+  }
+
+  /**
+   * A turn's retained durable rows, in arrival order.
+   *
+   * The rows are the raw `SessionEvent` objects; the caller decodes them through the
+   * project's canonical durable reconstruction. An unknown or evicted turn yields an
+   * empty array — which is the honest answer, and is what makes a `turn/end` with no
+   * other evidence reconstruct to an empty turn rather than to a guess.
+   */
+  turnEvents(turn) {
+    return this.durableEvidence.eventsFor(turn)
+  }
+
+  /** How many turns' durable evidence this generation currently retains. */
+  retainedTurnCount() {
+    return this.durableEvidence.byTurn.size
   }
 
   /**
@@ -329,6 +490,14 @@ export class SessionEventFeed {
     }
     this.counters.settlementsWithEntry += 1
     const event = entry.event
+    /**
+     * The retention runs before the dedupe bookkeeping so that a settlement delivered
+     * by this route is reconstructible exactly like an appended one. This is the route
+     * DSH uses for interrupted messages and non-surface `assistant/attempt`
+     * settlements, and a turn whose only settlement arrived here would otherwise
+     * reconstruct without it.
+     */
+    this.retainDurable(event)
     if (event && typeof event === 'object' && Number.isFinite(event.seq)) this.durableSeqs.add(event.seq)
     const normalized = normalizeDurableEvent(event)
     if (normalized.kind !== NORMALIZED_KIND.ATTEMPT_SETTLE) {
@@ -518,6 +687,8 @@ export class SessionEventFeed {
       this.issue(FEED_ISSUE.MALFORMED_ENTRY)
       return
     }
+    /** Retained before the dedupe check, so a replayed generation stays reconstructible. */
+    this.retainDurable(event)
     if (this.durableSeqs.has(event.seq)) {
       this.issue(FEED_ISSUE.DUPLICATE_DURABLE, event.seq)
       return

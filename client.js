@@ -6271,6 +6271,31 @@ const { settlementChronology } = __req("src/dsh/durable-path.js")
  *                    turns out of order, so it is deliberately ignored
  *   settle-assistant attemptId, with or without a durable settlement entry
  *
+ * ## Retained durable evidence, and why the feed holds it
+ *
+ * Every durable row the feed accepts is also retained, keyed by the turn it names,
+ * for the lifetime of the current window generation. The retention is not a second
+ * interpretation of the wire — the rows are kept exactly as they arrived, with their
+ * own `seq` — and it exists for one consumer:
+ *
+ *   a `turn/end` published for a turn whose record this client never opened (the
+ *   window is a tail; the opening `turn/start` may be outside it) must be able to
+ *   reconstruct the turn from the durable facts that *are* in the window, rather
+ *   than open an empty record and close it again.
+ *
+ * The feed is where this belongs because it is the only module that sees the wire
+ * shape, and because the alternative — having the controller keep every raw row it
+ * has ever routed — would put window bookkeeping and metric bookkeeping in one
+ * place. Consumers ask for a turn's rows through `turnEvents(turn)` and hand them to
+ * the canonical durable reconstruction; nothing is decoded here.
+ *
+ * Three properties keep the retention from becoming a leak or a contamination
+ * source. It is bounded per generation, the oldest turns being released first. It is
+ * **cleared** by `rebaseline()`, because a new window is a new generation and
+ * reconstructing one generation's settlement together with another's `turn/end`
+ * would be a metric assembled from two windows. And it is per `SessionEventFeed`, so
+ * a second session's feed cannot reach it.
+ *
  * ## `settle-assistant` is ambiguous in DSH 0.1.7-rc.2, and this is where it is resolved
  *
  * The published contract calls the entry optional and the 0.1.5 reading treated
@@ -6337,6 +6362,86 @@ function stepKey(turn, step) {
   return Number.isFinite(turn) && Number.isFinite(step) ? `${turn}:${step}` : null
 }
 
+/**
+ * How many turns' raw durable rows one window generation retains.
+ *
+ * The bound is a memory budget, not a semantic limit. It is expressed in turns
+ * rather than in rows because the reconstruction the retention serves is
+ * turn-scoped, and a turn's row count follows its model traffic rather than any
+ * constant. With eviction by insertion order — the oldest turn released first — the
+ * turns a tail could plausibly still be asked to reconstruct are the ones that
+ * survive.
+ */
+const MAX_RETAINED_TURNS = 32
+
+/**
+ * Raw durable rows keyed by turn, in arrival order, bounded by turn count.
+ *
+ * Insertion order is the arrival order, so eviction can release the oldest turn with
+ * a single `keys().next()`. Re-recording a turn preserves its original position:
+ * that keeps the map an ordering of turns rather than of rows, and it means a turn
+ * observed over a long span is never evicted merely for being revisited.
+ */
+class DurableEvidencePool {
+  constructor(limit = MAX_RETAINED_TURNS) {
+    this.limit = limit
+    /** @type {Map<number, object[]>} turn -> raw `SessionEvent` rows */
+    this.byTurn = new Map()
+    /** Sequence numbers retained in the current generation; keeps retention duplicate-free. */
+    this.seqs = new Set()
+    this.eventCount = 0
+  }
+
+  /**
+   * Retain one raw durable row. Returns whether it was newly retained.
+   *
+   * A row naming no finite turn is not retained: the map is keyed by turn identity,
+   * and a row that cannot name one cannot be retrieved by the consumer this exists
+   * for. The row is still processed normally — retention is an addition to
+   * ingestion, never a condition on it.
+   */
+  record(event) {
+    if (event === null || typeof event !== 'object') return false
+    if (!Number.isFinite(event.seq) || this.seqs.has(event.seq)) return false
+    const turn = event.data?.turn
+    if (!Number.isFinite(turn)) return false
+    this.seqs.add(event.seq)
+    const rows = this.byTurn.get(turn)
+    if (rows === undefined) this.byTurn.set(turn, [event])
+    else {
+      // Delete before re-inserting so the turn keeps its arrival position and is
+      // therefore evicted in the order it was first seen.
+      this.byTurn.delete(turn)
+      rows.push(event)
+      this.byTurn.set(turn, rows)
+    }
+    this.eventCount += 1
+    this.evict()
+    return true
+  }
+
+  evict() {
+    while (this.byTurn.size > this.limit) {
+      const oldest = this.byTurn.keys().next()
+      if (oldest.done === true) return
+      for (const row of this.byTurn.get(oldest.value) ?? []) this.seqs.delete(row.seq)
+      this.byTurn.delete(oldest.value)
+    }
+  }
+
+  /** @returns {object[]} the turn's retained rows, in arrival order; `[]` when none. */
+  eventsFor(turn) {
+    if (!Number.isFinite(turn)) return []
+    return this.byTurn.get(turn) ?? []
+  }
+
+  clear() {
+    this.byTurn.clear()
+    this.seqs.clear()
+    this.eventCount = 0
+  }
+}
+
 class SessionEventFeed {
   /**
    * @param {{
@@ -6398,6 +6503,13 @@ class SessionEventFeed {
      * settlement from excusing a *later* attempt in the same step.
      */
     this.pendingSettlements = []
+    /**
+     * Raw durable rows of the current window generation, by turn. See
+     * `DurableEvidencePool` and the module docstring: this is what lets a
+     * `turn/end` with no open record be reconstructed from the turn's own durable
+     * evidence instead of closing an empty record.
+     */
+    this.durableEvidence = new DurableEvidencePool()
     this.issues = []
     /** Counts of deliberately skipped window changes, for diagnostics. */
     this.ignoredPrepends = 0
@@ -6413,6 +6525,8 @@ class SessionEventFeed {
       malformedToolResults: 0,
       rawTurnEndSeen: 0,
       normalizedTurnEndSeen: 0,
+      /** Raw durable rows retained as reconstruction evidence in this generation. */
+      retainedDurableEvents: 0,
       bareSettleSeen: 0,
       settlementsWithEntry: 0,
       retirementsResolved: 0,
@@ -6499,7 +6613,54 @@ class SessionEventFeed {
     this.attemptSteps = new Map()
     this.settledAttemptIds = new Set()
     this.pendingSettlements = []
+    /**
+     * A `replace` is a new window generation, so the retained durable rows of the
+     * superseded one are dropped with the rest of the generation state. The
+     * boundary is explicit rather than incidental: sequence numbers are not
+     * guaranteed to be disjoint across generations, and reconstructing one
+     * generation's settlement together with another's `turn/end` would produce a
+     * turn whose metrics were assembled from two windows.
+     */
+    this.durableEvidence.clear()
+    this.counters.retainedDurableEvents = 0
     this.emit({ kind: 'window-rebaseline', timeMs: null })
+  }
+
+  /**
+   * Retain one raw durable row as reconstruction evidence for its turn.
+   *
+   * Called on **every** route by which a durable row enters this feed — an appended
+   * window entry and the entry carried by a `settle-assistant` change alike — because
+   * DSH delivers a settlement by both, and a retention path that covered only one of
+   * them would silently lose the attempts that travelled the other.
+   *
+   * The row is stored exactly as it arrived: same object, same `seq`, no
+   * normalization and no decoding. Retention is duplicate-free within the generation,
+   * and the global `durableSeqs` dedupe is unaffected by it.
+   *
+   * @returns {boolean} whether the row was newly retained
+   */
+  retainDurable(event) {
+    const retained = this.durableEvidence.record(event)
+    if (retained) this.counters.retainedDurableEvents = this.durableEvidence.eventCount
+    return retained
+  }
+
+  /**
+   * A turn's retained durable rows, in arrival order.
+   *
+   * The rows are the raw `SessionEvent` objects; the caller decodes them through the
+   * project's canonical durable reconstruction. An unknown or evicted turn yields an
+   * empty array — which is the honest answer, and is what makes a `turn/end` with no
+   * other evidence reconstruct to an empty turn rather than to a guess.
+   */
+  turnEvents(turn) {
+    return this.durableEvidence.eventsFor(turn)
+  }
+
+  /** How many turns' durable evidence this generation currently retains. */
+  retainedTurnCount() {
+    return this.durableEvidence.byTurn.size
   }
 
   /**
@@ -6576,6 +6737,14 @@ class SessionEventFeed {
     }
     this.counters.settlementsWithEntry += 1
     const event = entry.event
+    /**
+     * The retention runs before the dedupe bookkeeping so that a settlement delivered
+     * by this route is reconstructible exactly like an appended one. This is the route
+     * DSH uses for interrupted messages and non-surface `assistant/attempt`
+     * settlements, and a turn whose only settlement arrived here would otherwise
+     * reconstruct without it.
+     */
+    this.retainDurable(event)
     if (event && typeof event === 'object' && Number.isFinite(event.seq)) this.durableSeqs.add(event.seq)
     const normalized = normalizeDurableEvent(event)
     if (normalized.kind !== NORMALIZED_KIND.ATTEMPT_SETTLE) {
@@ -6765,6 +6934,8 @@ class SessionEventFeed {
       this.issue(FEED_ISSUE.MALFORMED_ENTRY)
       return
     }
+    /** Retained before the dedupe check, so a replayed generation stays reconstructible. */
+    this.retainDurable(event)
     if (this.durableSeqs.has(event.seq)) {
       this.issue(FEED_ISSUE.DUPLICATE_DURABLE, event.seq)
       return
@@ -6832,7 +7003,199 @@ class SessionEventFeed {
   }
 }
 
-;Object.assign(__exports, { FEED_ISSUE, SessionEventFeed })
+;Object.assign(__exports, { FEED_ISSUE, MAX_RETAINED_TURNS, SessionEventFeed })
+			},
+			"src/dsh/reconstruction.js": function (__exports) {
+/**
+ * Durable reconstruction -> materialized `TurnTelemetryStore` turn record.
+ *
+ * This is the bridge Phase 7D.1 adds. It exists for exactly one situation, and it
+ * is worth stating which one, because the module is otherwise easy to mistake for a
+ * second reconstruction path:
+ *
+ *   The published window is a live **tail**. A client that attached after a turn
+ *   began — a fresh page on a running session, a reload whose tail has slid past
+ *   the opening row, a reconnect — can receive the turn's authoritative `turn/end`
+ *   while holding no record for it, because nothing in the window ever opened the
+ *   turn. The durable facts of that turn are nevertheless in the same window: the
+ *   `assistant/message` settlements with their embedded compact streams, the
+ *   `tool/call` and `tool/result` boundaries, the step boundaries, the retries.
+ *
+ * Phase 7D closed the *lifecycle* half of that case: the boundary was no longer
+ * dropped, and a completed card appeared. It opened an **empty** record
+ * (`beginTurn` immediately followed by `endTurn`), so the card closed with zero
+ * attempts, zero tokens and no tools while the evidence for all of them sat in the
+ * window it had just read. This module closes the metric half.
+ *
+ * ## What it does, and what it deliberately does not
+ *
+ * Every durable fact comes from `reconstructFromDurable` (`durable-path.js`), which
+ * remains the project's only durable parser. This module performs no decoding, no
+ * tool pairing, no retry correlation and no settlement classification of its own: it
+ * calls that pipeline and routes its output into the store through the store's own
+ * methods — the same `beginAttempt` / `acceptChunk` / `setAttemptUsage` /
+ * `settleAttempt` / `toolStarted` / `toolSettled` sequence the live path uses, so
+ * the recovered record is indistinguishable from a record the live path built, and
+ * therefore enters `aggregateTurn` -> `calibration` -> `curveSource` ->
+ * `attemptTraces` with no side channel of its own. A `tail recovery curve` would be
+ * a second set of curve arithmetic, and a second set of curve arithmetic is free to
+ * disagree with the printed numbers.
+ *
+ * ## No unavailable fact is fabricated
+ *
+ * Two rules, both load-bearing:
+ *
+ *   **The turn start is only what the tail observed.** `turnStartMs` is
+ *   `reconstructFromDurable().turnStartMs`, which is `null` unless the turn's own
+ *   `turn/start` row is in the evidence. The first model delta, a `step/start`, a
+ *   `tool/call`, the moment this client attached and the current wall clock are all
+ *   tempting substitutes and all forbidden: TTFT and turn elapsed are intervals from
+ *   the start, so inventing one would print a measured-looking number for a turn
+ *   whose beginning nobody saw. `null` is the correct answer, and the UI already
+ *   renders it as "—".
+ *
+ *   **Sample timestamps are only what the settlement recorded.** Each attempt's
+ *   samples are the ones `acceptChunk` derives from the settlement's own embedded
+ *   compact stream, so `firstTokenMs` is the earliest *observed* generated sample.
+ *   That is durable evidence and may be recovered. It is not TTFT: TTFT needs the
+ *   start as well, so a recovered turn can legitimately hold a known first token
+ *   beside an unavailable TTFT, and the aggregate computes it that way for free.
+ */
+
+const { reconstructFromDurable } = __req("src/dsh/durable-path.js")
+
+/**
+ * Deterministic, reconstruction-local identity for a materialized attempt.
+ *
+ * DSH's durable log carries no `attemptId` — the identity is process-local to the
+ * client fold and never appears in a settlement — so a recovered attempt has no
+ * provider identity to adopt, and inventing one would present a reconstruction-local
+ * key as an external fact. The key is nonetheless needed, because the store, the
+ * curve sources and the attempt traces are all keyed by it.
+ *
+ * It is derived from the settlement's own sequence number, so replaying the same
+ * evidence always yields the same identity: a wall clock or a random UUID would make
+ * two replays of one window disagree, which is precisely what durable reconstruction
+ * exists to prevent.
+ *
+ * The `#n` suffix appears only in the impossible case of two settlements sharing one
+ * sequence number, and it is still a function of the evidence rather than of time.
+ *
+ * @param {number|null|undefined} settlementSeq
+ * @param {number} duplicateIndex how many attempts already claimed this sequence
+ */
+function reconstructedAttemptId(settlementSeq, duplicateIndex = 0) {
+  const base = Number.isFinite(settlementSeq) ? `settlement:${settlementSeq}` : 'settlement:unknown'
+  return duplicateIndex === 0 ? base : `${base}#${duplicateIndex}`
+}
+
+/**
+ * Build a `TurnTelemetryStore` turn record from a turn's durable evidence.
+ *
+ * The returned record is a normal store record: it carries attempts, samples,
+ * usage, tool intervals, a first-token stamp and (once the caller closes it) a
+ * settled snapshot computed by the ordinary pipeline. The caller owns the turn's
+ * terminal boundary for the same reason the live path does — it has the
+ * authoritative `turn/end` envelope — so this function deliberately does not call
+ * `endTurn`.
+ *
+ * @param {{
+ *   store: object,
+ *   sessionId: string,
+ *   turn: number,
+ *   events: readonly object[],
+ *   timeMs?: number|null,
+ *   estimate?: Function,
+ * }} input
+ * @returns {{record: object, reconstructed: object}}
+ */
+function materializeReconstructedTurn({ store, sessionId, turn, events = [], timeMs = null, estimate }) {
+  const reconstructed = reconstructFromDurable({ sessionId, turn, events, ...(estimate === undefined ? {} : { estimate }) })
+
+  /**
+   * `beginTurn` is idempotent, so a record already holding evidence for this turn is
+   * extended rather than discarded. On the path this module exists for there is no
+   * such record — the caller reached it precisely because the lookup missed — but
+   * the idempotence is what keeps the function safe to call twice.
+   */
+  const record = store.beginTurn({ sessionId, turn, timeMs: reconstructed.turnStartMs ?? timeMs })
+
+  /**
+   * An observed start is recorded through the one-way upgrade rather than by
+   * assignment. The upgrade only ever adds authority (`turnStartObserved` refuses to
+   * replace a finite start, and refuses a non-finite one), so recovery cannot
+   * withdraw a boundary the live path had already measured, and the per-session
+   * `LiveMeter` learns the instant for the same turn.
+   */
+  store.turnStartObserved(record, { timeMs: reconstructed.turnStartMs })
+
+  const seenAttemptIds = new Set()
+  const duplicates = new Map()
+  for (const attempt of reconstructed.attempts) {
+    const seq = attempt.settlementSeq
+    const duplicateIndex = duplicates.get(seq) ?? 0
+    duplicates.set(seq, duplicateIndex + 1)
+    let attemptId = reconstructedAttemptId(seq, duplicateIndex)
+    while (seenAttemptIds.has(attemptId)) attemptId = `${attemptId}#`
+    seenAttemptIds.add(attemptId)
+
+    const stored = store.beginAttempt(record, {
+      attemptId,
+      step: attempt.step ?? null,
+      startedAtMs: attempt.startedAtMs ?? null,
+    })
+
+    /**
+     * The samples are produced by `acceptChunk` from the settlement's own embedded
+     * stream, not copied from `reconstructFromDurable`'s per-attempt sample array.
+     * The two run the same rule over the same chunks and therefore agree, and routing
+     * through the store is what keeps the per-session `LiveMeter` consistent with the
+     * record instead of letting the two drift. A malformed stream (no chunk array)
+     * contributes no samples rather than a guess.
+     */
+    if (Array.isArray(attempt.chunks)) {
+      for (const entry of attempt.chunks) {
+        store.acceptChunk(record, stored, { timeMs: entry.timeMs, chunk: entry.chunk })
+      }
+    }
+
+    const usage = isUsage(attempt.usage) ? attempt.usage : null
+    if (usage !== null) store.setAttemptUsage(stored, usage, attempt.usageSource ?? 'assistant-settlement')
+
+    store.settleAttempt(stored, {
+      settledAtMs: Number.isFinite(attempt.settledAtMs) ? attempt.settledAtMs : null,
+      settlementKind: attempt.settlementKind ?? 'none',
+      surfaceCommitted: attempt.surfaceCommitted === true,
+      attemptOutcome: attempt.attemptOutcome ?? 'unknown',
+      usage,
+      usageSource: attempt.usageSource ?? null,
+      settlementSeq: Number.isFinite(attempt.settlementSeq) ? attempt.settlementSeq : null,
+    })
+    stored.settlementEventType = attempt.settlementEventType ?? null
+    stored.interrupted = attempt.interrupted === true
+  }
+
+  for (const tool of reconstructed.tools) {
+    if (typeof tool.callId !== 'string' || !Number.isFinite(tool.startMs)) continue
+    store.toolStarted(record, { callId: tool.callId, name: tool.name ?? null, timeMs: tool.startMs })
+    /**
+     * A call whose result is not in the evidence keeps `endMs: null` and stays
+     * incomplete. Giving it the turn's end, the next call's start or the current
+     * clock would turn an unobserved boundary into a measured duration.
+     */
+    if (Number.isFinite(tool.endMs)) {
+      store.toolSettled(record, { callId: tool.callId, timeMs: tool.endMs, status: tool.status ?? 'ok' })
+    }
+  }
+
+  return { record, reconstructed }
+}
+
+function isUsage(usage) {
+  return usage !== null && typeof usage === 'object' && Number.isFinite(usage.outputTokens)
+}
+
+;Object.assign(__exports, { reconstructedAttemptId, materializeReconstructedTurn })
 			},
 			"src/client/format.js": function (__exports) {
 /**
@@ -7639,6 +8002,7 @@ const { TurnTelemetryStore } = __req("src/host/telemetry-design.js")
 const { turnKey } = __req("src/core/types.js")
 const { NORMALIZED_KIND, applyRetryOutcomes, attemptFromDecoded } = __req("src/dsh/index.js")
 const { SessionEventFeed } = __req("src/dsh/client-feed.js")
+const { materializeReconstructedTurn } = __req("src/dsh/reconstruction.js")
 const { LivePresenter } = __req("src/client/live/live-presenter.js")
 const { DEFAULT_PRESENTATION_REFRESH_MS } = __req("src/client/live/cadence.js")
 
@@ -7909,6 +8273,13 @@ function createController({
             attemptOutcome: event.attemptOutcome,
             settledAtMs: event.timeMs,
             settlementSeq: event.seq,
+            /**
+             * Which durable surface settled the attempt. `settleAttempt` does not
+             * carry it — it is not part of the settlement *state* the store is asked
+             * to record — so it is attached to the restored attempt directly, which is
+             * what the durable reconstruction path publishes and therefore what makes
+             * a restored attempt comparable with a reconstructed one.
+             */
             settlementEventType: event.eventType ?? null,
             interrupted: event.interrupted === true,
             issues: event.issues ?? [],
@@ -8018,35 +8389,72 @@ function createController({
            * `turn/end` for a turn whose opening row is outside the window and
            * whose transient rows were already superseded.
            *
-           * The turn genuinely ended: DSH published the authoritative boundary.
-           * The record is therefore reconstructed from that boundary rather than
-           * invented from the live display. Nothing is fabricated: `startMs`
-           * stays `null` when the turn's own `turn/start` was never observed,
-           * exactly as the mid-turn-attach path leaves it, so no elapsed time and
-           * no TTFT is measured from the reconstruction.
+           * The turn genuinely ended: DSH published the authoritative boundary. The
+           * record is therefore reconstructed from the turn's own **durable
+           * evidence**, which the feed has been retaining since the window
+           * generation began — the `assistant/message` settlements with their
+           * embedded compact streams, the `tool/call` and `tool/result` boundaries,
+           * the step and retry rows:
+           *
+           *     feed.turnEvents(turn) -> materializeReconstructedTurn()
+           *         -> store.beginAttempt/acceptChunk/setAttemptUsage/settleAttempt
+           *         -> store.toolStarted/toolSettled
+           *         -> store.endTurn() -> aggregateTurn -> curveSource -> attemptTraces
+           *
+           * Two earlier revisions are worth naming, because both look plausible and
+           * both are wrong. Phase 7D opened an **empty** record here and closed it,
+           * so the card appeared with zero attempts, zero tokens and no tools while
+           * the evidence for all of them was in the window it had just read. Decoding
+           * that evidence here would have created a third durable parser; every field
+           * below instead comes from `reconstructFromDurable`
+           * (`src/dsh/durable-path.js`), which stays the only module that decodes a
+           * settlement.
+           *
+           * Nothing is fabricated. `startMs` is whatever the retained evidence
+           * actually contains: with no `turn/start` row it stays `null`, exactly as
+           * the mid-turn-attach path leaves it, so no elapsed time and no TTFT is
+           * measured from the reconstruction. `observedTurnStart` is consulted only
+           * for a turn whose `turn/start` this session *did* observe but whose record
+           * is gone — the reconstruction reports the same instant — never as a
+           * substitute for a boundary nobody saw.
            */
           state.counters.turnEndLookupMiss += 1
           state.counters.turnEndReconstructed += 1
           const observed = state.observedTurnStart
-          const startMs = observed !== null && observed.turn === event.turn ? observed.timeMs : null
-          record = store.beginTurn({ sessionId, turn: event.turn, timeMs: startMs })
+          const observedStartMs = observed !== null && observed.turn === event.turn ? observed.timeMs : null
+          const materialized = materializeReconstructedTurn({
+            store,
+            sessionId,
+            turn: event.turn,
+            events: state.feed.turnEvents(event.turn),
+          })
+          record = materialized.record
+          if (Number.isFinite(observedStartMs)) {
+            store.turnStartObserved(record, { timeMs: observedStartMs })
+          }
           /**
            * The machine must own the turn identity before it can settle it: a
            * session whose machine is still `inactive` refuses a `turn-end`
            * (`live-state.js` `wrongTurn`), which is correct for a stray boundary
            * and wrong for this one. Opening the turn as a **recovered** boundary
            * is the same construction the mid-turn attach uses — it is inferred,
-           * so it carries no start instant.
+           * so it carries no start instant of its own.
            */
           state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: null, recovered: true })
           state.feedIssues = state.feedIssues ?? []
           if (state.feedIssues.length < 100) {
             state.feedIssues.push({
               kind: CONTROLLER_ISSUE.TURN_END_WITHOUT_RECORD,
-              detail: { turn: event.turn, seq: event.seq },
+              detail: {
+                turn: event.turn,
+                seq: event.seq,
+                reconstructedAttempts: materialized.reconstructed.attempts.length,
+                reconstructedTools: materialized.reconstructed.tools.length,
+                startKnown: Number.isFinite(record.startMs),
+              },
             })
           }
-          log('turn/end without a record; reconstructed from the durable window', sessionId, event.turn)
+          log('turn/end without a record; reconstructed from durable evidence', sessionId, event.turn)
         } else {
           state.counters.turnEndLookupHit += 1
         }
@@ -8127,6 +8535,20 @@ function createController({
           normalizedTurnEndSeen: 0,
           turnEndLookupHit: 0,
           turnEndLookupMiss: 0,
+          /**
+           * A terminal record materialized from the turn's available durable
+           * evidence. Phase 7D.1 narrows what this counter may be read as: before it,
+           * the miss path opened an empty record and closed it, so the counter was
+           * satisfied by a reconstruction that had consumed nothing. It now counts
+           * one reconciliation only — `turn/end` arrived, no record existed, and a
+           * record was built from `feed.turnEvents(turn)` through
+           * `reconstructFromDurable`. It deliberately does **not** claim the evidence
+           * was non-empty: a turn whose only visible row is its own `turn/end`
+           * reconstructs to an empty turn, which is the correct answer and is counted
+           * here too. Read it as "the miss was reconciled", never as "metrics were
+           * recovered" — the issue detail carries the recovered attempt and tool
+           * counts for a caller that needs the distinction.
+           */
           turnEndReconstructed: 0,
           storeEndTurnCalled: 0,
           presenterTurnEndApplied: 0,
