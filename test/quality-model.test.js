@@ -256,7 +256,56 @@ test('an interrupted turn with no usage never claims an exact total', () => {
 })
 
 test('the aggregate exposes the axes and keeps the legacy blended label as a floor', () => {
+  /**
+   * **Changed in Phase 7C.2.** The fixture used to carry a reasoning-only stream with
+   * `reasoningTokens: 4, outputTokens: 10` and expected `phaseSplitQuality: 'exact'`. That
+   * expectation encoded the defect: the stream emitted no output delta at all, so the
+   * provider's six non-reasoning tokens could not be mapped onto any observed instant. The
+   * split reported as exact was therefore exact only in the provider's summary sense and
+   * false as a temporal allocation.
+   *
+   * The guard is now symmetric (`src/core/phase-evidence.js` detects
+   * `output-without-deltas` as well as `reasoning-without-deltas`), so an exact split may
+   * only be claimed on a stream that actually shows both phases. The fixture gained the
+   * output delta the claim needs; the assertions the test was written for are unchanged.
+   */
   const result = aggregateTurn({
+    turn: 1,
+    turnStartMs: 1000,
+    turnEndMs: 2000,
+    firstTokenMs: 1100,
+    attempts: [{
+      attemptId: 'a',
+      samples: [
+        { timeMs: 1100, phase: 'reasoning', weight: 1, tokens: 1 },
+        { timeMs: 1200, phase: 'reasoning', weight: 1, tokens: 1 },
+        { timeMs: 1400, phase: 'output', weight: 1, tokens: 1 },
+        { timeMs: 1600, phase: 'output', weight: 1, tokens: 1 },
+      ],
+      usage: { outputTokens: 10, reasoningTokens: 4 },
+      settlementKind: 'message',
+      surfaceCommitted: true,
+      attemptOutcome: 'committed',
+    }],
+    tools: [],
+  })
+  assert.equal(result.quality.tokenTotalQuality, 'exact')
+  assert.equal(result.quality.phaseSplitQuality, 'exact')
+  assert.equal(result.quality.temporalShapeQuality, 'estimated', 'a live-shaped aggregate has no durable claim')
+  assert.deepEqual(result.consistencyIssues, [], 'stream and provider agree here')
+  assert.equal(result.temporalAllocationMode, 'phase-anchored')
+  assert.equal(
+    result.overallQuality,
+    'exact',
+    'the legacy blended label is the weakest of the published rates, and both rates are exact here',
+  )
+  assert.equal(Object.hasOwn(result, 'quality'), true)
+
+  /**
+   * The same counters over a reasoning-only stream are a phase contradiction and must not be
+   * reported as an exact split any more. This is the corrected reading of the old fixture.
+   */
+  const contradicted = aggregateTurn({
     turn: 1,
     turnStartMs: 1000,
     turnEndMs: 2000,
@@ -274,16 +323,10 @@ test('the aggregate exposes the axes and keeps the legacy blended label as a flo
     }],
     tools: [],
   })
-  assert.equal(result.quality.tokenTotalQuality, 'exact')
-  assert.equal(result.quality.phaseSplitQuality, 'exact')
-  assert.equal(result.quality.temporalShapeQuality, 'estimated', 'a live-shaped aggregate has no durable claim')
-  assert.deepEqual(result.consistencyIssues, [], 'stream and provider agree here')
-  assert.equal(
-    result.overallQuality,
-    'exact',
-    'the legacy blended label is the weakest of the published rates, and both rates are exact here',
-  )
-  assert.equal(Object.hasOwn(result, 'quality'), true)
+  assert.equal(contradicted.quality.tokenTotalQuality, 'exact', 'the counted total is still exact')
+  assert.notEqual(contradicted.quality.phaseSplitQuality, 'exact')
+  assert.equal(contradicted.temporalAllocationMode, 'total-anchored')
+  assert.ok(contradicted.consistencyIssues.some(issue => /no such deltas/.test(issue)))
 })
 
 test('reasoningTokens=0 with a non-empty reasoning stream can never report an exact split', () => {
@@ -305,7 +348,13 @@ test('reasoningTokens=0 with a non-empty reasoning stream can never report an ex
   assert.equal(conflict.phaseSplitQuality, 'estimated')
   assert.equal(conflict.approximatePhaseSplit, true)
   assert.equal(conflict.displayPhaseSplit, 'approximate')
-  assert.ok(conflict.notes.some(note => /reasoningTokens=0/.test(note)))
+  /**
+   * **Changed in Phase 7C.2.** The note text is now generalised to every contradiction the
+   *   phase-evidence layer can report, so the unit-level call — which sets only the conflict
+   *   flag and no specific cause — reads the generic wording. The aggregate-level call below
+   *   passes `reasoningZeroConflict` and still names `reasoningTokens=0` exactly.
+   */
+  assert.ok(conflict.notes.some(note => /contradict|reasoningTokens=0/.test(note)))
   assert.equal(
     phaseSplitQuality({ contributingAttemptCount: 1, attemptsWithSplit: 1, reasoningStreamConflict: true }),
     'estimated',

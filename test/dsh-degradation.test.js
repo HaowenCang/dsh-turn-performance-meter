@@ -17,6 +17,7 @@ import { accumulateLive, LiveTurnAccumulator, FRAME_ISSUE } from '../src/dsh/liv
 import { normalizeLiveChunk } from '../src/dsh/adapter.js'
 import { decodeStreamRecords } from '../src/dsh/stream-decoder.js'
 import { isTokenDelta } from '../src/core/delta-accounting.js'
+import { curveSource } from '../src/core/curve-source.js'
 import { loadDerived, loadFixture } from './helpers/fixtures.js'
 import { durableSettledView, liveSettledView, metricTuple, runLivePath } from './helpers/equivalence.js'
 
@@ -154,6 +155,69 @@ test('a provider total with no deltas of that phase is reported, not invented', 
   assert.match(first.calibration.note, /no such deltas/)
   assert.equal(first.usage.reasoningTokens, 74, 'the authoritative counter is still reported')
   assert.equal(first.reasoningTokens, 74, 'the phase total is the provider counter, not the empty shape sum')
+
+  /**
+   * **Strengthened in Phase 7C.2.** The assertions above were the whole test, and they were
+   * all satisfied by the defective pipeline: it published `totalAnchored: true` while the
+   * calibrated samples summed to `outputTokens - reasoningTokens = 70` instead of the
+   * `outputTokens = 144` the flag promised.
+   *
+   *   provider outputTokens   = 144        (recorded deepseek-official counter)
+   *   provider reasoningTokens= 74         (the phase the stream did not show)
+   *   observed phases         = output only, 27 deltas, no reasoning delta at all
+   *   old calibrated sum      = 70         (74 reasoning tokens silently dropped)
+   *   new calibrated sum      = 144        (one common scale over the 27 observed deltas)
+   *
+   * `totalAnchored` now means exactly what it says, so this is asserted rather than assumed.
+   */
+  const providerTotal = first.usage.outputTokens
+  assert.equal(providerTotal, 144, 'the recorded provider total for this settlement')
+  const sampleSum = first.calibration.samples.reduce((sum, sample) => sum + sample.tokens, 0)
+  assert.ok(
+    Math.abs(sampleSum - providerTotal) < 1e-9,
+    `totalAnchored promises the samples integrate to outputTokens; ${sampleSum} against ${providerTotal}`,
+  )
+  assert.ok(sampleSum > providerTotal - 74,
+    'the 74 reasoning tokens are inside the curve total, not dropped with their missing phase')
+
+  /** No sample of the missing phase was invented to carry them. */
+  assert.equal(first.calibration.samples.filter(sample => sample.phase === 'reasoning').length, 0,
+    'a phase the stream never emitted gets no fabricated sample')
+  assert.equal(first.calibration.samples.length, first.sampleCount,
+    'and the curve carries exactly the deltas the stream recorded')
+
+  /** The weaker phase-temporal claim is recorded, and the stronger one is not. */
+  assert.equal(first.temporalAllocationMode, 'total-anchored')
+  assert.equal(first.calibration.temporalAllocationMode, 'total-anchored')
+  assert.equal(view.settled.temporalAllocationMode, 'total-anchored',
+    'one contradicted attempt weakens the whole turn\'s phase-temporal allocation')
+  assert.ok(view.settled.consistencyIssues.length >= 1)
+  assert.ok(view.settled.consistencyIssues.some(issue => /no such deltas/.test(issue)))
+
+  /**
+   * Quality independence: the counted total stays exact, only the division degrades. The
+   * provider reported this attempt's `outputTokens`; nothing about the missing reasoning
+   * run makes that count less true.
+   */
+  assert.equal(view.settled.quality.tokenTotalQuality, 'exact')
+  assert.notEqual(view.settled.quality.phaseSplitQuality, 'exact')
+  assert.equal(view.settled.quality.phaseSplitQuality, 'estimated')
+
+  /** The curve keeps the authoritative total instead of losing the missing phase's tokens. */
+  const source = curveSource(view.record.attempts, view.settled.attemptBreakdown)
+  assert.equal(source.calibrationCoverage, 'full',
+    'the attempt still has an authoritative TOTAL anchor, which is what coverage measures')
+  const curveSum = source.attempts.reduce((sum, attempt) => (
+    sum + (attempt.samples ?? []).reduce((inner, sample) => inner + sample.tokens, 0)
+  ), 0)
+  assert.ok(Math.abs(curveSum - view.settled.generatedTokens) < 1e-9,
+    `the curve must carry the printed generated-token total; ${curveSum} against ${view.settled.generatedTokens}`)
+  assert.ok(Math.abs(curveSum - 151) < 1e-9,
+    `the curve carries 144 + 7 to floating tolerance, not 70 + 7; it carries ${curveSum}`)
+
+  /** The peak stays an approximation: per-delta magnitudes remain reconstructed. */
+  assert.equal(view.settled.quality.temporalShapeQuality, 'reconstructed')
+  assert.notEqual(view.settled.quality.displayPhaseSplit, 'exact')
 })
 
 test('missing delta timestamp: the decoder reports it and the sample never enters the series', () => {

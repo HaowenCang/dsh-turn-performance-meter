@@ -198,6 +198,25 @@ The rejected revision stopped at `perAttemptSeries(..., phase)`: two independent
 
 This is what makes the printed token total and the drawn curve one magnitude system: before it, `aggregateTurn` calibrated a copy of the samples for the metrics while `settle()` drew the curve from the uncalibrated originals.
 
+### One authority for phase evidence (frozen in Phase 7C.2)
+
+Provider usage and the stream make different claims, and the code keeps them apart in the type system rather than in prose: `outputTokens`/`reasoningTokens` are **summary counters**, and the stream's deltas are a **temporal allocation**. `src/core/phase-evidence.js` is the single module that compares them. It returns the symmetric contradiction list and the `temporalAllocationMode`, and both consumers read it:
+
+```
+src/core/phase-evidence.js
+        │  analyzePhaseEvidence(samples, outputTokens, reasoningTokens)
+        ├──────────────► src/core/token-allocation.js   choose the allocation, publish `calibration`
+        └──────────────► src/core/aggregate-turn.js     publish metrics, issues and quality axes
+```
+
+Before this, the rules lived in both layers and disagreed: `aggregateTurn` guarded only `reasoningTokens === 0` beside a reasoning stream, while `calibrateAttemptSamples` detected a missing phase but calibrated anyway. The first could not see the other three directions; the second published `totalAnchored: true` over a curve whose integral was short by the missing phase's tokens. The invariant the module exists to guarantee:
+
+```
+calibration.totalAnchored === true   =>   sum(calibration.samples[].tokens) === usage.outputTokens
+```
+
+Calibration therefore has three modes rather than two. `phase-anchored` maps the provider's split onto observed samples; `total-anchored` refuses the split (absent *or* contradicted) and applies one common scale across every observed sample, preserving the total, the temporal shape, the phase labels and the tool-call argument samples; `unanchored` has no provider total to scale toward. `aggregate.temporalAllocationMode` reports the weakest mode among the contributing attempts, and each attempt carries its own. This is separate from `curveSource().calibrationCoverage`, which measures authoritative **total** coverage: a `total-anchored` attempt is fully covered and merely does not claim an exact phase-temporal reading.
+
 ## 7. Timing domains
 
 The project deliberately has several clocks; do not collapse them.

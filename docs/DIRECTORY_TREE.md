@@ -51,6 +51,7 @@ dsh-turn-performance-meter/
 │   │   ├── quality-model.js          tokenTotal / phaseSplit / temporalShape axes + ceilings
 │   │   ├── delta-accounting.js       Delta classification, strict compact-stream decoder
 │   │   ├── phase-duration.js         Non-overlapping phase-duration attribution policy
+│   │   ├── phase-evidence.js         The one authority for provider-counter vs stream-phase contradictions and modes
 │   │   ├── token-allocation.js       Delta shape weighting + usage calibration
 │   │   ├── sliding-window.js         Trailing-1s meter with attempt epochs
 │   │   ├── live-metrics.js           LiveMeter: rolling window, TTFT, tool phase
@@ -144,10 +145,11 @@ dsh-turn-performance-meter/
 │   ├── curve-peak-priority.test.js    Phase 7A.1: retention priority across every run length (BLOCKER A)
 │   ├── rebaseline-generation.test.js  Phase 7A.1: window generations and session-scoped store reset (BLOCKER B)
 │   ├── curve-calibration.test.js      Phase 7C: the calibrated-magnitude counterexample + the Phase 7B reproduction
-│   ├── curve-source.test.js           Phase 7C: the positional, verified join and its whole-join degradation
+│   ├── curve-source.test.js           Phase 7C: the positional, verified join; Phase 7C.2: the global integral sweep
 │   ├── curve-total-rolling.test.js    Phase 7C: the cross-phase counterexample + the live/completed contract
 │   ├── curve-trace-matrix.test.js     Phase 7C: fourteen named scenarios for the total trace
 │   ├── curve-long-agent-visual.test.js Phase 7C: the 24-call visual regression and the rejected geometry's cost
+│   ├── phase-evidence.test.js         Phase 7C.2: the contradiction matrix, counterexamples A-D, the anchored integral
 │   └── completed-format.test.js       Formatter edge cases (no NaN/Infinity/-0 in UI)
 │
 └── scripts/

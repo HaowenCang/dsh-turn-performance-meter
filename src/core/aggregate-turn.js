@@ -21,6 +21,7 @@ import { QualityLevel, qualityAxes, QUALITY_AXIS, clampToAxis } from './quality-
 import { summarizeToolCalls } from './tool-timing.js'
 import { attributePhaseDurations, PHASE } from './phase-duration.js'
 import { calibrateAttemptSamples } from './token-allocation.js'
+import { TemporalAllocationMode, PhaseEvidenceIssue } from './phase-evidence.js'
 
 /** Mask a usage object into the fields this project reads, or `null` when unusable. */
 export function normalizeUsage(usage) {
@@ -81,10 +82,11 @@ export function reduceAttempt(attempt) {
     attemptOutcome: attempt?.attemptOutcome ?? 'unknown',
     sampleCount: samples.length,
     /**
-     * Whether the stream carries at least one non-empty reasoning delta. This
-     * is the stream-side evidence half of the `reasoningTokens = 0` consistency
-     * guard: provider aggregate usage and stream phase evidence must agree
-     * before a split may be called exact.
+     * Whether the stream carries at least one non-empty reasoning delta. This is the
+     * stream-side half of the phase-evidence comparison; the provider-side half is
+     * `usage.reasoningTokens`. The comparison itself lives in
+     * `src/core/phase-evidence.js` and is reported through `phaseEvidence`, so this
+     * flag is a fact about the stream rather than a duplicate of a rule.
      */
     hasReasoningStream: samples.some(sample => sample.phase === 'reasoning'),
     reasoningMs: durations.reasoningMs,
@@ -95,6 +97,20 @@ export function reduceAttempt(attempt) {
     usageSource: attempt?.usageSource ?? (usage === null ? null : 'attempt'),
     /** Whether this attempt's per-delta allocation is anchored to a total. */
     totalAnchored: calibration.totalAnchored,
+    /**
+     * Which claim the per-delta magnitudes were built from: `phase-anchored` when the
+     * provider's phase counters were usable as a temporal allocation, `total-anchored`
+     * when only the attempt total was, `unanchored` when neither was. The curve source
+     * is measured in the calibrated system at every level, so this is a statement
+     * about the *phase* allocation rather than about whether the integral is anchored.
+     */
+    temporalAllocationMode: calibration.temporalAllocationMode,
+    /**
+     * The symmetric provider-counter versus stream-evidence diagnosis for this
+     * attempt. `calibrateAttemptSamples` owns the rules; the aggregation layer only
+     * reports them, so the two cannot disagree.
+     */
+    phaseEvidence: calibration.evidence,
     calibration,
     reasoningTokens,
     outputTokens,
@@ -141,26 +157,44 @@ export function aggregateTurn(input = {}) {
   const withUsage = reduced.filter(a => a.usage !== null)
   const usageComplete = reduced.length > 0 && withUsage.length === reduced.length
   const splitComplete = usageComplete && withUsage.every(a => a.usage.reasoningTokens !== null)
+  /**
+   * A split that survived the phase-evidence comparison. It is deliberately narrower
+   * than `splitComplete`, which only asks whether every attempt *reported* a counter:
+   * a counter the stream contradicts is reported but not usable, and the published
+   * per-phase counters must then come from the anchored allocation rather than from a
+   * provider division the evidence refutes.
+   */
+  const splitUsable = splitComplete && withUsage.every(a => a.calibration.evidence?.splitUsable === true)
 
   /**
-   * Consistency guard: provider aggregate usage versus stream phase evidence.
-   * An attempt whose stream carries non-empty reasoning deltas while its usage
-   * reports `reasoningTokens === 0` is an internal contradiction in the
-   * evidence. The authoritative `outputTokens` total stays trusted (it is the
-   * only total the provider reports), but the reasoning/output split derived
-   * from the conflicting counter may never be called exact, and the conflict
-   * must be reported rather than silently ignored.
+   * Consistency between provider aggregate usage and stream phase evidence.
+   *
+   * The rules are **not** restated here. `calibrateAttemptSamples` already ran
+   * `analyzePhaseEvidence` over the same samples and the same counters, and this loop
+   * only surfaces its result. The previous revision kept a one-sided guard in this
+   * function — `reasoningTokens === 0` beside a reasoning stream — while the opposite
+   * direction and the output phase were handled differently inside the calibration
+   * layer, which is exactly how the two layers came to disagree about whether an
+   * attempt was anchored.
+   *
+   * The authoritative `outputTokens` total stays trusted throughout: a phase
+   * contradiction damages the temporal phase allocation, never the counted total.
    */
   const consistencyIssues = []
+  let splitConflict = false
+  let reasoningZeroConflict = false
+  let phaseMismatchAttempts = 0
   for (const attempt of reduced) {
-    if (attempt.usage === null || attempt.usage.reasoningTokens !== 0) continue
-    if (!attempt.hasReasoningStream) continue
-    consistencyIssues.push(
-      `attempt ${attempt.attemptId ?? attempt.step ?? '?'}: provider reported reasoningTokens=0 `
-      + 'but the stream carries non-empty reasoning deltas; the phase split is downgraded',
-    )
+    const contradictions = attempt.calibration.evidence?.contradictions ?? []
+    if (contradictions.length === 0) continue
+    splitConflict = true
+    phaseMismatchAttempts += 1
+    const label = attempt.attemptId ?? attempt.step ?? '?'
+    for (const entry of contradictions) {
+      if (entry.kind === PhaseEvidenceIssue.REASONING_ZERO_WITH_DELTAS) reasoningZeroConflict = true
+      consistencyIssues.push(`attempt ${label}: ${entry.message}`)
+    }
   }
-  const splitConflict = consistencyIssues.length > 0
 
   // Authoritative token totals. A missing counter is never silently treated as
   // zero: when coverage is incomplete the turn total is reported as unavailable
@@ -222,18 +256,35 @@ export function aggregateTurn(input = {}) {
   } : allocatedTokens
 
   /**
-   * The per-phase totals the card publishes: the provider counters when the
-   * provider reported them, the anchored allocation otherwise. A phase with no
-   * evidence at all stays `null` and renders `—`; it is never shown as `0`.
+   * The per-phase totals the card publishes: the provider counters when the provider
+   * reported them *and* the stream did not contradict them, the anchored allocation
+   * otherwise. A phase with no evidence at all stays `null` and renders `—`; it is
+   * never shown as `0`.
+   *
+   * `splitUsable` rather than `splitComplete` is the gate because a contradicted split
+   * may not be published as a division of the total. The provider's own counters remain
+   * available per attempt in `attemptBreakdown[].phaseTokens` and
+   * `.phaseEvidence.contradictions`, so the summary fact is retained even where the
+   * temporal reading of it is refused (docs/METRICS_SPEC.md §8.3).
    */
-  const phaseTokens = splitComplete
+  const phaseTokens = splitUsable
     ? { reasoning: observedReasoningTokens, output: observedNonReasoningTokens }
     : {
-      reasoning: shapeTokens.reasoning > 0 ? shapeTokens.reasoning : null,
-      output: shapeTokens.output > 0 ? shapeTokens.output : null,
+      /**
+       * A phase count is only publishable when it is a real, non-negative number. An
+       * impossible provider split (`reasoningTokens > outputTokens`) makes the derived
+       * non-reasoning count negative, and a negative "token count" rendered in a card is a
+       * worse failure than an em dash. It becomes `null`, which the card already renders as
+       * "no evidence", while the contradiction itself is reported in `consistencyIssues`.
+       */
+      reasoning: publishableCount(shapeTokens.reasoning),
+      output: publishableCount(shapeTokens.output),
     }
-  /** Whether those per-phase counters are measured, anchored, or absent. */
-  const phaseTokensQuality = splitComplete
+  /**
+   * Whether those per-phase counters are measured, anchored, or absent. A split the
+   * stream contradicted is never `exact` here, matching `quality.phaseSplitQuality`.
+   */
+  const phaseTokensQuality = splitUsable
     ? MetricQuality.EXACT
     : (usageComplete ? MetricQuality.ESTIMATED
       : (withUsage.length > 0 ? MetricQuality.PARTIAL : MetricQuality.UNAVAILABLE))
@@ -254,15 +305,15 @@ export function aggregateTurn(input = {}) {
     ? MetricQuality.UNAVAILABLE
     : rateQuality({
       measuredRatio: measuredRatio(reasoningMeasured, reduced.length),
-      tokensExact: splitComplete,
-      phaseSplitExact: splitComplete && !splitConflict,
+      tokensExact: splitUsable,
+      phaseSplitExact: splitUsable,
     })
   const outputQuality = outputTps === null
     ? MetricQuality.UNAVAILABLE
     : rateQuality({
       measuredRatio: measuredRatio(outputMeasured, reduced.length),
-      tokensExact: splitComplete,
-      phaseSplitExact: splitComplete && !splitConflict,
+      tokensExact: splitUsable,
+      phaseSplitExact: splitUsable,
     })
 
   const ttftMs = Number.isFinite(input.firstTokenMs) && Number.isFinite(input.turnStartMs)
@@ -286,7 +337,19 @@ export function aggregateTurn(input = {}) {
     reportedTotals: withUsage.length,
     attemptsWithSplit: withUsage.filter(a => a.usage.reasoningTokens !== null).length,
     splitIsAnchored: splitComplete,
+    /**
+     * Every contradiction `analyzePhaseEvidence` found, in all four directions plus the
+     * impossible split. It gates **only** the phase-split axis: `outputTokens` was counted
+     * by the provider and remains exact, which is the independence Phase 7C.2 requires.
+     * The name is kept from the Phase 3 guard it generalises, so existing consumers of
+     * `quality-model.js` keep working.
+     */
     reasoningStreamConflict: splitConflict,
+    /**
+     * Narrower form, for the note text only: the Phase 3 `reasoningTokens=0` direction
+     * specifically. The gate itself is `reasoningStreamConflict`.
+     */
+    reasoningZeroConflict,
     hasReasoningDeltas: reduced.some(a => a.shapeReasoning > 0),
     hasOutputDeltas: reduced.some(a => a.shapeOutput > 0),
     durable: input.durable === true,
@@ -329,22 +392,37 @@ export function aggregateTurn(input = {}) {
     reasoningTokens: observedReasoningTokens,
     nonReasoningTokens: observedNonReasoningTokens,
     /**
-     * Per-phase token magnitudes actually fit to publish: the provider counters
-     * when it reported them, otherwise the anchored phase allocation of the
-     * authoritative total. `null` means "no evidence for this phase", never `0`.
+     * Per-phase token magnitudes actually fit to publish: the provider counters when it
+     * reported them and the stream did not contradict them, otherwise the anchored phase
+     * allocation of the authoritative total. `null` means "no evidence for this phase",
+     * never `0`.
      */
     phaseTokens,
     phaseTokensQuality,
-    splitQuality: splitConflict
-      ? MetricQuality.ESTIMATED
-      : (splitComplete
-        ? MetricQuality.EXACT
-        : (withUsage.length > 0 ? MetricQuality.ESTIMATED : MetricQuality.UNAVAILABLE)),
+    splitQuality: splitUsable
+      ? MetricQuality.EXACT
+      : (withUsage.length > 0 ? MetricQuality.ESTIMATED : MetricQuality.UNAVAILABLE),
+    /**
+     * The temporal allocation mode of the whole turn: the weakest mode among the
+     * contributing attempts, because the turn's curve is no better anchored than its
+     * weakest attempt. `phase-anchored` means every attempt mapped the provider's phase
+     * counters onto observed stream evidence; `total-anchored` means at least one attempt
+     * used the common-scale fallback; `unanchored` means no attempt had a provider total.
+     *
+     * This is deliberately separate from `curveSource().calibrationCoverage`, which
+     * answers how many attempts have an authoritative **total**. A `total-anchored`
+     * attempt is still fully anchored for coverage purposes; it merely does not claim an
+     * exact phase-temporal allocation.
+     */
+    temporalAllocationMode: weakestTemporalAllocationMode(reduced),
     /**
      * Provider-aggregate versus stream-evidence contradictions detected while
-     * aggregating. Empty array means the two evidence sources agreed.
+     * aggregating, in every direction and for both phases. Empty means the two evidence
+     * sources agreed. The rules live in `phase-evidence.js`; this array only reports them.
      */
     consistencyIssues,
+    /** How many contributing attempts carried at least one contradiction. */
+    phaseMismatchAttemptCount: phaseMismatchAttempts,
 
     /**
      * The quality model actually used by display code. `quality.tokenTotalQuality`
@@ -369,6 +447,13 @@ export function aggregateTurn(input = {}) {
     usageAttemptCount: withUsage.length,
     usageComplete,
     splitComplete,
+    /**
+     * `splitComplete` refined by the phase-evidence comparison: every attempt reported a
+     * counter **and** no counter was contradicted by the stream. This is the flag that says
+     * whether a per-phase exact temporal allocation was possible; `splitComplete` alone
+     * only says the counters arrived.
+     */
+    splitUsable,
     reasoningTokensReported,
     attemptBreakdown: reduced,
 
@@ -393,6 +478,42 @@ export function aggregateTurn(input = {}) {
 function measuredRatio(measured, total) {
   if (total === 0) return 0
   return measured / total
+}
+
+/**
+ * A phase token count fit to publish: a finite positive number, otherwise `null`.
+ *
+ * `null` means "no evidence for this phase" and renders as an em dash. A negative value can
+ * only arise from an impossible provider split, and publishing it would put `-20` in a token
+ * column; a zero is suppressed too, because a phase that produced nothing is already reported
+ * as `0` by the provider-counter branch and as `—` by this one.
+ */
+function publishableCount(value) {
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
+/**
+ * The weakest temporal allocation mode across the contributing attempts.
+ *
+ * Ordered strongest to weakest, because the turn may not claim a stronger allocation than
+ * the attempt that could support the least: one attempt whose phase counters contradict the
+ * stream is enough to make the *turn's* phase allocation approximate, even though every
+ * attempt's integral is still anchored to its own provider total.
+ */
+function weakestTemporalAllocationMode(reduced) {
+  if (reduced.length === 0) return TemporalAllocationMode.UNANCHORED
+  const rank = {
+    [TemporalAllocationMode.PHASE_ANCHORED]: 2,
+    [TemporalAllocationMode.TOTAL_ANCHORED]: 1,
+    [TemporalAllocationMode.UNANCHORED]: 0,
+  }
+  let weakest = TemporalAllocationMode.PHASE_ANCHORED
+  for (const attempt of reduced) {
+    const mode = attempt.calibration.temporalAllocationMode
+    if (!Object.hasOwn(rank, mode)) return TemporalAllocationMode.UNANCHORED
+    if (rank[mode] < rank[weakest]) weakest = mode
+  }
+  return weakest
 }
 
 export { PHASE }

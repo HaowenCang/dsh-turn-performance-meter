@@ -234,6 +234,37 @@ Phase 7C additions (all in `npm run verify`). The two defect files were written 
   the superseded geometry. Every changed expectation carries its old contract in a comment beside it; the reasons are
   collected in `docs/IMPLEMENTATION_LOG.md` §"Phase 7C".
 
+Phase 7C.2 additions. The failing case was strengthened **before** any production change and observed failing against
+`534ff8f`, so the anchored-integral violation is demonstrated rather than asserted. The measured baseline on the patched
+`t4` fixture was `outputTokens: 144`, `reasoningTokens: 74`, observed phases `{output: 27, reasoning: 0}`, old calibrated
+sample sum **70**, new sample sum **144**.
+
+- `test/phase-evidence.test.js` — the contradiction matrix, at both the calibration and the turn level. The sixteen
+  required cases are covered as: (1) a valid exact split still calibrating each phase to its own counter; (2) an absent
+  `reasoningTokens` remaining a normal total-only calibration with an empty issue list, including a single-observed-phase
+  variant and a no-total variant; (3–7) counterexamples A–D plus the two output-phase directions; (8) tool-call argument
+  samples inside the anchored total in every mode; (9) a retry pair calibrated independently, where one attempt is
+  `total-anchored` and the other `phase-anchored` and the turn reports the weaker of the two; (10) partial usage; (11) no
+  usage; (14) no fabrication, no loss and no zeroing across five usage shapes; (15) the peak staying approximate at every
+  mode; (16) the **recorded** instance — `t6-tool-only-deepseek-official` step 4 reports `outputTokens: 282` beside
+  `reasoningTokens: 281` over 281 reasoning deltas and no output delta, and the old algorithm integrated to 281;
+  plus a symmetry test over all five issue kinds and an explicit assertion that an impossible split is never clamped
+  into a plausible one;
+- `test/curve-source.test.js` — the general anchored-integral sweep, which is the invariant stated as a property rather
+  than as a second worked example: for **every** contributing attempt of **every** real and derived fixture, on both the
+  durable and the live plane, `totalAnchored === true` implies `sum(calibration.samples.tokens) === outputTokens`; and for
+  every fully usage-covered turn the curve-source sample total equals the printed `generatedTokens`, which is the
+  curve/card consistency half of the same statement. Measured on the fixed tree: 50 anchored attempts, 0 short integrals,
+  22 curve/card comparisons, 0 mismatches. The same sweep under `534ff8f` reports 2 violations — the patched `t4`
+  fixture (70 against 144) and the recorded `t6` step 4 (281 against 282);
+- `test/dsh-degradation.test.js` — the existing *"a provider total with no deltas of that phase is reported, not
+  invented"* test **extended, not replaced**. Its original assertions are kept and the stronger invariant is added: the
+  provider counter retained, no fabricated reasoning sample, the calibrated sample sum equal to `outputTokens`, the
+  mode `total-anchored`, the split quality degraded while the total quality stays `exact`, the coverage still `full`,
+  no silent loss of the missing phase's tokens, and the peak still approximate;
+- `test/quality-model.test.js` — one expectation corrected, because it encoded the defect (see
+  `docs/IMPLEMENTATION_LOG.md` §"Phase 7C.2").
+
 ## 2. Required metric fixtures
 
 ### A. Single call, text only

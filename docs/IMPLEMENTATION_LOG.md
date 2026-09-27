@@ -2479,3 +2479,144 @@ The browser pass is recorded under `dev/screenshots/phase7c1/`, which is gitigno
 five-call tool-driven turn, both driven from the composer of a clean host, with the DOM geometry and the engine-side
 measurements in `phase7c1-measurements.json`. Both charts carry exactly one vertex on `x = 100` — the legitimate final
 endpoint — and the served bundle was checked to contain the new rules and none of the three superseded ones.
+
+## Phase 7C.2 — Calibration consistency closure (2026-09-26)
+
+Base revision `534ff8f5b87b6fa635267b860a41fed889951789`, working tree clean, starting suite **625 tests / 625 pass /
+0 fail**. Phase 7C.1 is confirmed closed by external audit on all four of its axes; one correctness defect remained, in
+provider-phase versus stream-phase contradiction handling.
+
+### 1. `totalAnchored` did not guarantee that the curve sample total was anchored (BLOCKER)
+
+`calibrateAttemptSamples` entered its exact-split branch whenever the provider reported a `reasoningTokens` counter that
+was a non-negative number, without ever asking whether the stream had recorded deltas of those phases:
+
+```js
+reasoningTotal = reasoningTokens
+outputTotal    = outputTokens - reasoningTokens
+reasoningSamples = calibratePhase(list.filter(s => s.phase === 'reasoning'), reasoningTotal)
+outputSamples    = calibratePhase(list.filter(s => s.phase === 'output'),    outputTotal)
+```
+
+With `reasoningTokens = 74` over a stream whose reasoning run had been removed, `reasoningSamples` was `[]` — the
+74 tokens were received by no sample — and the output samples were calibrated to `144 - 74 = 70`. The function then
+returned `totalAnchored: true` and `totalTokens: 144`, `splitQuality: 'unavailable'`, with a note saying the tokens
+were reported but the deltas were absent. The note was honest; the flag was not.
+
+Measured on the patched `t4-reasoning-tool-deepseek-official` fixture at `534ff8f`:
+
+| Quantity | Value |
+|---|---|
+| provider `outputTokens` | 144 |
+| provider `reasoningTokens` | 74 |
+| observed phases | `{output: 27}` — no reasoning delta at all |
+| old calibrated sample sum | **70** |
+| new calibrated sample sum | **144** |
+
+`curveSource` then counted the attempt as anchored, `calibrationCoverage` read `full`, and the turn's curve integrated
+to **77** against a printed `generatedTokens` of **151** — the Phase 7C defect (two magnitude systems on one card) partly
+reopened through a different door.
+
+The defect is not only reachable by mutation. A sweep of the real recordings found it in
+`t6-tool-only-deepseek-official` step 4, where the provider reports `outputTokens: 282` beside `reasoningTokens: 281` —
+one implied non-reasoning token — over 281 reasoning deltas and no output delta. The old algorithm integrated to
+**281**, losing exactly `outputTokens - reasoningTokens` tokens. The size of the loss is that difference; the invariant
+is what makes the size irrelevant.
+
+### 2. Two layers held two different versions of the consistency rules
+
+The contradiction logic existed twice and the two copies disagreed. `aggregateTurn` carried a guard for one direction of
+one phase:
+
+```js
+if (attempt.usage === null || attempt.usage.reasoningTokens !== 0) continue
+if (!attempt.hasReasoningStream) continue
+```
+
+while `calibrateAttemptSamples` carried a *different* test — a missing phase, detected but not acted upon, because it
+only lowered `splitQuality` and calibrated anyway. Neither layer could see the other's cases: `reasoningTokens > 0` with
+no reasoning delta was invisible to the aggregate guard, and the output phase was invisible to both.
+
+`src/core/phase-evidence.js` is now the single authority. `analyzePhaseEvidence(samples, outputTokens, reasoningTokens)`
+returns the symmetric contradiction list, `splitUsable`, and the notes; `calibrateAttemptSamples` chooses the allocation
+from it and `aggregateTurn` publishes metrics, issues and quality axes from it. A rule can no longer be true in one layer
+and false in the other. The five symmetric kinds are `reasoning-without-deltas`, `reasoning-zero-with-deltas`,
+`output-without-deltas`, `output-zero-with-deltas` and `impossible-split`. An **absent** `reasoningTokens` is deliberately
+not among them: it is `split unavailable`, a quality level rather than a conflict, and produces an empty issue list.
+
+### 3. Contradictory split falls back to one common total scale
+
+When the provider total is valid but the phase split cannot be mapped onto the observed stream, the attempt is
+`total-anchored`: one common factor is applied across **every** observed generated sample so their integral is the
+authoritative total. The mathematics is the same as the already-documented absent-counter path, and it is now the same
+code (`calibrateTotally`), because duplicating it is how the two paths drifted apart before. The fallback preserves the
+authoritative attempt total, the observed temporal shape, the observed phase labels, the tool-call argument samples and
+the Phase 7C attempt-local total rolling window. It invents no sample for the missing phase, drops no tokens, and zeroes
+no phase the stream really recorded.
+
+Calibration therefore has three explicit modes, `calibration.temporalAllocationMode`:
+
+    phase-anchored   provider total and phase split both mapped onto observed stream evidence   exact per phase
+    total-anchored   total authoritative, phase split absent or contradicted                     one common scale
+    unanchored       no authoritative provider total                                             raw shape weight
+
+`aggregate.temporalAllocationMode` is the weakest mode among the contributing attempts, each attempt carries its own,
+and `curve.source` retains it per attempt. It is deliberately **not** `calibrationCoverage`: coverage measures how many
+attempts have an authoritative **total**, so a `total-anchored` attempt is fully covered and the weaker phase-temporal
+reading does not lower it.
+
+### 4. Phase counters are a summary fact, not a temporal allocation
+
+The two claims are now separated rather than merged. A provider that reports `outputTokens = 100, reasoningTokens = 70`
+over a stream of output deltas only genuinely *said* that 70 tokens were reasoning and 30 were not; that statement is
+retained per attempt in `calibration.evidence.contradictions[].provider`, and the turn's published phase pair comes from
+the anchored attribution of the observed samples instead, because the curve cannot place 70 reasoning tokens at
+timestamps that do not exist. Where the provider's counters are a real division of the total and the stream agrees, they
+are published unchanged.
+
+One further publication defect was found and closed while auditing this: on an impossible split
+(`reasoningTokens > outputTokens`) `aggregateTurn` computed `observedNonReasoningTokens` through
+`Math.max(0, outputTokens - reasoningTokens)` per attempt and then summed, and the residual correction turned the
+negative remainder into a **negative phase count**. No count is now published for either phase of an impossible split:
+`NaN` marks "may not be published" in the evidence layer and reaches the consumer as `null`, which the card already
+renders as `—`. A negative number in a token column is a worse failure than an em dash.
+
+### 5. Quality model: the counted total stays independent of the phase mapping
+
+The audit found `tokenTotalQuality` correctly untouched by phase contradictions — it is derived from
+`outputTokens` coverage and never from the split — and that property is now asserted rather than assumed. The
+generalised contradiction flag reaches `phaseSplitQuality` only, capped at `estimated`. The model can express the
+required combination in one snapshot: exact total, untrustworthy phase mapping, reconstructed temporal curve. Peak
+semantics are unchanged: `≈` at `phase-anchored`, `total-anchored` and `unanchored` alike, because individual delta
+allocations remain reconstructed, and a phase contradiction never removes the attempt's authoritative total from the
+curve.
+
+### 6. Tests changed, and why the old contract was invalid
+
+Two existing expectations were changed. Both encoded the defect, so both carry the old contract in a comment beside the
+new assertion:
+
+- `test/quality-model.test.js` — *"the aggregate exposes the axes and keeps the legacy blended label as a floor"* used a
+  reasoning-only stream with `reasoningTokens: 4, outputTokens: 10` and expected `phaseSplitQuality: 'exact'`. That
+  expectation **was the defect**: the stream emitted no output delta, so the provider's six non-reasoning tokens could
+  not be mapped onto any observed instant, and the split was exact only in the provider's summary sense and false as a
+  temporal allocation. The fixture gained the output delta the exact claim needs, and the same counters over a
+  reasoning-only stream are now asserted to be `total-anchored` with a reported contradiction;
+- `test/dsh-degradation.test.js` — the *"provider total with no deltas of that phase"* test was **extended, not
+  replaced**. Its original assertions are kept verbatim and the stronger invariant is added.
+
+`test/dsh-degradation.test.js` also gained one import (`curveSource`) so the curve/card consistency claim can be
+asserted on the same fixture.
+
+### 7. Verification for this round
+
+The failing case was strengthened and **observed failing against `534ff8f` before any production change**. Reverting
+`src/` to `534ff8f` while keeping the new tests produced 21 failures in `test/phase-evidence.test.js` and one in
+`test/curve-source.test.js`, and an in-memory replay of the old algorithm over the real fixtures reported **2 short
+integrals in 32 anchored attempts** — the patched `t4` fixture (70 against 144) and the recorded `t6` step 4 (281 against
+282).
+
+`npm run verify` reports **648 tests, 648 pass, 0 fail**. All 625 of `534ff8f` are retained apart from the two
+expectations above. `test/curve-source.test.js` carries the general sweep: 50 anchored attempts, 0 short integrals, 22
+curve/card comparisons, 0 mismatches. `MAX_RENDER_POINTS_TOTAL`, `SLOT_ORDER`, the 50 ms live cadence, the axis
+endpoint rule, the stream-order tie-break and the coverage vocabulary of Phase 7C.1 are all untouched.

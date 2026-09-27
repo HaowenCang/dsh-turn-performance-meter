@@ -95,7 +95,7 @@ export const CalibrationCoverage = Object.freeze({
 })
 
 /** Fields on `record.attempts` that are shared with every calibration sample. */
-function withCalibratedSamples(attempt, samples, anchored) {
+function withCalibratedSamples(attempt, samples, anchored, temporalAllocationMode) {
   return {
     ...attempt,
     /**
@@ -112,6 +112,15 @@ function withCalibratedSamples(attempt, samples, anchored) {
      * estimated" true — but it is never reported as a calibration.
      */
     anchored,
+    /**
+     * The weaker statement of *how* they were anchored, retained per attempt. A
+     * `total-anchored` attempt has an authoritative integral but no trustworthy
+     * phase-temporal allocation, so a consumer that draws the phase split must be able
+     * to tell it apart from a `phase-anchored` one even though both are fully anchored
+     * for coverage purposes. Phase 7C.2 requires the coverage axis and the
+     * allocation-mode axis to stay separate.
+     */
+    temporalAllocationMode,
   }
 }
 
@@ -219,6 +228,14 @@ export function curveSource(attempts, breakdown) {
     }
   }
 
+  /**
+   * **Total-anchor coverage, not phase-allocation quality.** The count asks only whether an
+   * authoritative provider total anchored the attempt's integral, which is why a
+   * `total-anchored` attempt — one whose phase counters contradicted the stream and whose
+   * curve therefore used one common scale — counts as covered. Its weaker phase-temporal
+   * mode travels on the attempt itself (`temporalAllocationMode`) and on the aggregate
+   * (`aggregate.temporalAllocationMode`); it deliberately does not lower this coverage.
+   */
   const calibratedCount = reduced.filter(entry => entry?.calibration?.totalAnchored === true).length
   /**
    * The curve's magnitude provenance, stated as coverage rather than as a yes/no.
@@ -250,6 +267,7 @@ export function curveSource(attempts, breakdown) {
     attempt,
     (reduced[index].calibration.samples ?? []).map(curveSample),
     reduced[index].calibration.totalAnchored === true,
+    reduced[index].calibration.temporalAllocationMode ?? null,
   ))
   /**
    * Attempts that produced no generated delta are retained, not dropped: an empty

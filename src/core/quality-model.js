@@ -130,10 +130,15 @@ export function tokenTotalQuality({
  * total — which is the conservative answer and the one `docs/METRICS_SPEC.md`
  * §8.3 records.
  *
- * `reasoningStreamConflict` is the consistency guard: a provider that reports
- * `reasoningTokens === 0` while the stream carries non-empty reasoning deltas
- * contradicts itself, and a split derived from that counter can never be
- * `exact` however many attempts reported it.
+ * `reasoningStreamConflict` is the consistency guard, generalised in Phase 7C.2 from the
+ * single `reasoningTokens === 0` direction to every contradiction
+ * `src/core/phase-evidence.js` reports: a provider that counts reasoning tokens the
+ * stream never emitted, a provider that counts zero beside real reasoning deltas, the
+ * same two directions for the non-reasoning phase, and a split that is internally
+ * impossible (`reasoningTokens > outputTokens`). A split derived from counters the
+ * stream contradicts can never be `exact` however many attempts reported them. The
+ * flag never reaches the token-total axis: `outputTokens` was counted by the provider
+ * and stays exact even when the phase mapping is refused.
  */
 export function phaseSplitQuality({
   contributingAttemptCount = 0,
@@ -214,7 +219,11 @@ export function qualityAxes(input = {}) {
     notes.push(`${input.recoveredTotals} of ${input.contributingAttemptCount} attempts reported no usage; their totals were recovered from the stream`)
   }
   if (input.reasoningStreamConflict === true) {
-    notes.push('provider reported reasoningTokens=0 while the stream carries reasoning deltas; the reasoning/output split is downgraded')
+    notes.push(
+      input.reasoningZeroConflict === true
+        ? 'provider reported reasoningTokens=0 while the stream carries reasoning deltas; the reasoning/output split is downgraded'
+        : 'provider phase counters contradict the stream\'s phase evidence; the reasoning/output split is downgraded',
+    )
   }
   if (tokenTotal === QualityLevel.EXACT && phaseSplit !== QualityLevel.EXACT && input.reasoningStreamConflict !== true) {
     notes.push('generated-token total is authoritative but the reasoning/output split is not reported by the provider')

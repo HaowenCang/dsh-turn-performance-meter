@@ -41,10 +41,17 @@ export { PHASE, attributePhaseDurations } from './phase-duration.js'
 export {
   calibrateAttemptSamples,
   calibratePhase,
+  calibrateTotally,
   heuristicTokenWeight,
   sampleFromChunk,
   samplesFromTimedChunks,
 } from './token-allocation.js'
+
+export {
+  PhaseEvidenceIssue,
+  TemporalAllocationMode,
+  analyzePhaseEvidence,
+} from './phase-evidence.js'
 
 export { SlidingWindowMeter } from './sliding-window.js'
 

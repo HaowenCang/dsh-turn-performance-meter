@@ -32,6 +32,7 @@ import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import { curveSource } from '../src/core/curve-source.js'
 import { aggregateTurn } from '../src/core/aggregate-turn.js'
 import { heuristicTokenWeight } from '../src/core/token-allocation.js'
+import { TemporalAllocationMode } from '../src/core/phase-evidence.js'
 
 const DELTA_CHARACTERS = 400
 const RAW_DELTA_WEIGHT = 100
@@ -317,8 +318,7 @@ test('the source is a pure function of the two lists it is given', () => {
   assert.equal(curveSource([], []).calibratedForCurve, false)
 })
 
-test('the join is the same reduction the aggregate published', () => {
-  /**
+test('the join is the same reduction the aggregate published', () => {  /**
    * The end-to-end statement: `aggregateTurn` calibrates once, and the source the curve is
    * drawn from is that calibration rather than a second one. Every attempt's curve total is
    * therefore the same number the aggregate anchored, which is what makes the printed
@@ -354,3 +354,91 @@ test('the join is the same reduction the aggregate published', () => {
     settled.attemptBreakdown.map(entry => entry.calibration.samples.map(sample => sample.tokens)),
   )
 })
+
+// ── Phase 7C.2: the global anchored-integral invariant ───────────────────────
+
+/**
+ * `totalAnchored` must mean exactly what it says, for **every** contributing attempt of every
+ * fixture the project holds.
+ *
+ * The invariant was violated by a phase-evidence contradiction: a provider that counted
+ * reasoning tokens the stream never emitted had its output phase calibrated to
+ * `outputTokens - reasoningTokens` and its empty reasoning phase to `reasoningTokens`, over
+ * which `totalAnchored: true` was published. The samples then integrated to less than the
+ * total the flag promised, and `curveSource` still called the attempt anchored.
+ *
+ * This sweep is deliberately a general invariant rather than a second worked example. A
+ * one-off fixture proves one fixture; this proves that no recorded or derived evidence can
+ * reach the published curve with a short integral, including shapes nobody has thought of yet.
+ */
+test('every contributing attempt of every fixture integrates to its provider total when anchored', async () => {
+  const { listFixtures, listDerived, loadFixture, loadDerived } = await import('./helpers/fixtures.js')
+  const { durableSettledView, liveSettledView } = await import('./helpers/equivalence.js')
+
+  const cases = [
+    ...listFixtures().map(name => [name, loadFixture(name)]),
+    ...listDerived().map(name => [name, loadDerived(name)]),
+  ]
+  assert.ok(cases.length > 0, 'the fixture corpus is present')
+
+  let attemptsChecked = 0
+  let anchoredChecked = 0
+  let unanchoredChecked = 0
+
+  for (const [name, fixture] of cases) {
+    for (const [plane, view] of [['durable', durableSettledView(fixture)], ['live', liveSettledView(fixture)]]) {
+      const attempts = view.record.attempts
+      const source = curveSource(attempts, view.settled.attemptBreakdown)
+      for (const entry of view.settled.attemptBreakdown) {
+        attemptsChecked += 1
+        const [attempt] = attempts.filter(candidate => candidate.attemptId === entry.attemptId)
+        const logged = expectedOf(attempt)
+        const sum = entry.calibration.samples.reduce((total, sample) => total + sample.tokens, 0)
+
+        if (logged === null) {
+          /** No provider total arrived, so there is nothing to anchor to and nothing to claim. */
+          unanchoredChecked += 1
+          assert.equal(entry.totalAnchored, false,
+            `${name}/${plane} attempt ${entry.attemptId}: no usage means no anchor`)
+          assert.equal(entry.calibration.temporalAllocationMode, TemporalAllocationMode.UNANCHORED)
+          continue
+        }
+
+        /** The invariant itself, asserted wherever it applies. */
+        assert.equal(entry.totalAnchored, true,
+          `${name}/${plane}: an attempt with an authoritative total is anchored`)
+        assert.ok(Math.abs(sum - logged.outputTokens) < 1e-9,
+          `${name}/${plane} attempt ${entry.attemptId}: sum(samples) ${sum} against outputTokens `
+          + `${logged.outputTokens}`)
+        anchoredChecked += 1
+      }
+
+      /**
+       * The curve half of the same statement: a fully usage-covered turn's curve carries the
+       * printed `generatedTokens` in full. A weaker phase-temporal allocation (a
+       * `total-anchored` attempt) may not lose authoritative generated tokens from the chart.
+       */
+      if (view.settled.usageComplete && view.settled.attemptBreakdown.length > 0) {
+        assert.equal(source.aligned, true, `${name}/${plane}: the join is aligned`)
+        assert.equal(source.calibrationCoverage, 'full', `${name}/${plane}: complete usage is full coverage`)
+        const curveSum = source.attempts.reduce((total, attempt) => (
+          total + (attempt.samples ?? []).reduce((inner, sample) => inner + sample.tokens, 0)
+        ), 0)
+        assert.ok(Math.abs(curveSum - view.settled.generatedTokens) < 1e-9,
+          `${name}/${plane}: the curve carries ${curveSum} against generatedTokens `
+          + `${view.settled.generatedTokens}`)
+      }
+    }
+  }
+
+  assert.ok(anchoredChecked > 0, 'the sweep reached anchored attempts')
+  assert.equal(attemptsChecked, anchoredChecked + unanchoredChecked,
+    'every contributing attempt is either anchored to a provider total or explicitly unanchored')
+})
+
+/** The provider usage logged against one attempt, or `null` when the attempt has none. */
+function expectedOf(attempt) {
+  const usage = attempt?.usage
+  if (usage === null || usage === undefined) return null
+  return Number.isFinite(usage.outputTokens) ? usage : null
+}

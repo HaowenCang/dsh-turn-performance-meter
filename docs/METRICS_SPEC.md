@@ -329,6 +329,57 @@ If `reasoningTokens` is absent, the reasoning/output split is never claimed exac
 
 **Provider usage anchors the aggregate magnitude only.** Individual vertices remain reconstructed allocations of an exact total, and `peakTps` remains approximate (§9).
 
+### 8.3.1 Provider phase counters are not a temporal allocation (frozen in Phase 7C.2)
+
+A provider makes two claims and the stream makes two of its own, and they are not the same claims:
+
+| Source | Claim |
+|---|---|
+| provider usage `outputTokens` | how many tokens the attempt generated in total |
+| provider usage `reasoningTokens` | how many of those were reasoning |
+| stream deltas | **where** generation happened, and at which timestamps |
+| stream phase labels | which of those deltas were reasoning |
+
+The per-phase calibration of §8.3 is a *temporal* operation: it asserts that the reasoning deltas sum to the reasoning counter, which is only meaningful if the stream recorded reasoning deltas at all. When the provider's counters and the stream's observed phases disagree about whether a phase is present, the disagreement damages the second claim and **must not** damage the first. The counted total is still a count.
+
+**The invariant.** For every contributing attempt:
+
+```
+calibration.totalAnchored === true   =>   sum(calibration.samples[].tokens) === usage.outputTokens
+```
+
+within floating tolerance. This holds regardless of whether `reasoningTokens` is present, absent, contradicted or impossible. `totalAnchored` means exactly what it says.
+
+The pre-7C.2 pipeline violated it. With `reasoningTokens > 0` and no reasoning delta in the stream it calibrated the output phase against `outputTokens - reasoningTokens` and the (empty) reasoning phase against `reasoningTokens`, then published `totalAnchored: true`. The samples therefore integrated to `outputTokens - reasoningTokens`: the patched `t4` fixture lost 74 of 144 tokens, and the **real** recorded `t6-tool-only-deepseek-official` step 4 lost 1 of 282, while `curveSource` still reported the attempt anchored. The size of the loss is `outputTokens - reasoningTokens`; the invariant is what makes the size irrelevant.
+
+**One consistency authority.** `src/core/phase-evidence.js` is the only place the comparison is made. Both `calibrateAttemptSamples` (which chooses the allocation) and `aggregateTurn` (which publishes the metrics and the issues) read its result, so a rule cannot be true in one layer and false in the other. The symmetric issue kinds are:
+
+| Kind | Detected when |
+|---|---|
+| `reasoning-without-deltas` | `reasoningTokens > 0` but no reasoning delta was streamed |
+| `reasoning-zero-with-deltas` | `reasoningTokens === 0` beside a non-empty reasoning stream |
+| `output-without-deltas` | `outputTokens - reasoningTokens > 0` but no output delta was streamed |
+| `output-zero-with-deltas` | `outputTokens - reasoningTokens === 0` beside a non-empty output stream |
+| `impossible-split` | `reasoningTokens > outputTokens` |
+
+An **absent** `reasoningTokens` is deliberately not in that table. It is `split unavailable` — a quality level, not a conflict — and produces an empty issue list.
+
+**Temporal allocation modes.** `calibration.temporalAllocationMode` states which claim the per-delta magnitudes were built from:
+
+| Mode | Meaning | Phase-temporal allocation |
+|---|---|---|
+| `phase-anchored` | provider total and phase split both mapped onto observed stream evidence | exact per phase |
+| `total-anchored` | the provider total anchors the integral; the phase split is absent or contradicted | one common scale over every observed sample; **not** claimed exact |
+| `unanchored` | no authoritative provider total | raw shape weight |
+
+`aggregate.temporalAllocationMode` is the weakest mode among the contributing attempts, and each attempt carries its own. If an impossible provider split is observed, the attempt is `total-anchored` as long as `outputTokens` itself is valid.
+
+**What the fallback may and may not do.** On a contradicted split the attempt falls back to one common factor over every observed sample, which is the same mathematics already used when `reasoningTokens` is absent. It preserves the authoritative total, the observed temporal shape, the observed phase labels, tool-call argument samples and the Phase 7C total rolling window. It must not invent a sample for the missing phase, must not drop the missing phase's tokens, and must not assign zero tokens to a phase the stream really recorded.
+
+**The two claims stay separately available.** A provider that reports `outputTokens = 100, reasoningTokens = 70` over a stream of output deltas only is still a provider that *said* reasoning was 70 and non-reasoning 30. That summary statement is retained in `attemptBreakdown[].phaseTokens` and in `.phaseEvidence.contradictions[].provider`; what is refused is publishing it as the curve's phase allocation, because the curve cannot place 70 reasoning tokens at timestamps that do not exist. Where the derived non-reasoning count would be negative — the impossible split — neither phase is published, and `null` (rendered `—`) is preferred to a negative number or a clamped zero.
+
+`temporalAllocationMode` is **not** `calibrationCoverage`. Coverage (§8.3) answers how many attempts have an authoritative **total**, and a `total-anchored` attempt is fully anchored for that purpose. The mode is the weaker, per-attempt statement about the phase-temporal reading, and it deliberately does not lower coverage.
+
 ### 8.4 Curve quality is the temporal-shape axis (frozen in Phase 6)
 
 `curve.quality` is `aggregate.quality.temporalShapeQuality`, clamped to that axis's ceiling. It is **not** derived from `usageComplete`, which answers a different question and disagrees with the shape axis in both directions:
@@ -416,13 +467,18 @@ A single label must not describe a whole curve. The same turn routinely has an e
 
 | Evidence | tokenTotalQuality | phaseSplitQuality | temporalShapeQuality |
 |---|---|---|---|
-| authoritative `outputTokens` and `reasoningTokens` on every contributing attempt, durable timestamps | `exact` | `exact` | `reconstructed` |
+| authoritative `outputTokens` and `reasoningTokens` on every contributing attempt, **and the stream shows both phases**, durable timestamps | `exact` | `exact` | `reconstructed` |
 | authoritative `outputTokens` on every contributing attempt, no `reasoningTokens` | `exact` | `estimated` | `reconstructed` |
+| authoritative `outputTokens` and `reasoningTokens` on every contributing attempt, but at least one counter is contradicted by the stream's phase evidence (§8.3.1) | `exact` | at most `estimated` | `reconstructed` |
 | authoritative usage on some contributing attempts only | `partial` | at most `estimated` | `reconstructed` |
 | no provider usage at all, durable timestamps | `unavailable` | `unavailable` | `estimated` |
 | no provider usage, live observation only | `unavailable` | `unavailable` | `estimated` |
 | a contributing attempt carried no delta timestamp, or its shape is not anchored to a total | unchanged | unchanged | `estimated` |
 | no contributing attempt at all | `unavailable` | `unavailable` | `unavailable` |
+
+The third row and the first differ only in the phase mapping, and that is the independence Phase 7C.2 froze: an exact
+counted total beside an untrustworthy division of it. The final model must be able to express *exact total +
+untrustworthy phase mapping + reconstructed temporal curve* without collapsing any of the three into another.
 
 ### 11.4 UI rules
 
@@ -448,22 +504,38 @@ Live TPS is `estimated` unconditionally: it is a shape weight inside a one-secon
 
 ### 11.6 Provider/stream consistency guard
 
-Provider aggregate usage and stream phase evidence must agree before a split may be claimed as `exact`. The guarded
-conflict (frozen in Phase 3, tested at unit, aggregate and fixture level):
+Provider aggregate usage and stream phase evidence must agree before a split may be claimed as `exact`. The guard was
+**generalised in Phase 7C.2** from a single direction to the full symmetric matrix; it is implemented once, in
+`src/core/phase-evidence.js`, and read by both the calibration layer and the aggregation layer (§8.3.1).
 
-> an attempt whose stream contains at least one **non-empty `reasoning-delta`** while its provider usage explicitly
-> reports **`reasoningTokens === 0`**.
+> an attempt whose provider phase counters and stream phase evidence disagree about whether a phase is present.
 
-When the conflict fires:
+| Direction | Provider says | Stream shows |
+|---|---|---|
+| `reasoning-without-deltas` | `reasoningTokens > 0` | no reasoning delta |
+| `reasoning-zero-with-deltas` | `reasoningTokens === 0` | a non-empty reasoning stream |
+| `output-without-deltas` | `outputTokens - reasoningTokens > 0` | no output delta |
+| `output-zero-with-deltas` | `outputTokens - reasoningTokens === 0` | a non-empty output stream |
+| `impossible-split` | `reasoningTokens > outputTokens` | — (the split is internally impossible) |
 
-1. `tokenTotalQuality` is untouched — the authoritative `outputTokens` remains the total's basis;
+When any conflict fires:
+
+1. `tokenTotalQuality` is untouched — the authoritative `outputTokens` remains the total's basis. **The counted total
+   is independent of the phase mapping**, and this is the point of the phase 7C.2 correction: a provider that counted
+   the tokens still counted them;
 2. `phaseSplitQuality` is downgraded to at most `estimated`, however many attempts reported the counter;
 3. the legacy `splitQuality` label degrades with it, and derived rates stop claiming `exact`;
-4. every conflict is reported in `consistencyIssues` and as a `quality.notes` entry — never silently ignored, never
-   resolved by discarding the stream evidence.
+4. the attempt's `temporalAllocationMode` becomes `total-anchored`, and its curve samples are rescaled by **one common
+   factor** so their integral is still the authoritative total (§8.3.1);
+5. every conflict is reported in `consistencyIssues` and as a `quality.notes` entry — never silently ignored, never
+   resolved by discarding the stream evidence, never resolved by inventing a sample for the missing phase.
+
+A conflict never removes the attempt's authoritative total from the curve, never changes the observed per-delta
+positions or phase labels, and never lifts `peakTps` above `≈` — which was already its ceiling at every mode.
 
 A `reasoningTokens === 0` report **without** reasoning stream evidence (tool-argument-only attempts, e.g. `t4` step 2)
-is consistent and keeps an `exact` split.
+is consistent and keeps an `exact` split. So is an **absent** `reasoningTokens`, which is `split unavailable` rather
+than a contradiction and produces an empty `consistencyIssues`.
 
 ## 12. Status
 
