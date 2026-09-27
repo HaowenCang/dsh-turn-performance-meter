@@ -6290,11 +6290,11 @@ const { settlementChronology } = __req("src/dsh/durable-path.js")
  * the canonical durable reconstruction; nothing is decoded here.
  *
  * Three properties keep the retention from becoming a leak or a contamination
- * source. It is bounded per generation, the oldest turns being released first. It is
- * **cleared** by `rebaseline()`, because a new window is a new generation and
- * reconstructing one generation's settlement together with another's `turn/end`
- * would be a metric assembled from two windows. And it is per `SessionEventFeed`, so
- * a second session's feed cannot reach it.
+ * source. It is bounded per generation, evicting the least recently updated turn
+ * first. It is **cleared** by `rebaseline()`, because a new window is a new
+ * generation and reconstructing one generation's settlement together with another's
+ * `turn/end` would be a metric assembled from two windows. And it is per
+ * `SessionEventFeed`, so a second session's feed cannot reach it.
  *
  * ## `settle-assistant` is ambiguous in DSH 0.1.7-rc.2, and this is where it is resolved
  *
@@ -6368,19 +6368,35 @@ function stepKey(turn, step) {
  * The bound is a memory budget, not a semantic limit. It is expressed in turns
  * rather than in rows because the reconstruction the retention serves is
  * turn-scoped, and a turn's row count follows its model traffic rather than any
- * constant. With eviction by insertion order — the oldest turn released first — the
- * turns a tail could plausibly still be asked to reconstruct are the ones that
- * survive.
+ * constant.
+ *
+ * Eviction is **least-recently-updated**: when a new turn would exceed the bound,
+ * the retained turn with the oldest last arrival is released, and recording another
+ * durable row of a turn refreshes that turn's retention position. That is the
+ * policy `DurableEvidencePool.record` implements, and it is chosen for the
+ * consumer rather than for symmetry with a queue: the turn a `turn/end` miss can
+ * ask about is a turn that was producing evidence moments earlier, so it is the
+ * most recently refreshed entry and is never the eviction candidate. Under
+ * first-seen FIFO a long turn that published its opening row 33 turns ago would be
+ * released while it was still running — destroying exactly the evidence the
+ * retention exists to keep.
  */
 const MAX_RETAINED_TURNS = 32
 
 /**
  * Raw durable rows keyed by turn, in arrival order, bounded by turn count.
  *
- * Insertion order is the arrival order, so eviction can release the oldest turn with
- * a single `keys().next()`. Re-recording a turn preserves its original position:
- * that keeps the map an ordering of turns rather than of rows, and it means a turn
- * observed over a long span is never evicted merely for being revisited.
+ * The map's iteration order is *least recently updated first*: a turn's position
+ * is refreshed every time another of its rows arrives, so `keys().next()` is the
+ * eviction candidate and becomes the released turn after a single `delete`. The
+ * per-turn row array, by contrast, is pure arrival order and is never reordered —
+ * the two orders are different things and only the first is a retention policy.
+ *
+ * The refresh is deliberate rather than incidental. Retention exists so a
+ * `turn/end` whose opening row is outside the live tail can still be reconstructed,
+ * and that turn is by construction the one still producing durable rows; refreshing
+ * on every arrival is what keeps it resident, and is what makes "the oldest turn is
+ * evicted first" *false* of this structure in the first-seen sense.
  */
 class DurableEvidencePool {
   constructor(limit = MAX_RETAINED_TURNS) {
@@ -6389,6 +6405,18 @@ class DurableEvidencePool {
     this.byTurn = new Map()
     /** Sequence numbers retained in the current generation; keeps retention duplicate-free. */
     this.seqs = new Set()
+    /**
+     * Unique durable rows admitted into this pool during the current generation.
+     *
+     * This is a **cumulative ingest counter**, not a current occupancy figure: it
+     * grows by one for every newly retained row and is never decremented when a turn
+     * is evicted, then resets to zero with the pool at a rebaseline. It is named for
+     * what it measures — rows retained at ingest — and any consumer that needs the
+     * live occupancy must derive it (`byTurn.size` for turns, or a sum over the
+     * per-turn arrays for rows) rather than read this. Decrementing it here was
+     * rejected as the more expensive lie: an eviction would have to walk the released
+     * turn's rows to keep a diagnostic honest.
+     */
     this.eventCount = 0
   }
 
@@ -6399,6 +6427,11 @@ class DurableEvidencePool {
    * and a row that cannot name one cannot be retrieved by the consumer this exists
    * for. The row is still processed normally — retention is an addition to
    * ingestion, never a condition on it.
+   *
+   * A row whose `seq` is already retained is refused before any bookkeeping, so a
+   * duplicate cannot reorder the map: re-recording an existing row must not count as
+   * activity, or a replayed window would refresh turns in replay order and could
+   * evict a different turn than the same evidence delivered once would.
    */
   record(event) {
     if (event === null || typeof event !== 'object') return false
@@ -6409,8 +6442,9 @@ class DurableEvidencePool {
     const rows = this.byTurn.get(turn)
     if (rows === undefined) this.byTurn.set(turn, [event])
     else {
-      // Delete before re-inserting so the turn keeps its arrival position and is
-      // therefore evicted in the order it was first seen.
+      // Delete before re-inserting, which is precisely what moves the turn to the
+      // tail of the map's iteration order and makes eviction least-recently-updated
+      // rather than first-seen. The row array itself keeps arrival order.
       this.byTurn.delete(turn)
       rows.push(event)
       this.byTurn.set(turn, rows)
@@ -6525,7 +6559,13 @@ class SessionEventFeed {
       malformedToolResults: 0,
       rawTurnEndSeen: 0,
       normalizedTurnEndSeen: 0,
-      /** Raw durable rows retained as reconstruction evidence in this generation. */
+      /**
+       * Cumulative unique durable rows admitted into reconstruction retention during
+       * this window generation. It counts retention *events*, not rows currently
+       * held: eviction does not decrement it, and `rebaseline()` resets it to zero
+       * with the pool. For current occupancy use `retainedTurnCount()` (turns) — see
+       * `DurableEvidencePool.eventCount` for why no live row count is maintained.
+       */
       retainedDurableEvents: 0,
       bareSettleSeen: 0,
       settlementsWithEntry: 0,
@@ -6638,6 +6678,9 @@ class SessionEventFeed {
    * normalization and no decoding. Retention is duplicate-free within the generation,
    * and the global `durableSeqs` dedupe is unaffected by it.
    *
+   * `counters.retainedDurableEvents` is republished here from the pool's cumulative
+   * ingest counter; it is not the number of rows the pool currently holds.
+   *
    * @returns {boolean} whether the row was newly retained
    */
   retainDurable(event) {
@@ -6658,7 +6701,12 @@ class SessionEventFeed {
     return this.durableEvidence.eventsFor(turn)
   }
 
-  /** How many turns' durable evidence this generation currently retains. */
+  /**
+   * How many turns' durable evidence this generation currently retains.
+   *
+   * The live occupancy, bounded by `MAX_RETAINED_TURNS`; unlike
+   * `counters.retainedDurableEvents` it falls when a turn is evicted.
+   */
   retainedTurnCount() {
     return this.durableEvidence.byTurn.size
   }
@@ -7052,7 +7100,10 @@ class SessionEventFeed {
  *   tempting substitutes and all forbidden: TTFT and turn elapsed are intervals from
  *   the start, so inventing one would print a measured-looking number for a turn
  *   whose beginning nobody saw. `null` is the correct answer, and the UI already
- *   renders it as "—".
+ *   renders it as "—". This module enforces the rule at the API level as well as in
+ *   its arithmetic: `materializeReconstructedTurn()` accepts no caller clock at all,
+ *   so the substitution cannot be expressed by a future caller either. See its
+ *   docstring for the measured pre-7D.1.1 behaviour that clause closes.
  *
  *   **Sample timestamps are only what the settlement recorded.** Each attempt's
  *   samples are the ones `acceptChunk` derives from the settlement's own embedded
@@ -7099,17 +7150,36 @@ function reconstructedAttemptId(settlementSeq, duplicateIndex = 0) {
  * authoritative `turn/end` envelope — so this function deliberately does not call
  * `endTurn`.
  *
+ * ## There is no `timeMs` input, and its absence is load-bearing
+ *
+ * Phase 7D.1.1 removed a `timeMs` parameter that this function used to accept and
+ * passed to `beginTurn` as `reconstructed.turnStartMs ?? timeMs`. Any finite value
+ * a caller supplied therefore *became* the recovered turn's start. Measured on the
+ * 7D.1 baseline, a tail holding settlements but no `turn/start`, given an invented
+ * clock, produced `record.startMs === <that clock>`, and because the store clamps
+ * negative intervals, `settled.ttftMs === 0` and `settled.turnElapsedMs === 0` — a
+ * measured-looking `0 ms` for two metrics with no measurement behind them, where
+ * `null` ("—") is the honest answer.
+ *
+ * The parameter is deleted rather than ignored, so that fallback is not
+ * expressible: the recovered start is `reconstructed.turnStartMs` and nothing else
+ * can reach it. Callers that legitimately hold an observed boundary for this turn
+ * apply it through `store.turnStartObserved()`, which is the one-way upgrade and
+ * refuses to replace a finite start — the controller's miss path already does
+ * exactly that with `state.observedTurnStart`. Do not reintroduce a wall-clock
+ * fallback here: a start may only come from durable `turn/start` evidence, and a
+ * caller's clock is not evidence about this turn.
+ *
  * @param {{
  *   store: object,
  *   sessionId: string,
  *   turn: number,
  *   events: readonly object[],
- *   timeMs?: number|null,
  *   estimate?: Function,
  * }} input
  * @returns {{record: object, reconstructed: object}}
  */
-function materializeReconstructedTurn({ store, sessionId, turn, events = [], timeMs = null, estimate }) {
+function materializeReconstructedTurn({ store, sessionId, turn, events = [], estimate }) {
   const reconstructed = reconstructFromDurable({ sessionId, turn, events, ...(estimate === undefined ? {} : { estimate }) })
 
   /**
@@ -7117,8 +7187,12 @@ function materializeReconstructedTurn({ store, sessionId, turn, events = [], tim
    * extended rather than discarded. On the path this module exists for there is no
    * such record — the caller reached it precisely because the lookup missed — but
    * the idempotence is what keeps the function safe to call twice.
+   *
+   * `timeMs` is the parser's own `turnStartMs`: `null` when the tail carried no
+   * `turn/start`, which is the correct answer rather than a gap to fill. See the
+   * docstring above before adding any fallback to this argument.
    */
-  const record = store.beginTurn({ sessionId, turn, timeMs: reconstructed.turnStartMs ?? timeMs })
+  const record = store.beginTurn({ sessionId, turn, timeMs: reconstructed.turnStartMs })
 
   /**
    * An observed start is recorded through the one-way upgrade rather than by

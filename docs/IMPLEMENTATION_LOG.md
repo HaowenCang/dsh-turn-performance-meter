@@ -2948,7 +2948,8 @@ contracts that an empty record trivially satisfies but that must keep holding on
 Two modules and one handler.
 
 **`SessionEventFeed` retains raw durable evidence.** A bounded, per-generation pool
-(`DurableEvidencePool`, `MAX_RETAINED_TURNS = 32`, oldest turn evicted first) keeps every durable row exactly as it
+(`DurableEvidencePool`, `MAX_RETAINED_TURNS = 32`, least recently updated turn evicted first, where another row of a turn
+refreshes that turn's retention position) keeps every durable row exactly as it
 arrived, keyed by the turn its `data.turn` names, with its own `seq`. Retention is hooked into **both** routes by which
 a durable row enters the feed — `processDurable` for appended entries, and the `entry`-bearing `settle-assistant`
 change for the route DSH uses for interrupted messages and non-surface `assistant/attempt` settlements — because a
@@ -2956,6 +2957,16 @@ retention path covering only the append route would lose attempts that travelled
 pool with the rest of the generation state, which is the explicit boundary that stops one generation's settlement being
 reconstructed together with another's `turn/end`. Consumers read it through `turnEvents(turn)`; nothing is decoded in
 the feed.
+
+> **Corrected in Phase 7D.1.1.** This paragraph originally read "oldest turn evicted first", which described first-seen
+> FIFO. The implementation was never FIFO: `DurableEvidencePool.record()` deletes the turn's key before re-inserting it,
+> and a JavaScript `Map` iterates in insertion order, so a turn that received another row moved to the tail and the
+> released turn was the least recently *updated* one. Implementation and documentation therefore disagreed, and the
+> contract was undecidable from the repository. The implementation is kept — it is the policy the reconstruction
+> consumer wants — and this text, `docs/ARCHITECTURE.md`, `docs/TASKS.md` and the source comments now state it;
+> `test/dsh-017-retention-contract.test.js` pins it, including the decisive case (`1..32`, refresh `1`, add `33`
+> evicts `2`). The same phase documented that `counters.retainedDurableEvents` is a cumulative ingest count rather than
+> a current row count, since eviction does not decrement it.
 
 **`src/dsh/reconstruction.js` bridges reconstruction into the store.** `materializeReconstructedTurn()` calls
 `reconstructFromDurable`, then routes its output through the store's own methods — `beginTurn`,
@@ -3136,3 +3147,159 @@ DOM manipulation and not a synthetic session event: the rows are the fixture's o
 and timestamps, with the window cut after `turn/start` — which is the position `hasMore: true` describes. Browser-level
 instantiation of the cut is the one part of this phase that rests on the contract plus the replay rather than on a live
 observation, and it is marked as such here instead of being claimed.
+
+## Phase 7D.1.1 — reconstruction contract and Git gate closure
+
+### 1. Scope, and what was deliberately not touched
+
+A closure phase over the Phase 7D.1 repair, whose baseline was re-verified at the start of the round rather than quoted:
+`HEAD == origin/main == dd4b194a349fe9a3dd9b126bd84241dff82221c7`, divergence `0 0`, working tree clean,
+`dsh --version` → `0.1.7-rc.2`. Two latent contract defects were closed. Nothing else moved: no metric engine, no UI, no
+curve semantics, no change to the DSH 0.1.7-rc.2 `tool/result`, `settle-assistant` or `turn/end` contracts, and no
+Phase 8 work.
+
+The Phase 7D.1 main repair is re-verified as frozen. `turn/end` with `lookupRecord == null` still routes through
+`state.feed.turnEvents(turn)` → `materializeReconstructedTurn()` → `reconstructFromDurable()` → the store's normal
+`beginAttempt` / `acceptChunk` / `setAttemptUsage` / `settleAttempt` / `toolStarted` / `toolSettled` sequence →
+`store.endTurn()` → `aggregateTurn` → `curveSource` → `attemptTraces` → a normal completed card. The Phase 7D
+empty-record path was not restored. The unknown-boundary rule is unchanged: a missing `turn/start` leaves `startMs`,
+`ttftMs` and `turnElapsedMs` `null`, while a durable first generated sample still yields a known `firstTokenMs`.
+
+### 2. Defect A — the unsafe reconstruction `timeMs` fallback
+
+`materializeReconstructedTurn()` accepted a `timeMs` input and wrote
+
+```js
+store.beginTurn({ sessionId, turn, timeMs: reconstructed.turnStartMs ?? timeMs })
+```
+
+which contradicts the invariant the same module states two paragraphs above it: *a turn start may only come from actual
+durable `turn/start` evidence*. No production caller passed `timeMs` — `git grep` over `src/` finds exactly one caller,
+`src/client/live/controller.js` in the `TURN_END` lookup-miss path, and it passes only `store`, `sessionId`, `turn` and
+`events` — so the defect was latent. It was still a defect: the exported API let any future caller hand a reconstructed
+turn a start it never observed, and `startMs` is the anchor TTFT and turn elapsed are measured from.
+
+**Failing test first, on `dd4b194`.** `test/dsh-017-materialize-reconstruction.test.js` builds a tail from the recorded
+`fixtures/dsh-0.1.7/t01-sequential-tools.json` — settlements, tool boundaries and the terminal row, with `turn/start`
+(seq 4) removed — and supplies a plausible invented clock. Recorded pre-fix result, 2 of 4 cases failing:
+
+| field | pre-fix | expected |
+|---|---|---|
+| `record.startMs` | `9000000000000` (the caller's clock) | `null` |
+| `record.firstTokenMs` | `1790497154164` (durable) | unchanged |
+| `settled.ttftMs` | `0` | `null` |
+| `settled.turnElapsedMs` | `0` | `null` |
+
+The interval fields are the sharper half of the defect. The invented start sits far in the future of the recorded first
+token, so `aggregateTurn` clamps the negative intervals to zero: the card does not merely fail to report an unavailable
+metric, it reports a **measured-looking `0 ms`** that no evidence produced.
+
+**The fix** deletes the parameter instead of ignoring it, so the fallback is not expressible at the API level rather
+than merely unused:
+
+```js
+const record = store.beginTurn({ sessionId, turn, timeMs: reconstructed.turnStartMs })
+```
+
+The module docstring records why the input is absent, so a later reader cannot "helpfully" restore it, and points callers
+that legitimately hold an observed boundary at `store.turnStartObserved()` — the one-way upgrade that refuses to replace
+a finite start, which is what the controller's miss path already uses for `state.observedTurnStart`. Post-fix the same
+test reports `startMs` `null`, `ttftMs` `null` and `turnElapsedMs` `null` under both the direct call and an unnamed
+`timeMs` smuggled through object spreading, while the same tail *with* `turn/start` still yields `startMs`
+`1790497151824`, `turnElapsedMs` `6938` and a numeric TTFT — refusing fabrication did not become refusing evidence.
+
+### 3. Defect B — the retention eviction contract
+
+`DurableEvidencePool` had one policy in its implementation and the opposite in its prose. The implementation:
+
+```js
+this.byTurn.delete(turn)
+rows.push(event)
+this.byTurn.set(turn, rows)
+```
+
+Because a JavaScript `Map` iterates in insertion order, deleting and re-inserting moves a revisited turn to the tail, so
+the released turn is the **least recently updated** one. The comments and four documents said otherwise: "the oldest
+turns being released first", "evicted in the order it was first seen", "re-recording a turn preserves its original
+position", "oldest released first". The contract was therefore undecidable from the repository — an auditor reading the
+docs and an auditor reading the code would have reached opposite conclusions about which evidence survives.
+
+**The chosen policy is least-recently-updated, and the implementation was kept.** The decision follows from the
+consumer rather than from symmetry with a queue: the retention exists so a `turn/end` whose opening row is outside the
+live tail can be reconstructed, and that turn is by construction the one still publishing durable rows, so it is the
+most recently refreshed entry and is never the eviction candidate. Under first-seen FIFO a turn that began 33 turns ago
+and is still running would be released while its evidence was still being produced — the retention would lose exactly
+what it was built to keep. Every first-seen claim was replaced, in the source (module docstring, `MAX_RETAINED_TURNS`,
+the pool class, `record()`, `retainDurable()`, the counters block) and in `docs/ARCHITECTURE.md`, `docs/TASKS.md` and
+§3 of this log.
+
+`test/dsh-017-retention-contract.test.js` (9 tests) pins the policy through the public surface — `retainedTurnCount()`
+and `turnEvents()` — rather than through private fields, and includes the case that separates the two candidate
+policies:
+
+| scenario | asserted outcome |
+|---|---|
+| 32 turns resident, then a 33rd | `retainedTurnCount()` stays `32`; one turn released, never more |
+| turns 1..32, another row for turn 1, then turn 33 | turn **2** released, turn 1 survives with both rows (FIFO would release turn 1) |
+| a long turn interleaved with 64 shorter turns | the long turn keeps all 65 rows, arrival order, `turn/start` first |
+| 40 rows of one turn | one slot, not forty: the bound counts turns |
+| an evicted / unknown / non-numeric turn | `turnEvents()` is `[]` |
+| a surviving turn with interleaved arrivals | its own rows only, in durable arrival order, identical objects |
+| a duplicate `seq` | no duplicate row, and no refresh: the replay cannot change the eviction victim |
+| `replace` | pool cleared, counter reset, old generation's `seq`s admissible again |
+| `retainedDurableEvents` after eviction | strictly greater than current occupancy, i.e. cumulative |
+| source and documents | retired first-seen vocabulary absent; stated policy present |
+
+The last row makes documentation/implementation agreement a test rather than a convention, which is the specific failure
+this phase repairs.
+
+### 4. `retainedDurableEvents` semantics
+
+Audited and settled as **cumulative**: unique durable rows admitted into the retention pool during the current window
+generation. It is republished from the pool's `eventCount`, which increments on each newly retained row and is never
+decremented on eviction, and it resets to zero with the pool at a rebaseline. It is therefore *not* a current row count,
+and the counter block, `retainDurable()` and `docs/ARCHITECTURE.md` now say so explicitly. Current occupancy keeps its
+own honest accessor, `retainedTurnCount()`. The alternative — maintaining an eviction decrement — was rejected because
+it would have to walk the released turn's rows to keep a diagnostic accurate; no new state was added.
+
+### 5. Git process deviation
+
+Phase 7D.1 used one `--force-with-lease` after a post-push `--amend`, which rewrote the remote: `d0904dbe` and `dd4b194a`
+are sibling commits sharing parent `d3982fe`, as the independent GitHub audit established. No unrelated or production
+commit loss was found, but the accurate statement is that **the remote documentation commit was replaced** — not that
+"nothing was overwritten". History will not be rewritten again to restate this, and the remainder of this phase uses new
+commits plus an ordinary `git push origin main` only: no `--amend` after push, no rebase of pushed `main`, no `--force`,
+no `--force-with-lease`, no reset of remote `main`. A rejected ordinary push is reported as divergence rather than
+resolved by force.
+
+### 6. Verification for this round
+
+Reported as a **local test result**: this repository has no CI runner, so `npm run verify` here is not CI verification and
+is not described as such.
+
+`npm run build:client` reports `client.js rebuilt (477412 bytes, mirrored to lib/client.js)`. `npm run verify` — which is
+`scripts/verify-structure.mjs` followed by the Node test runner over `test/*.test.js` — reports **709 tests, 709 pass,
+0 fail**, 13 above the Phase 7D.1 figure of 696 (4 in `test/dsh-017-materialize-reconstruction.test.js`, 9 in
+`test/dsh-017-retention-contract.test.js`), with `structure OK (14 required files, 16 core modules, 62 test files,
+client bundle fresh)`. `git diff --check` is clean and `node scripts/verify-sanitization.mjs` reports
+`sanitization verified — no personal content, all structural evidence preserved`.
+
+The generated bundle is fresh and `client.js` and `lib/client.js` are byte-identical
+(`SHA-256 4E412F29785E00B7586BDA29097D06E223041BA1270AF34482D166B928E1D36E`). The bundle the browser is actually served —
+`plugins/??…dsh-turn-performance-meter/client.js`, entry rev `817e3b87a4e9`, 2,285,490 bytes — contains the module table
+including `src/dsh/reconstruction.js`, `DurableEvidencePool` and `materializeReconstructedTurn`, plus this phase's
+retention comments (`least-recently-updated`, `cumulative ingest counter`). The withdrawn expression
+`reconstructed.turnStartMs ?? timeMs` survives in the served text only inside the docstring that records its removal; the
+behavioural guarantee is covered by the adversarial test rather than by string absence.
+
+### 7. Minimal clean-runtime smoke, no reload shortcut
+
+No `dev_reload_package` was used. After a cache-ignoring page reload of `http://127.0.0.1:50001/`, the plugin's live
+meter is mounted and rendering in the conversation input dock — `.dsh-tpm-root[data-kind="live"][data-state="tool-running"]`
+with `aria-label="工具 · 10m40s"` — so the plugin loads and the live path works. The completed card was exercised on
+settled session `Sequential pwsh calls with sleeps`: `.dsh-tpm-root[data-kind="completed"][data-status="completed"]`
+`[data-quality="estimated"][data-view="summary"]` with `生成 Tokens 1,513 tokens · 总用时 66.9s`, `首响应 1.51s`,
+`峰值 ≈279 tokens/s`, `工具 8 · 35.8s`, `模型调用 9`. No new plugin console error appeared: the page's errors remain the
+pre-existing `useSessionPendingInteraction` template artifact, whose stack is entirely inside the DSH shell bundle
+`assets/index-Q6zc2uHV.js` with no frame from this plugin, plus shell and other-plugin 404 polling. No long browser
+performance A/B was repeated, because no presentation path changed.

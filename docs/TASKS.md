@@ -346,8 +346,9 @@ Baseline SHA `3602ce9179be22bcdc4259303546ebae4b827436`, equal to `origin/main`,
       `a terminal durable tail without turn/start reconstructs the turn's durable metrics`, against baseline `3602ce9`.
       Recorded result — reference 3 attempts / 2 tools / 147 generated tokens / `full` calibration coverage against a
       recovered record of **0 attempts / 0 tools / `null` tokens / `none` coverage**; 10 of 11 cases failed.
-- [x] Durable evidence retention added to `SessionEventFeed` (`DurableEvidencePool`, bounded at 32 turns, oldest
-      released first), hooked into **both** entry routes — appended window entries and the entry carried by a
+- [x] Durable evidence retention added to `SessionEventFeed` (`DurableEvidencePool`, bounded at 32 turns, **least
+      recently updated** turn released first — see Phase 7D.1.1 below, which corrected this line from "oldest released
+      first"), hooked into **both** entry routes — appended window entries and the entry carried by a
       `settle-assistant` change — cleared by `rebaseline()`, per feed so sessions stay isolated, expose-only through
       `turnEvents(turn)`, and decoding nothing.
 - [x] `src/dsh/reconstruction.js` added: `materializeReconstructedTurn()` calls `reconstructFromDurable` and routes its
@@ -395,6 +396,70 @@ Baseline SHA `3602ce9179be22bcdc4259303546ebae4b827436`, equal to `origin/main`,
 
 Acceptance gate: `turn/end` terminal recovery with no live record and available durable tail evidence closes the
 lifecycle unconditionally **and** reconstructs the metrics from that evidence **and** fabricates no unavailable fact.
+
+## Phase 7D.1.1 — Reconstruction contract and Git gate closure
+
+A closure phase. No metric engine, no UI, no curve semantics, and no change to the DSH 0.1.7-rc.2 `tool/result`,
+`settle-assistant` or `turn/end` contracts. Baseline `dd4b194a349fe9a3dd9b126bd84241dff82221c7`, re-verified at the start
+of the round rather than quoted (`HEAD == origin/main`, divergence `0 0`, working tree clean, `dsh --version` →
+`0.1.7-rc.2`).
+
+- [x] Main Phase 7D.1 repair re-verified as frozen and left untouched: `turn/end` + `lookupRecord == null` →
+      `state.feed.turnEvents(turn)` → `materializeReconstructedTurn()` → `reconstructFromDurable()` → the store's normal
+      methods → `store.endTurn()` → `aggregateTurn` → `curveSource` → `attemptTraces` → normal completed card. The
+      Phase 7D empty-record path was **not** restored, and the unknown-boundary rule still holds: with no `turn/start`,
+      `startMs` / `ttftMs` / `turnElapsedMs` stay `null` while `firstTokenMs` is recovered from durable samples.
+- [x] **Defect A closed — the unsafe `timeMs` fallback is gone.** `materializeReconstructedTurn()` no longer accepts
+      `timeMs` and no longer passes `reconstructed.turnStartMs ?? timeMs` to `beginTurn`; the parameter was deleted, not
+      ignored, so the fabrication is inexpressible at the API level. Failing test written and run first on `dd4b194`:
+      `test/dsh-017-materialize-reconstruction.test.js`, 2 of 4 cases failing, with `record.startMs` `null` →
+      `9000000000000` and, worse, `settled.ttftMs` / `settled.turnElapsedMs` `null` → `0` — a measured-looking `0 ms`
+      where the honest answer is "—". Post-fix: `startMs` `null`, `ttftMs` `null`, `turnElapsedMs` `null` under both the
+      named-parameter call and an unnamed `timeMs` smuggled through object spreading, while the same tail *with*
+      `turn/start` still reports `startMs` 1790497151824 / `turnElapsedMs` 6938. Callers were enumerated before deletion
+      (`git grep`): the only production caller is the controller miss path, which never passed `timeMs`.
+- [x] **Defect B closed — the retention eviction contract is now one policy in code, comments, docs and tests.** The
+      implementation was and remains **least recently updated first**: `DurableEvidencePool.record()` deletes a turn's
+      key before re-inserting it, so a Map's insertion order moves a revisited turn to the tail. The source comments, the
+      module docstring, `ARCHITECTURE.md`, this file and `IMPLEMENTATION_LOG.md` claimed first-seen ("oldest released
+      first", "re-recording preserves its original position"). The implementation is kept — it is the policy the
+      consumer needs, since the turn a `turn/end` miss asks about is the one still producing evidence — and every
+      first-seen claim was replaced. Tested by `test/dsh-017-retention-contract.test.js` (9 tests): hard ceiling at
+      `MAX_RETAINED_TURNS = 32`; the decisive `1..32` + refresh `1` + add `33` → **turn 2** released; a long turn
+      interleaved with 64 others keeps all 65 rows in arrival order; evicted turns answer `turnEvents() === []`;
+      survivors keep durable arrival order and object identity; a duplicate `seq` neither duplicates a row nor counts as
+      activity; `replace` clears the pool and frees the old generation's sequence numbers; and the retired first-seen
+      vocabulary is asserted **absent** from source and docs so the disagreement cannot silently return.
+- [x] `counters.retainedDurableEvents` semantics audited and documented as **cumulative** (unique rows admitted into
+      retention this generation), not a current row count: it is never decremented on eviction and resets with the pool
+      at a rebaseline. Current occupancy remains available through `retainedTurnCount()`. No new diagnostic state was
+      introduced; a decrementing alternative was rejected as costlier than the distinction is worth.
+- [x] **Git process deviation recorded rather than normalised.** Phase 7D.1 used one `--force-with-lease` after a
+      post-push `--amend`, which rewrote the remote: `d0904db` and `dd4b194` are sibling commits sharing parent
+      `d3982fe`. An independent GitHub audit found no unrelated or production commit loss, but "nothing was overwritten"
+      is not an accurate description — the remote documentation commit **was** replaced. History will not be rewritten
+      again to restate this.
+- [x] Absolute Git rule for this phase, and for subsequent phases unless the user directs otherwise: no `--amend` after
+      push, no rebase of pushed `main`, no `--force`, no `--force-with-lease`, no reset of remote `main`. New commits and
+      an ordinary `git push origin main` only; a rejected push is reported as divergence and not resolved by force.
+- [x] Documentation scope kept to the closure: `ARCHITECTURE.md`, `IMPLEMENTATION_LOG.md`, `TASKS.md`, `TEST_PLAN.md`.
+      No unrelated document was edited.
+- [x] Gates, reported as a **local test result** because this repository has no CI runner: `npm run build:client`
+      rebuilt the bundle to 477,412 bytes mirrored to `lib/client.js`; `npm run verify` reports **709 tests, 709 pass,
+      0 fail** (13 above the Phase 7D.1 figure of 696) with `structure OK (14 required files, 16 core modules,
+      62 test files, client bundle fresh)`; `git diff --check` is clean; `node scripts/verify-sanitization.mjs` passes.
+      `client.js` and `lib/client.js` are byte-identical, and the served bundle (entry rev `817e3b87a4e9`) contains this
+      phase's code and comments.
+- [x] Clean-runtime smoke without the reload shortcut: after a cache-ignoring page reload the plugin's live meter is
+      mounted and rendering (`data-kind="live"`, `data-state="tool-running"`), and a settled session renders the
+      completed card (`data-kind="completed"`, `生成 Tokens 1,513 tokens`, `总用时 66.9s`, `工具 8 · 35.8s`,
+      `模型调用 9`). No new plugin console error; the page's remaining errors are the pre-existing DSH shell template
+      artifact plus unrelated 404 polling. No long browser performance A/B was repeated — no presentation path changed.
+
+Acceptance gate: a fake reconstruction start is impossible through the exported API; the retention eviction policy is
+identical in implementation, comments, documentation and tests; every Phase 7D / 7D.1 regression still passes; the local
+verify run reports 0 failures; and the phase lands as an ordinary fast-forward push with `HEAD == origin/main` and a clean
+working tree, with no force operation of any kind.
 
 ## Phase 8 — Release readiness
 

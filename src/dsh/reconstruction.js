@@ -44,7 +44,10 @@
  *   tempting substitutes and all forbidden: TTFT and turn elapsed are intervals from
  *   the start, so inventing one would print a measured-looking number for a turn
  *   whose beginning nobody saw. `null` is the correct answer, and the UI already
- *   renders it as "—".
+ *   renders it as "—". This module enforces the rule at the API level as well as in
+ *   its arithmetic: `materializeReconstructedTurn()` accepts no caller clock at all,
+ *   so the substitution cannot be expressed by a future caller either. See its
+ *   docstring for the measured pre-7D.1.1 behaviour that clause closes.
  *
  *   **Sample timestamps are only what the settlement recorded.** Each attempt's
  *   samples are the ones `acceptChunk` derives from the settlement's own embedded
@@ -91,17 +94,36 @@ export function reconstructedAttemptId(settlementSeq, duplicateIndex = 0) {
  * authoritative `turn/end` envelope — so this function deliberately does not call
  * `endTurn`.
  *
+ * ## There is no `timeMs` input, and its absence is load-bearing
+ *
+ * Phase 7D.1.1 removed a `timeMs` parameter that this function used to accept and
+ * passed to `beginTurn` as `reconstructed.turnStartMs ?? timeMs`. Any finite value
+ * a caller supplied therefore *became* the recovered turn's start. Measured on the
+ * 7D.1 baseline, a tail holding settlements but no `turn/start`, given an invented
+ * clock, produced `record.startMs === <that clock>`, and because the store clamps
+ * negative intervals, `settled.ttftMs === 0` and `settled.turnElapsedMs === 0` — a
+ * measured-looking `0 ms` for two metrics with no measurement behind them, where
+ * `null` ("—") is the honest answer.
+ *
+ * The parameter is deleted rather than ignored, so that fallback is not
+ * expressible: the recovered start is `reconstructed.turnStartMs` and nothing else
+ * can reach it. Callers that legitimately hold an observed boundary for this turn
+ * apply it through `store.turnStartObserved()`, which is the one-way upgrade and
+ * refuses to replace a finite start — the controller's miss path already does
+ * exactly that with `state.observedTurnStart`. Do not reintroduce a wall-clock
+ * fallback here: a start may only come from durable `turn/start` evidence, and a
+ * caller's clock is not evidence about this turn.
+ *
  * @param {{
  *   store: object,
  *   sessionId: string,
  *   turn: number,
  *   events: readonly object[],
- *   timeMs?: number|null,
  *   estimate?: Function,
  * }} input
  * @returns {{record: object, reconstructed: object}}
  */
-export function materializeReconstructedTurn({ store, sessionId, turn, events = [], timeMs = null, estimate }) {
+export function materializeReconstructedTurn({ store, sessionId, turn, events = [], estimate }) {
   const reconstructed = reconstructFromDurable({ sessionId, turn, events, ...(estimate === undefined ? {} : { estimate }) })
 
   /**
@@ -109,8 +131,12 @@ export function materializeReconstructedTurn({ store, sessionId, turn, events = 
    * extended rather than discarded. On the path this module exists for there is no
    * such record — the caller reached it precisely because the lookup missed — but
    * the idempotence is what keeps the function safe to call twice.
+   *
+   * `timeMs` is the parser's own `turnStartMs`: `null` when the tail carried no
+   * `turn/start`, which is the correct answer rather than a gap to fill. See the
+   * docstring above before adding any fallback to this argument.
    */
-  const record = store.beginTurn({ sessionId, turn, timeMs: reconstructed.turnStartMs ?? timeMs })
+  const record = store.beginTurn({ sessionId, turn, timeMs: reconstructed.turnStartMs })
 
   /**
    * An observed start is recorded through the one-way upgrade rather than by

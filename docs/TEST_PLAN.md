@@ -523,3 +523,53 @@ and its complement: a field the tail's evidence does not determine must be `unav
   - **generation and session isolation** — a `replace` drops the superseded generation's retained evidence, so no old
     settlement can be reconstructed together with a new `turn/end`; two sessions using the same turn number do not
     share retained rows; and a recovered turn leaves nothing behind for the turn that follows it.
+
+## 9. Phase 7D.1.1 — reconstruction contract and retention-policy closure
+
+A closure phase: no metric engine, no UI, no curve semantics and no DSH contract touched. Its subject is two latent
+contract defects that the Phase 7D.1 audit exposed, both of the same kind — a rule the source stated that the code did
+not enforce, or an invariant the code implemented that the documentation denied. Both were addressed failing-test-first.
+
+- `test/dsh-017-materialize-reconstruction.test.js` (4 tests). The exported
+  `materializeReconstructedTurn()` accepted a `timeMs` input and passed it to `beginTurn` as
+  `reconstructed.turnStartMs ?? timeMs`, so any caller holding an arbitrary finite clock could give a reconstructed turn
+  a start it never observed. The fixture is `fixtures/dsh-0.1.7/t01-sequential-tools.json` with `turn/start` (seq 4)
+  removed and the terminal boundary kept, and the input is a plausible invented clock.
+  - **pre-fix evidence, baseline `dd4b194`** — `record.startMs` `null` -> `9000000000000`;
+    `settled.ttftMs` `null` -> `0`; `settled.turnElapsedMs` `null` -> `0`. The interval fields are the sharper half: with
+    a start placed after the recorded first token the aggregate clamps the negative intervals, so the card reports a
+    **measured-looking `0 ms`** where `null` (the em-dash rendering) is the honest answer. Two of the four cases failed on
+    that baseline.
+  - **the fix** — the parameter is deleted rather than ignored, so the fallback is not expressible; the start is
+    `reconstructed.turnStartMs` and nothing else can reach it. A caller holding an observed boundary applies it through
+    `store.turnStartObserved()`, the one-way upgrade the controller's miss path already uses.
+  - **the adversarial route** — once the named parameter is gone, the only remaining route is an unnamed `timeMs` on the
+    input object; that case is asserted inert, so the guard cannot be defeated by object spreading.
+  - **the complement** — the same tail *with* `turn/start` still yields `startMs` 1790497151824, `turnElapsedMs` 6938
+    and a numeric TTFT, so refusing fabrication did not become refusing evidence.
+- `test/dsh-017-retention-contract.test.js` (9 tests). The bounded per-generation durable-evidence retention had one
+  policy in its implementation and the opposite in its comments and documentation. `DurableEvidencePool.record()`
+  deletes a turn's key before re-inserting it, and a JavaScript `Map` iterates in insertion order, so the released turn
+  was the least recently *updated* one — while the source, `ARCHITECTURE.md`, `TASKS.md` and `IMPLEMENTATION_LOG.md` all
+  described "oldest released first" / "first-seen" semantics.
+  - **the chosen policy** — least-recently-updated, which is also the policy the consumer wants: the turn a `turn/end`
+    miss can ask about has been publishing evidence moments earlier and is therefore the most recently refreshed entry,
+    whereas first-seen FIFO would release a long turn that began 33 turns ago while it was still running. The
+    implementation was kept; the comments and all four documents now state it.
+  - **the decisive case** — turns 1..32 resident, a further durable row for turn 1, then turn 33: turn **2** is released
+    and turn 1 survives with both its rows. First-seen FIFO would release turn 1.
+  - **the property the policy exists for** — a long turn interleaved with 64 shorter ones (twice the bound) keeps all 65
+    of its rows, in arrival order, starting with the `turn/start` the reconstruction needs.
+  - **the rest of the matrix** — the bound is a hard ceiling at `MAX_RETAINED_TURNS = 32` and a turn's row count never
+    costs more than one slot; an evicted turn answers `turnEvents() === []` (as do unknown and non-numeric turns); a
+    survivor's rows come back in durable arrival order with the retained objects identical by reference; a duplicate
+    `seq` neither duplicates a row **nor counts as activity** (so a replayed window cannot refresh turns in replay order
+    and change the victim); a `replace` clears the pool, resets the cumulative counter and frees the old generation's
+    sequence numbers for reuse; and `counters.retainedDurableEvents` is asserted to be a cumulative ingest count that
+    exceeds current occupancy after eviction, with current occupancy reported separately by `retainedTurnCount()`.
+  - **documentation/implementation agreement is itself a test** — the retired first-seen vocabulary is asserted absent
+    from the source and all four documents, and the implemented policy is asserted present in the source and in
+    `ARCHITECTURE.md`. A future re-wording that reintroduces the old claim fails the suite rather than passing silently.
+
+Verification for this phase is reported as a **local** result: the repository has no CI runner, so `npm run verify` here
+is a local test result and is not described as CI-verified anywhere.

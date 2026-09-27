@@ -466,12 +466,24 @@ appeared with zero attempts, zero tokens and no tools while the turn's durable e
 had just read. Phase 7D.1 closes the metric half. Two things were added, and neither is a second parser.
 
 `SessionEventFeed` retains every durable row it accepts, keyed by the turn the row names, for the lifetime of the
-current window generation (`DurableEvidencePool`, bounded at `MAX_RETAINED_TURNS = 32` turns, oldest released first).
+current window generation (`DurableEvidencePool`, bounded at `MAX_RETAINED_TURNS = 32` turns). Eviction is
+**least-recently-updated**: admitting a turn beyond the bound releases the retained turn whose last arrival is oldest,
+and another durable row of a turn refreshes that turn's position. The policy is chosen for the consumer rather than for
+symmetry with a queue — the turn a `turn/end` miss can ask about has been publishing evidence moments earlier, so it is
+the most recently refreshed entry and is never the eviction victim, whereas first-seen FIFO would release a long turn
+that began 33 turns ago while it was still running. Rows are held exactly as they arrived and the per-turn row array
+keeps pure arrival order; only the map's turn order is a retention policy.
 Retention is hooked into **both** routes by which a durable row enters the feed — an appended window entry, and the
 entry carried by a `settle-assistant` change — because DSH delivers a settlement by both and a path covering only one
 would lose the attempts that travelled the other. `rebaseline()` clears the pool with the rest of the generation state;
 that boundary is what stops one generation's settlement being reconstructed together with another's `turn/end`.
 Consumers read rows through `turnEvents(turn)`; the feed decodes nothing.
+
+Retention diagnostics distinguish two different quantities, and the distinction is deliberate: `retainedTurnCount()`
+reports **current** occupancy in turns (bounded by `MAX_RETAINED_TURNS`, decreasing on eviction), while
+`counters.retainedDurableEvents` is a **cumulative ingest count** of unique rows admitted during the generation — it is
+never decremented on eviction and resets with the pool at a rebaseline, so it is not a current row count and must not be
+read as one.
 
 `src/dsh/reconstruction.js` bridges the reconstruction into the store.
 `materializeReconstructedTurn()` calls `reconstructFromDurable` (`src/dsh/durable-path.js`, still the only module that
