@@ -4,11 +4,17 @@
  * These predicates are the *only* place that inspects the DSH wire shape of an
  * incoming record. Everything downstream consumes normalized events.
  *
- * Verified shapes (DSH 0.1.5-rc.2, see docs/IMPLEMENTATION_LOG.md):
- *   SessionEvent                 dsh-session/lib/types/types.d.ts:460-479
+ * Verified shapes (re-audited against the target DSH **0.1.7-rc.2** in Phase 7D;
+ * the 0.1.5-rc.2 line numbers these were originally taken from are kept in
+ * `docs/IMPLEMENTATION_LOG.md`):
+ *   SessionEvent                 dsh-session/lib/types/types.d.ts
  *   SessionEventLikeEntry        dsh-api-session-controller/lib/types/client/contract/events.d.ts:20-26
  *   AssistantLiveChunkEvent      …/events.d.ts:6-16
- *   AssistantStreamFrame         dsh-agent/lib/types/runtime-types.d.ts:100-137
+ *   AssistantStreamFrame         dsh-api-session-controller/lib/types/types.d.ts:482-509
+ *
+ * The three discriminants themselves — the `type` tags and the `event`/`frame`
+ * nesting — are unchanged between the two lines, which is why this module needed
+ * no migration. The 0.1.7 change is in the payloads, not in the envelope.
  */
 
 /** Which of the two evidence planes one raw entry belongs to. */

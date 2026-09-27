@@ -4697,11 +4697,17 @@ class TurnTelemetryStore {
  * These predicates are the *only* place that inspects the DSH wire shape of an
  * incoming record. Everything downstream consumes normalized events.
  *
- * Verified shapes (DSH 0.1.5-rc.2, see docs/IMPLEMENTATION_LOG.md):
- *   SessionEvent                 dsh-session/lib/types/types.d.ts:460-479
+ * Verified shapes (re-audited against the target DSH **0.1.7-rc.2** in Phase 7D;
+ * the 0.1.5-rc.2 line numbers these were originally taken from are kept in
+ * `docs/IMPLEMENTATION_LOG.md`):
+ *   SessionEvent                 dsh-session/lib/types/types.d.ts
  *   SessionEventLikeEntry        dsh-api-session-controller/lib/types/client/contract/events.d.ts:20-26
  *   AssistantLiveChunkEvent      …/events.d.ts:6-16
- *   AssistantStreamFrame         dsh-agent/lib/types/runtime-types.d.ts:100-137
+ *   AssistantStreamFrame         dsh-api-session-controller/lib/types/types.d.ts:482-509
+ *
+ * The three discriminants themselves — the `type` tags and the `event`/`frame`
+ * nesting — are unchanged between the two lines, which is why this module needed
+ * no migration. The 0.1.7 change is in the payloads, not in the envelope.
  */
 
 /** Which of the two evidence planes one raw entry belongs to. */
@@ -5045,11 +5051,38 @@ function transientEndClassification(outcome) {
   }
 }
 
+/**
+ * Every `TurnEndReason` variant of the local 0.1.7-rc.2 install, mapped to the
+ * card status.
+ *
+ * Audited field by field against
+ * `dsh-session/lib/types/types.d.ts:165-208`, which declares exactly seven
+ * variants: `completed`, `aborted{reason: TurnEndCancelCause}`, `blocked`,
+ * `error{error: LlmFailure}`, `max-tokens`, `interrupted` and `forked`.
+ *
+ *   completed     the turn finished normally
+ *   max-tokens    at least one step reached its output ceiling; the turn did
+ *                 finish, so it is `completed` **with** a truncation note
+ *   aborted       a cancellation request interrupted the live turn; `reason` is
+ *                 `AgentCancelCause` (`user` | `parent` | `hook` | `disposed`)
+ *                 or `{kind:'legacy'}` for an import whose coarse record carried
+ *                 no cause
+ *   interrupted   a crash-orphaned turn closed after the fact; the loop never
+ *                 emits this marker live
+ *   forked        fork-seed construction closed a turn that was **still open**
+ *                 at the fork boundary in the source session. Only fork seeds
+ *                 carry it and the loop never emits it, but the turn genuinely
+ *                 did not finish, so it is an interruption and never a
+ *                 completion
+ *   blocked       the turn could not proceed
+ *   error         the turn failed; `error` is a structured `LlmFailure`
+ */
 const STATUS_BY_TURN_END = Object.freeze({
   completed: 'completed',
   'max-tokens': 'completed',
   aborted: 'interrupted',
   interrupted: 'interrupted',
+  forked: 'interrupted',
   blocked: 'errored',
   error: 'errored',
 })
@@ -5059,7 +5092,9 @@ const STATUS_BY_TURN_END = Object.freeze({
  * frozen in `docs/IMPLEMENTATION_LOG.md`.
  *
  * An unknown future reason kind must not be reported as a known cause: it maps
- * to `errored` with `known: false`, and the caller surfaces the raw reason.
+ * to `errored` with `known: false`, and the caller surfaces the raw reason. The
+ * turn still closes — a turn is never left live merely because its reason kind
+ * is unrecognized.
  */
 function turnEndStatus(reason) {
   const kind = reason && typeof reason === 'object' ? reason.kind : undefined
@@ -5076,14 +5111,98 @@ function turnEndStatus(reason) {
   if (kind === 'interrupted') {
     return { status, known: true, note: 'turn was closed after a crash' }
   }
+  if (kind === 'forked') {
+    return { status, known: true, note: 'turn was still open at a fork boundary' }
+  }
   return { status, known: true, note: null }
 }
 
-/** Timestamps on a `tool/result` payload do not exist; the envelope carries them. */
+/**
+ * Where a `tool/result`'s call identity was read from.
+ *
+ * The 0.1.7 contract puts the identity on the message; the recorded 0.1.5
+ * fixtures put it on the first content block. The two are separated by a
+ * **structural** discriminator (`message.role`), so the legacy read is
+ * unreachable for a 0.1.7 tool-role message and every normalization states
+ * which shape it used.
+ */
+const TOOL_RESULT_SHAPE = Object.freeze({
+  /** 0.1.7: a first-class tool-role message owning `toolCallId` and `isError`. */
+  TOOL_MESSAGE: 'tool-message',
+  /** Recorded 0.1.5 form: a `user`-role message whose first content block owned them. */
+  LEGACY_CONTENT_BLOCK: 'legacy-content-block',
+  /** Neither location carried an identity. The result is unusable. */
+  MALFORMED: 'malformed',
+})
+
+/**
+ * Read one tool result's call identity and failure flag.
+ *
+ * 0.1.7 target contract, verified against the local install:
+ *
+ *   `dsh-llm/lib/types/message.d.ts:152-160`
+ *     `ToolResultMessage` = `{ role: 'tool', toolCallId, isError? , content, source, id }`
+ *   `dsh-session/lib/types/types.d.ts:374-388`
+ *     `'tool/result'` = `{ turn, step, message: ToolResultMessage, error?, meta? }`
+ *
+ * so the identity is `data.message.toolCallId`, the failure flag is
+ * `data.message.isError`, and the content blocks are result **content** with no
+ * call identity in them at all. `content[0].toolCallId` is therefore never read
+ * for a tool-role message — not as a fallback, and not when the message field is
+ * missing, because §6 requires a malformed result to fail closed rather than be
+ * repaired by position.
+ *
+ * The legacy form is the shape actually present in `fixtures/dsh-turns/*`
+ * (recorded on 0.1.5-rc.2, where the result was a `user`-role message carrying
+ * `content[0].{toolCallId,isError}`). It is decoded — the metric-math
+ * regressions replay those bytes — but it is labelled, and a message that
+ * declares `role: 'tool'` can never reach it.
+ */
+function toolResultIdentity(message) {
+  if (message === null || typeof message !== 'object') {
+    return { callId: null, callIdSource: TOOL_RESULT_SHAPE.MALFORMED, status: 'ok', errorName: null, errorCode: null }
+  }
+  if (message.role === 'tool') {
+    const callId = typeof message.toolCallId === 'string' && message.toolCallId !== '' ? message.toolCallId : null
+    return {
+      callId,
+      callIdSource: callId === null ? TOOL_RESULT_SHAPE.MALFORMED : TOOL_RESULT_SHAPE.TOOL_MESSAGE,
+      status: message.isError === true ? 'error' : 'ok',
+      errorName: null,
+      errorCode: null,
+    }
+  }
+  const block = Array.isArray(message.content) ? message.content[0] : undefined
+  const callId = typeof block?.toolCallId === 'string' && block.toolCallId !== '' ? block.toolCallId : null
+  return {
+    callId,
+    callIdSource: callId === null ? TOOL_RESULT_SHAPE.MALFORMED : TOOL_RESULT_SHAPE.LEGACY_CONTENT_BLOCK,
+    status: block?.isError === true ? 'error' : 'ok',
+    errorName: null,
+    errorCode: null,
+  }
+}
+
+/**
+ * Timestamps on a `tool/result` payload do not exist; the envelope carries them.
+ * The structured `data.error` identity is on the event, beside the message, and
+ * is allowed only when the message is flagged failed
+ * (`dsh-session/lib/types/types.d.ts:378-386`).
+ *
+ * Exported because it is the **single** contract site for reading a tool result.
+ * Every consumer — the live adapter and the durable reconstruction path alike —
+ * goes through it, so the identity location cannot drift between them.
+ */
 function toolResultOutcome(data) {
-  const block = Array.isArray(data?.message?.content) ? data.message.content[0] : undefined
-  if (data?.error !== undefined || block?.isError === true) return 'error'
-  return 'ok'
+  const identity = toolResultIdentity(data?.message)
+  const error = data?.error
+  const hasError = error !== null && typeof error === 'object'
+  return {
+    ...identity,
+    status: hasError || identity.status === 'error' ? 'error' : 'ok',
+    errorName: hasError && typeof error.name === 'string' ? error.name : identity.errorName,
+    errorCode: hasError && typeof error.code === 'string' ? error.code : identity.errorCode,
+  }
 }
 
 /** Read the usage carrier from a settlement, preferring the durable one. */
@@ -5182,16 +5301,27 @@ function normalizeDurableEvent(event) {
          */
         argumentsRaw: typeof data.arguments === 'string' ? data.arguments : null,
       }
-    case 'tool/result':
+    case 'tool/result': {
+      const outcome = toolResultOutcome(data)
       return {
         kind: NORMALIZED_KIND.TOOL_RESULT,
         ...common,
         turn: data.turn,
         step: data.step,
-        callId: Array.isArray(data.message?.content) ? data.message.content[0]?.toolCallId ?? null : null,
-        status: toolResultOutcome(data),
-        errorName: data.error?.name ?? null,
+        callId: outcome.callId,
+        /** Which shape supplied the identity; `malformed` means none did. */
+        callIdSource: outcome.callIdSource,
+        /**
+         * The result cannot be paired. §6: fail closed — no guessing the most
+         * recent call, no matching by name or by step, no closing every running
+         * call. The caller decides what to record, and records that it happened.
+         */
+        malformed: outcome.callId === null,
+        status: outcome.status,
+        errorName: outcome.errorName,
+        errorCode: outcome.errorCode,
       }
+    }
     default:
       return { kind: NORMALIZED_KIND.IGNORED, reason: event.type, ...common }
   }
@@ -5379,7 +5509,7 @@ function applyRetryOutcomes(attempts, retries) {
   return upgraded
 }
 
-;Object.assign(__exports, { SETTLEMENT_EVENT_TYPES, NORMALIZED_KIND, SETTLEMENT_KIND, ATTEMPT_OUTCOME, settlementClassification, transientEndClassification, turnEndStatus, normalizeDurableEvent, normalizeLiveChunk, normalizeStreamFrame, attemptFromDecoded, attemptEvidenceQuality, applyRetryOutcomes })
+;Object.assign(__exports, { SETTLEMENT_EVENT_TYPES, NORMALIZED_KIND, SETTLEMENT_KIND, ATTEMPT_OUTCOME, settlementClassification, transientEndClassification, turnEndStatus, TOOL_RESULT_SHAPE, toolResultOutcome, normalizeDurableEvent, normalizeLiveChunk, normalizeStreamFrame, attemptFromDecoded, attemptEvidenceQuality, applyRetryOutcomes })
 			},
 			"src/dsh/live-path.js": function (__exports) {
 /**
@@ -5800,7 +5930,7 @@ function accumulateLive({
 
 const { isTokenDelta } = __req("src/core/delta-accounting.js")
 const { heuristicTokenWeight, sampleFromChunk } = __req("src/core/token-allocation.js")
-const { applyRetryOutcomes, settlementClassification, turnEndStatus } = __req("src/dsh/adapter.js")
+const { applyRetryOutcomes, settlementClassification, toolResultOutcome, turnEndStatus } = __req("src/dsh/adapter.js")
 const { decodeStreamRecords } = __req("src/dsh/stream-decoder.js")
 
 /**
@@ -5947,9 +6077,19 @@ function reconstructFromDurable({ sessionId, turn, events = [], estimate }) {
         break
       }
       case 'tool/result': {
-        const callId = Array.isArray(data.message?.content) ? data.message.content[0]?.toolCallId ?? null : null
+        /**
+         * The call identity is read through the adapter's single contract site,
+         * never re-derived here. A second copy of this read is exactly how the
+         * 0.1.7 migration was nearly left half-done: the same
+         * `content[0].toolCallId` expression existed in this file and in
+         * `adapter.js`, and fixing only one of them would have left durable
+         * reconstruction silently unable to pair any 0.1.7 tool result while the
+         * live path paired all of them.
+         */
+        const outcome = toolResultOutcome(data)
+        const callId = outcome.callId
         if (callId === null) {
-          result.issues.push({ kind: 'tool-result-without-call-id', seq: event.seq })
+          result.issues.push({ kind: 'tool-result-without-call-id', seq: event.seq, callIdSource: outcome.callIdSource })
           break
         }
         const record = toolByCallId.get(callId)
@@ -5957,10 +6097,9 @@ function reconstructFromDurable({ sessionId, turn, events = [], estimate }) {
           result.issues.push({ kind: 'unmatched-tool-result', seq: event.seq, callId })
           break
         }
-        const block = data.message.content[0]
         record.endMs = event.time
-        record.status = data.error !== undefined || block?.isError === true ? 'error' : 'ok'
-        record.errorName = data.error?.name ?? null
+        record.status = outcome.status
+        record.errorName = outcome.errorName
         break
       }
       default:
@@ -6045,7 +6184,7 @@ function firstGeneratedDeltaTime(chunks) {
  * DSH adapter layer.
  *
  * The single responsibility of this directory is to translate **verified DSH
- * 0.1.5-rc.2 raw evidence** into this project's normalized engine events. No
+ * 0.1.7-rc.2 raw evidence** into this project's normalized engine events. No
  * other layer may know about DSH field names:
  *
  *   src/core   pure statistics, zero `@deepseek-ai/*` imports
@@ -6053,9 +6192,17 @@ function firstGeneratedDeltaTime(chunks) {
  *   src/host   in-memory store over normalized events
  *   src/client presentation only
  *
+ * ## Compatibility baseline (changed in Phase 7D)
+ *
+ * The target runtime is `@deepseek-ai/dsh` **0.1.7-rc.2**, public reference
+ * commit `477b4f420553e8a52c2fbccc464d7561b239c443`, as installed locally at
+ * `%APPDATA%/npm/node_modules/@deepseek-ai/dsh`. The 0.1.5-rc.2 line is **not**
+ * the contract any more. Where the two differ, the local install wins and the
+ * divergence is recorded in `docs/IMPLEMENTATION_LOG.md`; the field-by-field
+ * comparison lives in `docs/DSH_API_NOTES.md` §13.
+ *
  * Evidence locations for every shape handled here are recorded in
- * `docs/IMPLEMENTATION_LOG.md`. Where DSH's runtime and DSH's published notes
- * disagree, the installed runtime wins and the divergence is logged.
+ * `docs/IMPLEMENTATION_LOG.md`.
  */
 
 const { DSH_RAW_KIND } = __req("src/dsh/raw.js")
@@ -6077,6 +6224,7 @@ const { firstTokenTimeOf } = __req("src/dsh/stream-decoder.js")
 const { ATTEMPT_OUTCOME } = __req("src/dsh/adapter.js")
 const { NORMALIZED_KIND } = __req("src/dsh/adapter.js")
 const { SETTLEMENT_KIND } = __req("src/dsh/adapter.js")
+const { TOOL_RESULT_SHAPE } = __req("src/dsh/adapter.js")
 const { applyRetryOutcomes } = __req("src/dsh/adapter.js")
 const { attemptEvidenceQuality } = __req("src/dsh/adapter.js")
 const { attemptFromDecoded } = __req("src/dsh/adapter.js")
@@ -6094,7 +6242,7 @@ const { accumulateLive } = __req("src/dsh/live-path.js")
 const { reconstructFromDurable } = __req("src/dsh/durable-path.js")
 const { settlementChronology } = __req("src/dsh/durable-path.js")
 
-;Object.assign(__exports, { DSH_RAW_KIND, classifyRawEntry, isAssistantStreamFrame, isDurableSessionEventEntry, isTransientLiveChunkEntry, sessionKeyOf, DECODE_ISSUE, RECORD_KIND, SETTLEMENT_EVENT_TYPES, decodeQuality, decodeStreamRecords, expandAssistantStream, expandAssistantStreamRaw, firstTokenTimeOf, ATTEMPT_OUTCOME, NORMALIZED_KIND, SETTLEMENT_KIND, applyRetryOutcomes, attemptEvidenceQuality, attemptFromDecoded, normalizeDurableEvent, normalizeLiveChunk, normalizeStreamFrame, settlementClassification, transientEndClassification, turnEndStatus, FRAME_ISSUE, LiveTurnAccumulator, accumulateLive, reconstructFromDurable, settlementChronology })
+;Object.assign(__exports, { DSH_RAW_KIND, classifyRawEntry, isAssistantStreamFrame, isDurableSessionEventEntry, isTransientLiveChunkEntry, sessionKeyOf, DECODE_ISSUE, RECORD_KIND, SETTLEMENT_EVENT_TYPES, decodeQuality, decodeStreamRecords, expandAssistantStream, expandAssistantStreamRaw, firstTokenTimeOf, ATTEMPT_OUTCOME, NORMALIZED_KIND, SETTLEMENT_KIND, TOOL_RESULT_SHAPE, applyRetryOutcomes, attemptEvidenceQuality, attemptFromDecoded, normalizeDurableEvent, normalizeLiveChunk, normalizeStreamFrame, settlementClassification, transientEndClassification, turnEndStatus, FRAME_ISSUE, LiveTurnAccumulator, accumulateLive, reconstructFromDurable, settlementChronology })
 			},
 			"src/dsh/client-feed.js": function (__exports) {
 /**
@@ -6121,9 +6269,35 @@ const { settlementChronology } = __req("src/dsh/durable-path.js")
  *   prepend          older history was paged in — irrelevant to the live tail,
  *                    and ingesting it after newer events would replay stale
  *                    turns out of order, so it is deliberately ignored
- *   settle-assistant attemptId + durable settlement entry atomically
- *                    superseding one attempt's transient rows (or a bare
- *                    abandonment when the entry is absent)
+ *   settle-assistant attemptId, with or without a durable settlement entry
+ *
+ * ## `settle-assistant` is ambiguous in DSH 0.1.7-rc.2, and this is where it is resolved
+ *
+ * The published contract calls the entry optional and the 0.1.5 reading treated
+ * "entry absent" as synonym for "attempt abandoned". The local 0.1.7 install
+ * disproves that reading. `ClientAssistantStream` publishes the same bare
+ * `settleAssistant(attemptId)` from **two** different situations
+ * (`dsh-api-session-controller/lib/client.js:1445-1539`, `:617-648`):
+ *
+ *   normal successful retirement
+ *     the attempt's durable `assistant/message` is published (non-interrupted),
+ *     a `retainedAttempt` is recorded, and when the matching `step/end` is
+ *     published the fold returns `{type:'publish', entry, retireAttemptId}` —
+ *     the session then appends the step end **and** calls
+ *     `eventSource.settleAssistant(attemptId)` with no entry, purely to discard
+ *     transient rows that a durable node already supersedes.
+ *
+ *   true abandonment
+ *     the attempt's `end` frame carries `outcome.kind === 'abandoned'` and no
+ *     settlement is pending; the fold returns `{type:'abandonment', attemptId}`
+ *     and the session calls the same bare `settleAssistant(attemptId)`.
+ *
+ * `entry === undefined` therefore proves nothing on its own. What distinguishes
+ * them is state the feed can hold from evidence it has already seen: whether a
+ * durable, non-interrupted settlement has already been observed for this
+ * attempt. A bare settle for an attempt that already has one is **transient
+ * retirement only** and emits no second attempt outcome; a bare settle for an
+ * attempt that has none is the abandonment path.
  */
 
 const { NORMALIZED_KIND, normalizeDurableEvent, normalizeLiveChunk } = __req("src/dsh/adapter.js")
@@ -6144,7 +6318,24 @@ const FEED_ISSUE = Object.freeze({
    * a late frame is a real wire behaviour and silence would hide it.
    */
   LATE_TURN_ROW: 'transient-row-of-a-finished-turn',
+  /**
+   * A durable row of a turn this client has already closed. The same rule as
+   * `LATE_TURN_ROW`, on the durable plane: `turn/end` is terminal for live
+   * presentation, so a trailing tool boundary cannot re-open the turn.
+   */
+  LATE_TURN_EVENT: 'durable-event-of-a-finished-turn',
+  /**
+   * A bare `settle-assistant` naming an attempt the feed never saw open, with no
+   * durable settlement waiting to be retired. Read as abandonment, and recorded
+   * because the identity could not be resolved from held evidence.
+   */
+  UNRESOLVED_SETTLEMENT: 'bare-settlement-without-known-attempt',
 })
+
+/** The key under which an attempt's `(turn, step)` is registered. */
+function stepKey(turn, step) {
+  return Number.isFinite(turn) && Number.isFinite(step) ? `${turn}:${step}` : null
+}
 
 class SessionEventFeed {
   /**
@@ -6183,10 +6374,52 @@ class SessionEventFeed {
      * the feed has already moved past (`adoptTurn`).
      */
     this.highestTurn = null
+    /**
+     * Attempts whose transient rows arrived, with the `(turn, step)` those rows
+     * named. This is the only place an `attemptId` — a process-local identity
+     * that never enters the durable log — can be tied to a durable coordinate.
+     */
+    this.attemptSteps = new Map()
+    /**
+     * Attempts that received a durable settlement **directly** — the
+     * `settle-assistant` route that names the attempt and carries its entry
+     * (interrupted messages, `assistant/attempt`). A bare settle for one of
+     * these can only be a retirement.
+     */
+    this.settledAttemptIds = new Set()
+    /**
+     * Durable, non-interrupted `assistant/message` settlements published but not
+     * yet retired, oldest first, keyed by their durable `(turn, step)`.
+     *
+     * DSH's fold retains exactly one such settlement per step and releases it
+     * when that step's `step/end` is published, calling the bare
+     * `settleAssistant(attemptId)` at that moment. The queue is therefore both
+     * the proof that a retirement is happening and the budget that stops one
+     * settlement from excusing a *later* attempt in the same step.
+     */
+    this.pendingSettlements = []
     this.issues = []
     /** Counts of deliberately skipped window changes, for diagnostics. */
     this.ignoredPrepends = 0
     this.eventCount = 0
+    /** Debug-only counters; `controller.diagnostics()` reads them. */
+    this.counters = {
+      rawDurableEvents: 0,
+      rawTransientRows: 0,
+      rawToolCalls: 0,
+      rawToolResults: 0,
+      matchedToolResults: 0,
+      unmatchedToolResults: 0,
+      malformedToolResults: 0,
+      rawTurnEndSeen: 0,
+      normalizedTurnEndSeen: 0,
+      bareSettleSeen: 0,
+      settlementsWithEntry: 0,
+      retirementsResolved: 0,
+      abandonmentsResolved: 0,
+      lateTurnRows: 0,
+      lateTurnEvents: 0,
+    }
   }
 
   issue(kind, detail) {
@@ -6263,7 +6496,44 @@ class SessionEventFeed {
      */
     this.settledTurns = new Set()
     this.highestTurn = null
+    this.attemptSteps = new Map()
+    this.settledAttemptIds = new Set()
+    this.pendingSettlements = []
     this.emit({ kind: 'window-rebaseline', timeMs: null })
+  }
+
+  /**
+   * Whether a durable settlement is available to retire one bare settle, and by
+   * which route it was resolved.
+   *
+   * Three routes, in order of strength. The attempt's own identity is the only
+   * proof that needs no coordinate; the outstanding-settlement queue is how a
+   * settlement — which names no `attemptId` — is matched to the attempt whose
+   * `(turn, step)` its transient rows declared; and a single queued settlement
+   * still covers an attempt whose rows this client never saw, because DSH
+   * retires one attempt per published settlement.
+   */
+  durableSettlementFor(attemptId) {
+    if (this.settledAttemptIds.has(attemptId)) return { route: 'attempt-identity', key: null, index: -1 }
+    if (this.pendingSettlements.length === 0) return null
+    const key = this.attemptSteps.get(attemptId)
+    if (key !== undefined) {
+      const index = this.pendingSettlements.findIndex(entry => entry.key === key)
+      if (index >= 0) return { route: 'pending-coordinate', key, index }
+      return null
+    }
+    /**
+     * The attempt's coordinate is unknown. Two or more outstanding settlements
+     * leave the pairing unprovable, and the settle is recorded as unresolved
+     * rather than attached to a guess.
+     */
+    if (this.pendingSettlements.length === 1) return { route: 'pending-unique', key: null, index: 0 }
+    return null
+  }
+
+  consumeSettlement(route) {
+    if (!Number.isFinite(route.index) || route.index < 0) return
+    this.pendingSettlements.splice(route.index, 1)
   }
 
   applySettlement(change) {
@@ -6274,10 +6544,25 @@ class SessionEventFeed {
       return
     }
     if (entry === undefined || entry === null) {
-      // The fold publishes a bare settle-assistant when the attempt ended
-      // without a durable settlement: transient abandonment, the only place
-      // `abandoned` can be derived client-side.
+      this.counters.bareSettleSeen += 1
+      const durable = this.durableSettlementFor(attemptId)
       if (this.openAttemptId === attemptId) this.openAttemptId = null
+      if (durable !== null) {
+        /**
+         * Normal successful retirement. The durable settlement was already fed
+         * from the `append` that published it, and the machine has already left
+         * the streaming state on that event; emitting a second attempt outcome
+         * here would overwrite a committed outcome with an abandonment and is
+         * exactly the 0.1.5-era defect this branch exists to prevent.
+         */
+        this.consumeSettlement(durable)
+        this.counters.retirementsResolved += 1
+        return
+      }
+      if (this.attemptSteps.get(attemptId) === undefined) {
+        this.issue(FEED_ISSUE.UNRESOLVED_SETTLEMENT, { attemptId, route: 'abandonment' })
+      }
+      this.counters.abandonmentsResolved += 1
       this.emit({
         kind: NORMALIZED_KIND.ATTEMPT_ABANDON,
         attemptId,
@@ -6289,6 +6574,7 @@ class SessionEventFeed {
       })
       return
     }
+    this.counters.settlementsWithEntry += 1
     const event = entry.event
     if (event && typeof event === 'object' && Number.isFinite(event.seq)) this.durableSeqs.add(event.seq)
     const normalized = normalizeDurableEvent(event)
@@ -6296,8 +6582,38 @@ class SessionEventFeed {
       this.issue(FEED_ISSUE.UNMATCHED_SETTLEMENT, normalized.kind)
       return
     }
+    /**
+     * A settlement delivered **with** its entry is DSH's immediate path:
+     * interrupted messages and non-surface `assistant/attempt` settlements. It
+     * is a durable settlement for this attempt, so a later bare settle for the
+     * same attempt is a retirement and not a second outcome.
+     */
+    this.registerDurableSettlement(normalized, { attemptId, queue: false })
     if (this.openAttemptId === attemptId) this.openAttemptId = null
     this.emit({ ...normalized, attemptId })
+  }
+
+  /**
+   * Record that one durable settlement landed.
+   *
+   * Two routes reach a durable settlement, and they differ in what they leave
+   * behind. A settlement delivered **with** its entry is DSH's immediate route
+   * (interrupted messages, `assistant/attempt`): it names the attempt, the
+   * transient rows are superseded at that instant, and nothing stays
+   * outstanding. A settlement appended as a plain durable row is a
+   * non-interrupted `assistant/message`, which the fold retains until the owning
+   * `step/end` is published and only then retires with a bare settle — that one
+   * is queued, and `queue: false` is what keeps an immediately-retired
+   * settlement from excusing a later attempt in the same step.
+   */
+  registerDurableSettlement(normalized, { attemptId = null, queue = true } = {}) {
+    if (attemptId !== null) this.settledAttemptIds.add(attemptId)
+    if (!queue) return
+    const key = stepKey(normalized.turn, normalized.step)
+    const retains = normalized.eventType === 'assistant/message' && normalized.interrupted !== true
+    if (retains && key !== null && !this.pendingSettlements.some(entry => entry.key === key)) {
+      this.pendingSettlements.push({ key, seq: normalized.seq ?? null })
+    }
   }
 
   /**
@@ -6360,6 +6676,7 @@ class SessionEventFeed {
    * hide a real wire behaviour, so it is counted as an issue.
    */
   dropLateRow(turn, attemptId) {
+    this.counters.lateTurnRows += 1
     this.issue(FEED_ISSUE.LATE_TURN_ROW, { turn, attemptId })
   }
 
@@ -6391,6 +6708,7 @@ class SessionEventFeed {
       return
     }
     this.transientRows.add(row)
+    this.counters.rawTransientRows += 1
     const normalized = normalizeLiveChunk(row)
     if (normalized.kind === NORMALIZED_KIND.IGNORED) {
       this.issue(FEED_ISSUE.MALFORMED_ENTRY, normalized.reason)
@@ -6413,6 +6731,13 @@ class SessionEventFeed {
         return
       }
     }
+    /**
+     * Tie the process-local attempt to its durable coordinate. The settlement
+     * event never names an `attemptId`, so this registration is the only way a
+     * later bare `settle-assistant` can be resolved against durable evidence.
+     */
+    const key = stepKey(normalized.turn, normalized.step)
+    if (key !== null) this.attemptSteps.set(normalized.attemptId, key)
     if (normalized.attemptId !== this.openAttemptId) {
       this.openAttemptId = normalized.attemptId
       this.emit({
@@ -6445,6 +6770,7 @@ class SessionEventFeed {
       return
     }
     this.durableSeqs.add(event.seq)
+    this.counters.rawDurableEvents += 1
     const normalized = normalizeDurableEvent(event)
     switch (normalized.kind) {
       case NORMALIZED_KIND.IGNORED:
@@ -6455,6 +6781,8 @@ class SessionEventFeed {
         this.emit(normalized)
         return
       case NORMALIZED_KIND.TURN_END:
+        this.counters.rawTurnEndSeen += 1
+        this.counters.normalizedTurnEndSeen += 1
         this.openTurn = null
         this.openAttemptId = null
         if (Number.isFinite(normalized.turn)) this.settledTurns.add(normalized.turn)
@@ -6462,15 +6790,45 @@ class SessionEventFeed {
         this.emit(normalized)
         return
       case NORMALIZED_KIND.ATTEMPT_SETTLE:
+        this.registerDurableSettlement(normalized)
         // No `settle-assistant` change here (fixture-style replay, or a fold
         // that appends the row): correlate to the open transient attempt when
         // one exists. Attempt identity is never invented when none does.
         this.emit({ ...normalized, attemptId: this.openAttemptId })
         if (this.openAttemptId !== null) this.openAttemptId = null
         return
+      case NORMALIZED_KIND.TOOL_CALL:
+        this.counters.rawToolCalls += 1
+        if (this.dropIfSettled(normalized)) return
+        this.emit(normalized)
+        return
+      case NORMALIZED_KIND.TOOL_RESULT:
+        this.counters.rawToolResults += 1
+        if (normalized.malformed === true) this.counters.malformedToolResults += 1
+        if (this.dropIfSettled(normalized)) return
+        this.emit(normalized)
+        return
       default:
+        /**
+         * `turn/end` is terminal for live presentation: a trailing `step/start`,
+         * `step/end`, retry or delta of a closed turn is counted and dropped so
+         * it cannot resurrect the turn the session already ended.
+         */
+        if (this.dropIfSettled(normalized)) return
         this.emit(normalized)
     }
+  }
+
+  /**
+   * Suppress a durable row belonging to a turn that has already been closed by
+   * `turn/end`. Returns whether the row was dropped.
+   */
+  dropIfSettled(normalized) {
+    if (!Number.isFinite(normalized.turn)) return false
+    if (!this.settledTurns.has(normalized.turn)) return false
+    this.counters.lateTurnEvents += 1
+    this.issue(FEED_ISSUE.LATE_TURN_EVENT, { turn: normalized.turn, kind: normalized.kind, seq: normalized.seq })
+    return true
   }
 }
 
@@ -7285,6 +7643,17 @@ const { LivePresenter } = __req("src/client/live/live-presenter.js")
 const { DEFAULT_PRESENTATION_REFRESH_MS } = __req("src/client/live/cadence.js")
 
 /**
+ * Controller-level diagnostics raised on the completion path.
+ *
+ * `TURN_END_WITHOUT_RECORD` is the one that matters: §25 requires a lost terminal
+ * boundary to be visible, because the alternative — a silent early return — is
+ * indistinguishable from a turn that never ended.
+ */
+const CONTROLLER_ISSUE = Object.freeze({
+  TURN_END_WITHOUT_RECORD: 'turn-end-without-record',
+})
+
+/**
  * Identity of a projected view: equal keys mean the picture is unchanged.
  *
  * The point of the key is the completed card. A settled turn's projection depends
@@ -7386,6 +7755,7 @@ function createController({
         state.presenter.apply({ type: 'reset' })
         state.currentRecord = null
         state.openAttemptId = null
+        state.observedTurnStart = null
         invalidate(state)
         return
       }
@@ -7415,6 +7785,14 @@ function createController({
          * exactly once per turn, when the turn is first adopted.
          */
         store.turnStartObserved(state.currentRecord, { timeMs: event.timeMs })
+        /**
+         * Only an *observed* boundary is kept: a recovered adoption carries
+         * `timeMs: null` and must not become the start a later reconstruction
+         * reports as measured.
+         */
+        if (!recovered && Number.isFinite(event.timeMs)) {
+          state.observedTurnStart = { turn: event.turn, timeMs: event.timeMs }
+        }
         state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs, recovered })
         /** A new turn supersedes the previous card in this same advance. */
         state.settledRead = undefined
@@ -7621,18 +7999,65 @@ function createController({
           state.unmatchedToolResults = (state.unmatchedToolResults ?? 0) + 1
           return
         }
+        state.counters.matchedToolResults += 1
         state.presenter.apply({ type: 'tool-end', turn: record.turn, timeMs: event.timeMs })
         log('tool end', sessionId, call.name, event.status)
         return
       }
 
       case NORMALIZED_KIND.TURN_END: {
-        const record = lookupRecord(state, event.turn)
-        if (record === null) return
+        state.counters.normalizedTurnEndSeen += 1
+        let record = lookupRecord(state, event.turn)
+        if (record === null) {
+          /**
+           * §25: a terminal boundary with no record to close is **not** silent.
+           *
+           * The record is normally present — `turn/start` opened it, or a
+           * transient row adopted the turn — but the published window is a live
+           * *tail*, so a client that attached after the turn began can receive
+           * `turn/end` for a turn whose opening row is outside the window and
+           * whose transient rows were already superseded.
+           *
+           * The turn genuinely ended: DSH published the authoritative boundary.
+           * The record is therefore reconstructed from that boundary rather than
+           * invented from the live display. Nothing is fabricated: `startMs`
+           * stays `null` when the turn's own `turn/start` was never observed,
+           * exactly as the mid-turn-attach path leaves it, so no elapsed time and
+           * no TTFT is measured from the reconstruction.
+           */
+          state.counters.turnEndLookupMiss += 1
+          state.counters.turnEndReconstructed += 1
+          const observed = state.observedTurnStart
+          const startMs = observed !== null && observed.turn === event.turn ? observed.timeMs : null
+          record = store.beginTurn({ sessionId, turn: event.turn, timeMs: startMs })
+          /**
+           * The machine must own the turn identity before it can settle it: a
+           * session whose machine is still `inactive` refuses a `turn-end`
+           * (`live-state.js` `wrongTurn`), which is correct for a stray boundary
+           * and wrong for this one. Opening the turn as a **recovered** boundary
+           * is the same construction the mid-turn attach uses — it is inferred,
+           * so it carries no start instant.
+           */
+          state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: null, recovered: true })
+          state.feedIssues = state.feedIssues ?? []
+          if (state.feedIssues.length < 100) {
+            state.feedIssues.push({
+              kind: CONTROLLER_ISSUE.TURN_END_WITHOUT_RECORD,
+              detail: { turn: event.turn, seq: event.seq },
+            })
+          }
+          log('turn/end without a record; reconstructed from the durable window', sessionId, event.turn)
+        } else {
+          state.counters.turnEndLookupHit += 1
+        }
+        state.counters.storeEndTurnCalled += 1
         const settled = store.endTurn(record, { timeMs: event.timeMs, status: event.status, statusNote: event.note })
+        state.counters.settledSnapshotBuilt += 1
         state.currentRecord = null
         state.openAttemptId = null
+        state.observedTurnStart = null
         state.presenter.apply({ type: 'turn-end', turn: event.turn, timeMs: event.timeMs, status: event.status })
+        state.counters.presenterTurnEndApplied += 1
         /**
          * The settled turn is now readable. Both the settled snapshot and the
          * settled machine are in place before the projection is invalidated, so
@@ -7684,6 +8109,32 @@ function createController({
         droppedDeltas: 0,
         unmatchedToolResults: 0,
         unknownEvents: 0,
+        /**
+         * The start instant of the open turn, as the durable `turn/start` row
+         * declared it, tagged with the turn it belongs to. Kept beside the record
+         * so a `turn/end` that arrives after its own opening row left the window
+         * can still close the turn with the observed boundary rather than a
+         * `null` one — and scoped by turn, because a start observed for one turn
+         * is not evidence about another.
+         */
+        observedTurnStart: null,
+        /**
+         * Completion-path counters. Debug-only and off by default: each is an
+         * integer incremented inside a handler that already runs, nothing is
+         * allocated per event, and they are read only by `diagnostics()`.
+         */
+        counters: {
+          normalizedTurnEndSeen: 0,
+          turnEndLookupHit: 0,
+          turnEndLookupMiss: 0,
+          turnEndReconstructed: 0,
+          storeEndTurnCalled: 0,
+          presenterTurnEndApplied: 0,
+          settledSnapshotBuilt: 0,
+          matchedToolResults: 0,
+        },
+        /** The kind of view the last `project()` returned. */
+        projectedViewKind: null,
       }
       state.feed = new SessionEventFeed({
         sessionId,
@@ -7766,19 +8217,51 @@ function createController({
 
       const view = state.presenter.project(snapshot, atMs, state.settledRead)
       state.viewCache = { key, sessionId, view }
+      state.projectedViewKind = view.kind
       return view
     },
 
-    /** Diagnostics for tests and debug tooling. */
+    /**
+     * Diagnostics for tests and debug tooling.
+     *
+     * Two groups, each counted where the fact happens rather than derived later:
+     * the feed's raw-vs-interpreted counters answer "did the wire deliver it", and
+     * the controller's answer "what did the plugin do with it". A terminal
+     * boundary lost on the completion path is then readable as the first counter
+     * that stayed at zero — `rawTurnEndSeen` for a wire that never published it,
+     * `turnEndLookupMiss` for a boundary that arrived with no record to close.
+     */
     diagnostics(sessionId) {
       const state = sessionsMap.get(sessionId)
       if (state === undefined) return null
+      const meter = store.liveBySession.get(sessionId)
+      const unresolved = meter === undefined ? 0 : meter.runningTools().length
       return {
         feedIssues: state.feedIssues ?? [],
         ignoredEvents: state.ignoredEvents ?? 0,
         droppedDeltas: state.droppedDeltas ?? 0,
         unmatchedToolResults: state.unmatchedToolResults ?? 0,
         unknownEvents: state.unknownEvents ?? 0,
+        projectedViewKind: state.projectedViewKind ?? null,
+        /**
+         * §37 keeps three quantities apart, and these are the live pair.
+         *
+         * `liveRunningTools` is `live.runningTools().length`: the calls the meter
+         * still holds unresolved. `livePresentedToolCount` is what the live pill
+         * would actually print — the same number, but only while the tool stage
+         * owns the view. They differ in exactly one situation, and it is the one
+         * §27 describes: a turn that ended with a call whose result was never
+         * observed. Presentation closes; the unresolved call stays on the record
+         * as incomplete evidence rather than being cleared or given an end time.
+         *
+         * Both are read from the meter's own state rather than from a snapshot: a
+         * snapshot evaluated at the wall clock *evicts* expired samples from the
+         * rolling window, so a diagnostic that took one would silently change the
+         * rate it was only supposed to observe.
+         */
+        liveRunningTools: unresolved,
+        livePresentedToolCount: meter !== undefined && meter.phase === 'tool' ? unresolved : 0,
+        counters: { ...(state.feed?.counters ?? {}), ...state.counters },
       }
     },
 
@@ -7802,7 +8285,7 @@ function createController({
   }
 }
 
-;Object.assign(__exports, { createController })
+;Object.assign(__exports, { CONTROLLER_ISSUE, createController })
 			},
 			"src/client/live/refresh.js": function (__exports) {
 /**

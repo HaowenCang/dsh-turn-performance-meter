@@ -2,7 +2,7 @@
  * DSH adapter layer.
  *
  * The single responsibility of this directory is to translate **verified DSH
- * 0.1.5-rc.2 raw evidence** into this project's normalized engine events. No
+ * 0.1.7-rc.2 raw evidence** into this project's normalized engine events. No
  * other layer may know about DSH field names:
  *
  *   src/core   pure statistics, zero `@deepseek-ai/*` imports
@@ -10,9 +10,17 @@
  *   src/host   in-memory store over normalized events
  *   src/client presentation only
  *
+ * ## Compatibility baseline (changed in Phase 7D)
+ *
+ * The target runtime is `@deepseek-ai/dsh` **0.1.7-rc.2**, public reference
+ * commit `477b4f420553e8a52c2fbccc464d7561b239c443`, as installed locally at
+ * `%APPDATA%/npm/node_modules/@deepseek-ai/dsh`. The 0.1.5-rc.2 line is **not**
+ * the contract any more. Where the two differ, the local install wins and the
+ * divergence is recorded in `docs/IMPLEMENTATION_LOG.md`; the field-by-field
+ * comparison lives in `docs/DSH_API_NOTES.md` §13.
+ *
  * Evidence locations for every shape handled here are recorded in
- * `docs/IMPLEMENTATION_LOG.md`. Where DSH's runtime and DSH's published notes
- * disagree, the installed runtime wins and the divergence is logged.
+ * `docs/IMPLEMENTATION_LOG.md`.
  */
 
 export {
@@ -39,6 +47,7 @@ export {
   ATTEMPT_OUTCOME,
   NORMALIZED_KIND,
   SETTLEMENT_KIND,
+  TOOL_RESULT_SHAPE,
   applyRetryOutcomes,
   attemptEvidenceQuality,
   attemptFromDecoded,

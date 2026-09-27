@@ -14,7 +14,7 @@
 
 import { isTokenDelta } from '../core/delta-accounting.js'
 import { heuristicTokenWeight, sampleFromChunk } from '../core/token-allocation.js'
-import { applyRetryOutcomes, settlementClassification, turnEndStatus } from './adapter.js'
+import { applyRetryOutcomes, settlementClassification, toolResultOutcome, turnEndStatus } from './adapter.js'
 import { decodeStreamRecords } from './stream-decoder.js'
 
 /**
@@ -161,9 +161,19 @@ export function reconstructFromDurable({ sessionId, turn, events = [], estimate 
         break
       }
       case 'tool/result': {
-        const callId = Array.isArray(data.message?.content) ? data.message.content[0]?.toolCallId ?? null : null
+        /**
+         * The call identity is read through the adapter's single contract site,
+         * never re-derived here. A second copy of this read is exactly how the
+         * 0.1.7 migration was nearly left half-done: the same
+         * `content[0].toolCallId` expression existed in this file and in
+         * `adapter.js`, and fixing only one of them would have left durable
+         * reconstruction silently unable to pair any 0.1.7 tool result while the
+         * live path paired all of them.
+         */
+        const outcome = toolResultOutcome(data)
+        const callId = outcome.callId
         if (callId === null) {
-          result.issues.push({ kind: 'tool-result-without-call-id', seq: event.seq })
+          result.issues.push({ kind: 'tool-result-without-call-id', seq: event.seq, callIdSource: outcome.callIdSource })
           break
         }
         const record = toolByCallId.get(callId)
@@ -171,10 +181,9 @@ export function reconstructFromDurable({ sessionId, turn, events = [], estimate 
           result.issues.push({ kind: 'unmatched-tool-result', seq: event.seq, callId })
           break
         }
-        const block = data.message.content[0]
         record.endMs = event.time
-        record.status = data.error !== undefined || block?.isError === true ? 'error' : 'ok'
-        record.errorName = data.error?.name ?? null
+        record.status = outcome.status
+        record.errorName = outcome.errorName
         break
       }
       default:

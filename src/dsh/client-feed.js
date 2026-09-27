@@ -22,9 +22,35 @@
  *   prepend          older history was paged in — irrelevant to the live tail,
  *                    and ingesting it after newer events would replay stale
  *                    turns out of order, so it is deliberately ignored
- *   settle-assistant attemptId + durable settlement entry atomically
- *                    superseding one attempt's transient rows (or a bare
- *                    abandonment when the entry is absent)
+ *   settle-assistant attemptId, with or without a durable settlement entry
+ *
+ * ## `settle-assistant` is ambiguous in DSH 0.1.7-rc.2, and this is where it is resolved
+ *
+ * The published contract calls the entry optional and the 0.1.5 reading treated
+ * "entry absent" as synonym for "attempt abandoned". The local 0.1.7 install
+ * disproves that reading. `ClientAssistantStream` publishes the same bare
+ * `settleAssistant(attemptId)` from **two** different situations
+ * (`dsh-api-session-controller/lib/client.js:1445-1539`, `:617-648`):
+ *
+ *   normal successful retirement
+ *     the attempt's durable `assistant/message` is published (non-interrupted),
+ *     a `retainedAttempt` is recorded, and when the matching `step/end` is
+ *     published the fold returns `{type:'publish', entry, retireAttemptId}` —
+ *     the session then appends the step end **and** calls
+ *     `eventSource.settleAssistant(attemptId)` with no entry, purely to discard
+ *     transient rows that a durable node already supersedes.
+ *
+ *   true abandonment
+ *     the attempt's `end` frame carries `outcome.kind === 'abandoned'` and no
+ *     settlement is pending; the fold returns `{type:'abandonment', attemptId}`
+ *     and the session calls the same bare `settleAssistant(attemptId)`.
+ *
+ * `entry === undefined` therefore proves nothing on its own. What distinguishes
+ * them is state the feed can hold from evidence it has already seen: whether a
+ * durable, non-interrupted settlement has already been observed for this
+ * attempt. A bare settle for an attempt that already has one is **transient
+ * retirement only** and emits no second attempt outcome; a bare settle for an
+ * attempt that has none is the abandonment path.
  */
 
 import { NORMALIZED_KIND, normalizeDurableEvent, normalizeLiveChunk } from './adapter.js'
@@ -45,7 +71,24 @@ export const FEED_ISSUE = Object.freeze({
    * a late frame is a real wire behaviour and silence would hide it.
    */
   LATE_TURN_ROW: 'transient-row-of-a-finished-turn',
+  /**
+   * A durable row of a turn this client has already closed. The same rule as
+   * `LATE_TURN_ROW`, on the durable plane: `turn/end` is terminal for live
+   * presentation, so a trailing tool boundary cannot re-open the turn.
+   */
+  LATE_TURN_EVENT: 'durable-event-of-a-finished-turn',
+  /**
+   * A bare `settle-assistant` naming an attempt the feed never saw open, with no
+   * durable settlement waiting to be retired. Read as abandonment, and recorded
+   * because the identity could not be resolved from held evidence.
+   */
+  UNRESOLVED_SETTLEMENT: 'bare-settlement-without-known-attempt',
 })
+
+/** The key under which an attempt's `(turn, step)` is registered. */
+function stepKey(turn, step) {
+  return Number.isFinite(turn) && Number.isFinite(step) ? `${turn}:${step}` : null
+}
 
 export class SessionEventFeed {
   /**
@@ -84,10 +127,52 @@ export class SessionEventFeed {
      * the feed has already moved past (`adoptTurn`).
      */
     this.highestTurn = null
+    /**
+     * Attempts whose transient rows arrived, with the `(turn, step)` those rows
+     * named. This is the only place an `attemptId` — a process-local identity
+     * that never enters the durable log — can be tied to a durable coordinate.
+     */
+    this.attemptSteps = new Map()
+    /**
+     * Attempts that received a durable settlement **directly** — the
+     * `settle-assistant` route that names the attempt and carries its entry
+     * (interrupted messages, `assistant/attempt`). A bare settle for one of
+     * these can only be a retirement.
+     */
+    this.settledAttemptIds = new Set()
+    /**
+     * Durable, non-interrupted `assistant/message` settlements published but not
+     * yet retired, oldest first, keyed by their durable `(turn, step)`.
+     *
+     * DSH's fold retains exactly one such settlement per step and releases it
+     * when that step's `step/end` is published, calling the bare
+     * `settleAssistant(attemptId)` at that moment. The queue is therefore both
+     * the proof that a retirement is happening and the budget that stops one
+     * settlement from excusing a *later* attempt in the same step.
+     */
+    this.pendingSettlements = []
     this.issues = []
     /** Counts of deliberately skipped window changes, for diagnostics. */
     this.ignoredPrepends = 0
     this.eventCount = 0
+    /** Debug-only counters; `controller.diagnostics()` reads them. */
+    this.counters = {
+      rawDurableEvents: 0,
+      rawTransientRows: 0,
+      rawToolCalls: 0,
+      rawToolResults: 0,
+      matchedToolResults: 0,
+      unmatchedToolResults: 0,
+      malformedToolResults: 0,
+      rawTurnEndSeen: 0,
+      normalizedTurnEndSeen: 0,
+      bareSettleSeen: 0,
+      settlementsWithEntry: 0,
+      retirementsResolved: 0,
+      abandonmentsResolved: 0,
+      lateTurnRows: 0,
+      lateTurnEvents: 0,
+    }
   }
 
   issue(kind, detail) {
@@ -164,7 +249,44 @@ export class SessionEventFeed {
      */
     this.settledTurns = new Set()
     this.highestTurn = null
+    this.attemptSteps = new Map()
+    this.settledAttemptIds = new Set()
+    this.pendingSettlements = []
     this.emit({ kind: 'window-rebaseline', timeMs: null })
+  }
+
+  /**
+   * Whether a durable settlement is available to retire one bare settle, and by
+   * which route it was resolved.
+   *
+   * Three routes, in order of strength. The attempt's own identity is the only
+   * proof that needs no coordinate; the outstanding-settlement queue is how a
+   * settlement — which names no `attemptId` — is matched to the attempt whose
+   * `(turn, step)` its transient rows declared; and a single queued settlement
+   * still covers an attempt whose rows this client never saw, because DSH
+   * retires one attempt per published settlement.
+   */
+  durableSettlementFor(attemptId) {
+    if (this.settledAttemptIds.has(attemptId)) return { route: 'attempt-identity', key: null, index: -1 }
+    if (this.pendingSettlements.length === 0) return null
+    const key = this.attemptSteps.get(attemptId)
+    if (key !== undefined) {
+      const index = this.pendingSettlements.findIndex(entry => entry.key === key)
+      if (index >= 0) return { route: 'pending-coordinate', key, index }
+      return null
+    }
+    /**
+     * The attempt's coordinate is unknown. Two or more outstanding settlements
+     * leave the pairing unprovable, and the settle is recorded as unresolved
+     * rather than attached to a guess.
+     */
+    if (this.pendingSettlements.length === 1) return { route: 'pending-unique', key: null, index: 0 }
+    return null
+  }
+
+  consumeSettlement(route) {
+    if (!Number.isFinite(route.index) || route.index < 0) return
+    this.pendingSettlements.splice(route.index, 1)
   }
 
   applySettlement(change) {
@@ -175,10 +297,25 @@ export class SessionEventFeed {
       return
     }
     if (entry === undefined || entry === null) {
-      // The fold publishes a bare settle-assistant when the attempt ended
-      // without a durable settlement: transient abandonment, the only place
-      // `abandoned` can be derived client-side.
+      this.counters.bareSettleSeen += 1
+      const durable = this.durableSettlementFor(attemptId)
       if (this.openAttemptId === attemptId) this.openAttemptId = null
+      if (durable !== null) {
+        /**
+         * Normal successful retirement. The durable settlement was already fed
+         * from the `append` that published it, and the machine has already left
+         * the streaming state on that event; emitting a second attempt outcome
+         * here would overwrite a committed outcome with an abandonment and is
+         * exactly the 0.1.5-era defect this branch exists to prevent.
+         */
+        this.consumeSettlement(durable)
+        this.counters.retirementsResolved += 1
+        return
+      }
+      if (this.attemptSteps.get(attemptId) === undefined) {
+        this.issue(FEED_ISSUE.UNRESOLVED_SETTLEMENT, { attemptId, route: 'abandonment' })
+      }
+      this.counters.abandonmentsResolved += 1
       this.emit({
         kind: NORMALIZED_KIND.ATTEMPT_ABANDON,
         attemptId,
@@ -190,6 +327,7 @@ export class SessionEventFeed {
       })
       return
     }
+    this.counters.settlementsWithEntry += 1
     const event = entry.event
     if (event && typeof event === 'object' && Number.isFinite(event.seq)) this.durableSeqs.add(event.seq)
     const normalized = normalizeDurableEvent(event)
@@ -197,8 +335,38 @@ export class SessionEventFeed {
       this.issue(FEED_ISSUE.UNMATCHED_SETTLEMENT, normalized.kind)
       return
     }
+    /**
+     * A settlement delivered **with** its entry is DSH's immediate path:
+     * interrupted messages and non-surface `assistant/attempt` settlements. It
+     * is a durable settlement for this attempt, so a later bare settle for the
+     * same attempt is a retirement and not a second outcome.
+     */
+    this.registerDurableSettlement(normalized, { attemptId, queue: false })
     if (this.openAttemptId === attemptId) this.openAttemptId = null
     this.emit({ ...normalized, attemptId })
+  }
+
+  /**
+   * Record that one durable settlement landed.
+   *
+   * Two routes reach a durable settlement, and they differ in what they leave
+   * behind. A settlement delivered **with** its entry is DSH's immediate route
+   * (interrupted messages, `assistant/attempt`): it names the attempt, the
+   * transient rows are superseded at that instant, and nothing stays
+   * outstanding. A settlement appended as a plain durable row is a
+   * non-interrupted `assistant/message`, which the fold retains until the owning
+   * `step/end` is published and only then retires with a bare settle — that one
+   * is queued, and `queue: false` is what keeps an immediately-retired
+   * settlement from excusing a later attempt in the same step.
+   */
+  registerDurableSettlement(normalized, { attemptId = null, queue = true } = {}) {
+    if (attemptId !== null) this.settledAttemptIds.add(attemptId)
+    if (!queue) return
+    const key = stepKey(normalized.turn, normalized.step)
+    const retains = normalized.eventType === 'assistant/message' && normalized.interrupted !== true
+    if (retains && key !== null && !this.pendingSettlements.some(entry => entry.key === key)) {
+      this.pendingSettlements.push({ key, seq: normalized.seq ?? null })
+    }
   }
 
   /**
@@ -261,6 +429,7 @@ export class SessionEventFeed {
    * hide a real wire behaviour, so it is counted as an issue.
    */
   dropLateRow(turn, attemptId) {
+    this.counters.lateTurnRows += 1
     this.issue(FEED_ISSUE.LATE_TURN_ROW, { turn, attemptId })
   }
 
@@ -292,6 +461,7 @@ export class SessionEventFeed {
       return
     }
     this.transientRows.add(row)
+    this.counters.rawTransientRows += 1
     const normalized = normalizeLiveChunk(row)
     if (normalized.kind === NORMALIZED_KIND.IGNORED) {
       this.issue(FEED_ISSUE.MALFORMED_ENTRY, normalized.reason)
@@ -314,6 +484,13 @@ export class SessionEventFeed {
         return
       }
     }
+    /**
+     * Tie the process-local attempt to its durable coordinate. The settlement
+     * event never names an `attemptId`, so this registration is the only way a
+     * later bare `settle-assistant` can be resolved against durable evidence.
+     */
+    const key = stepKey(normalized.turn, normalized.step)
+    if (key !== null) this.attemptSteps.set(normalized.attemptId, key)
     if (normalized.attemptId !== this.openAttemptId) {
       this.openAttemptId = normalized.attemptId
       this.emit({
@@ -346,6 +523,7 @@ export class SessionEventFeed {
       return
     }
     this.durableSeqs.add(event.seq)
+    this.counters.rawDurableEvents += 1
     const normalized = normalizeDurableEvent(event)
     switch (normalized.kind) {
       case NORMALIZED_KIND.IGNORED:
@@ -356,6 +534,8 @@ export class SessionEventFeed {
         this.emit(normalized)
         return
       case NORMALIZED_KIND.TURN_END:
+        this.counters.rawTurnEndSeen += 1
+        this.counters.normalizedTurnEndSeen += 1
         this.openTurn = null
         this.openAttemptId = null
         if (Number.isFinite(normalized.turn)) this.settledTurns.add(normalized.turn)
@@ -363,14 +543,44 @@ export class SessionEventFeed {
         this.emit(normalized)
         return
       case NORMALIZED_KIND.ATTEMPT_SETTLE:
+        this.registerDurableSettlement(normalized)
         // No `settle-assistant` change here (fixture-style replay, or a fold
         // that appends the row): correlate to the open transient attempt when
         // one exists. Attempt identity is never invented when none does.
         this.emit({ ...normalized, attemptId: this.openAttemptId })
         if (this.openAttemptId !== null) this.openAttemptId = null
         return
+      case NORMALIZED_KIND.TOOL_CALL:
+        this.counters.rawToolCalls += 1
+        if (this.dropIfSettled(normalized)) return
+        this.emit(normalized)
+        return
+      case NORMALIZED_KIND.TOOL_RESULT:
+        this.counters.rawToolResults += 1
+        if (normalized.malformed === true) this.counters.malformedToolResults += 1
+        if (this.dropIfSettled(normalized)) return
+        this.emit(normalized)
+        return
       default:
+        /**
+         * `turn/end` is terminal for live presentation: a trailing `step/start`,
+         * `step/end`, retry or delta of a closed turn is counted and dropped so
+         * it cannot resurrect the turn the session already ended.
+         */
+        if (this.dropIfSettled(normalized)) return
         this.emit(normalized)
     }
+  }
+
+  /**
+   * Suppress a durable row belonging to a turn that has already been closed by
+   * `turn/end`. Returns whether the row was dropped.
+   */
+  dropIfSettled(normalized) {
+    if (!Number.isFinite(normalized.turn)) return false
+    if (!this.settledTurns.has(normalized.turn)) return false
+    this.counters.lateTurnEvents += 1
+    this.issue(FEED_ISSUE.LATE_TURN_EVENT, { turn: normalized.turn, kind: normalized.kind, seq: normalized.seq })
+    return true
   }
 }

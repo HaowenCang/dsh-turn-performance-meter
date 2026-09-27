@@ -30,6 +30,17 @@ import { LivePresenter } from './live-presenter.js'
 import { DEFAULT_PRESENTATION_REFRESH_MS } from './cadence.js'
 
 /**
+ * Controller-level diagnostics raised on the completion path.
+ *
+ * `TURN_END_WITHOUT_RECORD` is the one that matters: §25 requires a lost terminal
+ * boundary to be visible, because the alternative — a silent early return — is
+ * indistinguishable from a turn that never ended.
+ */
+export const CONTROLLER_ISSUE = Object.freeze({
+  TURN_END_WITHOUT_RECORD: 'turn-end-without-record',
+})
+
+/**
  * Identity of a projected view: equal keys mean the picture is unchanged.
  *
  * The point of the key is the completed card. A settled turn's projection depends
@@ -131,6 +142,7 @@ export function createController({
         state.presenter.apply({ type: 'reset' })
         state.currentRecord = null
         state.openAttemptId = null
+        state.observedTurnStart = null
         invalidate(state)
         return
       }
@@ -160,6 +172,14 @@ export function createController({
          * exactly once per turn, when the turn is first adopted.
          */
         store.turnStartObserved(state.currentRecord, { timeMs: event.timeMs })
+        /**
+         * Only an *observed* boundary is kept: a recovered adoption carries
+         * `timeMs: null` and must not become the start a later reconstruction
+         * reports as measured.
+         */
+        if (!recovered && Number.isFinite(event.timeMs)) {
+          state.observedTurnStart = { turn: event.turn, timeMs: event.timeMs }
+        }
         state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: event.timeMs, recovered })
         /** A new turn supersedes the previous card in this same advance. */
         state.settledRead = undefined
@@ -366,18 +386,65 @@ export function createController({
           state.unmatchedToolResults = (state.unmatchedToolResults ?? 0) + 1
           return
         }
+        state.counters.matchedToolResults += 1
         state.presenter.apply({ type: 'tool-end', turn: record.turn, timeMs: event.timeMs })
         log('tool end', sessionId, call.name, event.status)
         return
       }
 
       case NORMALIZED_KIND.TURN_END: {
-        const record = lookupRecord(state, event.turn)
-        if (record === null) return
+        state.counters.normalizedTurnEndSeen += 1
+        let record = lookupRecord(state, event.turn)
+        if (record === null) {
+          /**
+           * §25: a terminal boundary with no record to close is **not** silent.
+           *
+           * The record is normally present — `turn/start` opened it, or a
+           * transient row adopted the turn — but the published window is a live
+           * *tail*, so a client that attached after the turn began can receive
+           * `turn/end` for a turn whose opening row is outside the window and
+           * whose transient rows were already superseded.
+           *
+           * The turn genuinely ended: DSH published the authoritative boundary.
+           * The record is therefore reconstructed from that boundary rather than
+           * invented from the live display. Nothing is fabricated: `startMs`
+           * stays `null` when the turn's own `turn/start` was never observed,
+           * exactly as the mid-turn-attach path leaves it, so no elapsed time and
+           * no TTFT is measured from the reconstruction.
+           */
+          state.counters.turnEndLookupMiss += 1
+          state.counters.turnEndReconstructed += 1
+          const observed = state.observedTurnStart
+          const startMs = observed !== null && observed.turn === event.turn ? observed.timeMs : null
+          record = store.beginTurn({ sessionId, turn: event.turn, timeMs: startMs })
+          /**
+           * The machine must own the turn identity before it can settle it: a
+           * session whose machine is still `inactive` refuses a `turn-end`
+           * (`live-state.js` `wrongTurn`), which is correct for a stray boundary
+           * and wrong for this one. Opening the turn as a **recovered** boundary
+           * is the same construction the mid-turn attach uses — it is inferred,
+           * so it carries no start instant.
+           */
+          state.presenter.apply({ type: 'turn-start', turn: event.turn, timeMs: null, recovered: true })
+          state.feedIssues = state.feedIssues ?? []
+          if (state.feedIssues.length < 100) {
+            state.feedIssues.push({
+              kind: CONTROLLER_ISSUE.TURN_END_WITHOUT_RECORD,
+              detail: { turn: event.turn, seq: event.seq },
+            })
+          }
+          log('turn/end without a record; reconstructed from the durable window', sessionId, event.turn)
+        } else {
+          state.counters.turnEndLookupHit += 1
+        }
+        state.counters.storeEndTurnCalled += 1
         const settled = store.endTurn(record, { timeMs: event.timeMs, status: event.status, statusNote: event.note })
+        state.counters.settledSnapshotBuilt += 1
         state.currentRecord = null
         state.openAttemptId = null
+        state.observedTurnStart = null
         state.presenter.apply({ type: 'turn-end', turn: event.turn, timeMs: event.timeMs, status: event.status })
+        state.counters.presenterTurnEndApplied += 1
         /**
          * The settled turn is now readable. Both the settled snapshot and the
          * settled machine are in place before the projection is invalidated, so
@@ -429,6 +496,32 @@ export function createController({
         droppedDeltas: 0,
         unmatchedToolResults: 0,
         unknownEvents: 0,
+        /**
+         * The start instant of the open turn, as the durable `turn/start` row
+         * declared it, tagged with the turn it belongs to. Kept beside the record
+         * so a `turn/end` that arrives after its own opening row left the window
+         * can still close the turn with the observed boundary rather than a
+         * `null` one — and scoped by turn, because a start observed for one turn
+         * is not evidence about another.
+         */
+        observedTurnStart: null,
+        /**
+         * Completion-path counters. Debug-only and off by default: each is an
+         * integer incremented inside a handler that already runs, nothing is
+         * allocated per event, and they are read only by `diagnostics()`.
+         */
+        counters: {
+          normalizedTurnEndSeen: 0,
+          turnEndLookupHit: 0,
+          turnEndLookupMiss: 0,
+          turnEndReconstructed: 0,
+          storeEndTurnCalled: 0,
+          presenterTurnEndApplied: 0,
+          settledSnapshotBuilt: 0,
+          matchedToolResults: 0,
+        },
+        /** The kind of view the last `project()` returned. */
+        projectedViewKind: null,
       }
       state.feed = new SessionEventFeed({
         sessionId,
@@ -511,19 +604,51 @@ export function createController({
 
       const view = state.presenter.project(snapshot, atMs, state.settledRead)
       state.viewCache = { key, sessionId, view }
+      state.projectedViewKind = view.kind
       return view
     },
 
-    /** Diagnostics for tests and debug tooling. */
+    /**
+     * Diagnostics for tests and debug tooling.
+     *
+     * Two groups, each counted where the fact happens rather than derived later:
+     * the feed's raw-vs-interpreted counters answer "did the wire deliver it", and
+     * the controller's answer "what did the plugin do with it". A terminal
+     * boundary lost on the completion path is then readable as the first counter
+     * that stayed at zero — `rawTurnEndSeen` for a wire that never published it,
+     * `turnEndLookupMiss` for a boundary that arrived with no record to close.
+     */
     diagnostics(sessionId) {
       const state = sessionsMap.get(sessionId)
       if (state === undefined) return null
+      const meter = store.liveBySession.get(sessionId)
+      const unresolved = meter === undefined ? 0 : meter.runningTools().length
       return {
         feedIssues: state.feedIssues ?? [],
         ignoredEvents: state.ignoredEvents ?? 0,
         droppedDeltas: state.droppedDeltas ?? 0,
         unmatchedToolResults: state.unmatchedToolResults ?? 0,
         unknownEvents: state.unknownEvents ?? 0,
+        projectedViewKind: state.projectedViewKind ?? null,
+        /**
+         * §37 keeps three quantities apart, and these are the live pair.
+         *
+         * `liveRunningTools` is `live.runningTools().length`: the calls the meter
+         * still holds unresolved. `livePresentedToolCount` is what the live pill
+         * would actually print — the same number, but only while the tool stage
+         * owns the view. They differ in exactly one situation, and it is the one
+         * §27 describes: a turn that ended with a call whose result was never
+         * observed. Presentation closes; the unresolved call stays on the record
+         * as incomplete evidence rather than being cleared or given an end time.
+         *
+         * Both are read from the meter's own state rather than from a snapshot: a
+         * snapshot evaluated at the wall clock *evicts* expired samples from the
+         * rolling window, so a diagnostic that took one would silently change the
+         * rate it was only supposed to observe.
+         */
+        liveRunningTools: unresolved,
+        livePresentedToolCount: meter !== undefined && meter.phase === 'tool' ? unresolved : 0,
+        counters: { ...(state.feed?.counters ?? {}), ...state.counters },
       }
     },
 

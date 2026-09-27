@@ -154,11 +154,38 @@ export function transientEndClassification(outcome) {
   }
 }
 
+/**
+ * Every `TurnEndReason` variant of the local 0.1.7-rc.2 install, mapped to the
+ * card status.
+ *
+ * Audited field by field against
+ * `dsh-session/lib/types/types.d.ts:165-208`, which declares exactly seven
+ * variants: `completed`, `aborted{reason: TurnEndCancelCause}`, `blocked`,
+ * `error{error: LlmFailure}`, `max-tokens`, `interrupted` and `forked`.
+ *
+ *   completed     the turn finished normally
+ *   max-tokens    at least one step reached its output ceiling; the turn did
+ *                 finish, so it is `completed` **with** a truncation note
+ *   aborted       a cancellation request interrupted the live turn; `reason` is
+ *                 `AgentCancelCause` (`user` | `parent` | `hook` | `disposed`)
+ *                 or `{kind:'legacy'}` for an import whose coarse record carried
+ *                 no cause
+ *   interrupted   a crash-orphaned turn closed after the fact; the loop never
+ *                 emits this marker live
+ *   forked        fork-seed construction closed a turn that was **still open**
+ *                 at the fork boundary in the source session. Only fork seeds
+ *                 carry it and the loop never emits it, but the turn genuinely
+ *                 did not finish, so it is an interruption and never a
+ *                 completion
+ *   blocked       the turn could not proceed
+ *   error         the turn failed; `error` is a structured `LlmFailure`
+ */
 const STATUS_BY_TURN_END = Object.freeze({
   completed: 'completed',
   'max-tokens': 'completed',
   aborted: 'interrupted',
   interrupted: 'interrupted',
+  forked: 'interrupted',
   blocked: 'errored',
   error: 'errored',
 })
@@ -168,7 +195,9 @@ const STATUS_BY_TURN_END = Object.freeze({
  * frozen in `docs/IMPLEMENTATION_LOG.md`.
  *
  * An unknown future reason kind must not be reported as a known cause: it maps
- * to `errored` with `known: false`, and the caller surfaces the raw reason.
+ * to `errored` with `known: false`, and the caller surfaces the raw reason. The
+ * turn still closes — a turn is never left live merely because its reason kind
+ * is unrecognized.
  */
 export function turnEndStatus(reason) {
   const kind = reason && typeof reason === 'object' ? reason.kind : undefined
@@ -185,14 +214,98 @@ export function turnEndStatus(reason) {
   if (kind === 'interrupted') {
     return { status, known: true, note: 'turn was closed after a crash' }
   }
+  if (kind === 'forked') {
+    return { status, known: true, note: 'turn was still open at a fork boundary' }
+  }
   return { status, known: true, note: null }
 }
 
-/** Timestamps on a `tool/result` payload do not exist; the envelope carries them. */
-function toolResultOutcome(data) {
-  const block = Array.isArray(data?.message?.content) ? data.message.content[0] : undefined
-  if (data?.error !== undefined || block?.isError === true) return 'error'
-  return 'ok'
+/**
+ * Where a `tool/result`'s call identity was read from.
+ *
+ * The 0.1.7 contract puts the identity on the message; the recorded 0.1.5
+ * fixtures put it on the first content block. The two are separated by a
+ * **structural** discriminator (`message.role`), so the legacy read is
+ * unreachable for a 0.1.7 tool-role message and every normalization states
+ * which shape it used.
+ */
+export const TOOL_RESULT_SHAPE = Object.freeze({
+  /** 0.1.7: a first-class tool-role message owning `toolCallId` and `isError`. */
+  TOOL_MESSAGE: 'tool-message',
+  /** Recorded 0.1.5 form: a `user`-role message whose first content block owned them. */
+  LEGACY_CONTENT_BLOCK: 'legacy-content-block',
+  /** Neither location carried an identity. The result is unusable. */
+  MALFORMED: 'malformed',
+})
+
+/**
+ * Read one tool result's call identity and failure flag.
+ *
+ * 0.1.7 target contract, verified against the local install:
+ *
+ *   `dsh-llm/lib/types/message.d.ts:152-160`
+ *     `ToolResultMessage` = `{ role: 'tool', toolCallId, isError? , content, source, id }`
+ *   `dsh-session/lib/types/types.d.ts:374-388`
+ *     `'tool/result'` = `{ turn, step, message: ToolResultMessage, error?, meta? }`
+ *
+ * so the identity is `data.message.toolCallId`, the failure flag is
+ * `data.message.isError`, and the content blocks are result **content** with no
+ * call identity in them at all. `content[0].toolCallId` is therefore never read
+ * for a tool-role message — not as a fallback, and not when the message field is
+ * missing, because §6 requires a malformed result to fail closed rather than be
+ * repaired by position.
+ *
+ * The legacy form is the shape actually present in `fixtures/dsh-turns/*`
+ * (recorded on 0.1.5-rc.2, where the result was a `user`-role message carrying
+ * `content[0].{toolCallId,isError}`). It is decoded — the metric-math
+ * regressions replay those bytes — but it is labelled, and a message that
+ * declares `role: 'tool'` can never reach it.
+ */
+function toolResultIdentity(message) {
+  if (message === null || typeof message !== 'object') {
+    return { callId: null, callIdSource: TOOL_RESULT_SHAPE.MALFORMED, status: 'ok', errorName: null, errorCode: null }
+  }
+  if (message.role === 'tool') {
+    const callId = typeof message.toolCallId === 'string' && message.toolCallId !== '' ? message.toolCallId : null
+    return {
+      callId,
+      callIdSource: callId === null ? TOOL_RESULT_SHAPE.MALFORMED : TOOL_RESULT_SHAPE.TOOL_MESSAGE,
+      status: message.isError === true ? 'error' : 'ok',
+      errorName: null,
+      errorCode: null,
+    }
+  }
+  const block = Array.isArray(message.content) ? message.content[0] : undefined
+  const callId = typeof block?.toolCallId === 'string' && block.toolCallId !== '' ? block.toolCallId : null
+  return {
+    callId,
+    callIdSource: callId === null ? TOOL_RESULT_SHAPE.MALFORMED : TOOL_RESULT_SHAPE.LEGACY_CONTENT_BLOCK,
+    status: block?.isError === true ? 'error' : 'ok',
+    errorName: null,
+    errorCode: null,
+  }
+}
+
+/**
+ * Timestamps on a `tool/result` payload do not exist; the envelope carries them.
+ * The structured `data.error` identity is on the event, beside the message, and
+ * is allowed only when the message is flagged failed
+ * (`dsh-session/lib/types/types.d.ts:378-386`).
+ *
+ * Exported because it is the **single** contract site for reading a tool result.
+ * Every consumer — the live adapter and the durable reconstruction path alike —
+ * goes through it, so the identity location cannot drift between them.
+ */
+export function toolResultOutcome(data) {
+  const identity = toolResultIdentity(data?.message)
+  const error = data?.error
+  const hasError = error !== null && typeof error === 'object'
+  return {
+    ...identity,
+    status: hasError || identity.status === 'error' ? 'error' : 'ok',
+    errorName: hasError && typeof error.name === 'string' ? error.name : identity.errorName,
+    errorCode: hasError && typeof error.code === 'string' ? error.code : identity.errorCode,
+  }
 }
 
 /** Read the usage carrier from a settlement, preferring the durable one. */
@@ -291,16 +404,27 @@ export function normalizeDurableEvent(event) {
          */
         argumentsRaw: typeof data.arguments === 'string' ? data.arguments : null,
       }
-    case 'tool/result':
+    case 'tool/result': {
+      const outcome = toolResultOutcome(data)
       return {
         kind: NORMALIZED_KIND.TOOL_RESULT,
         ...common,
         turn: data.turn,
         step: data.step,
-        callId: Array.isArray(data.message?.content) ? data.message.content[0]?.toolCallId ?? null : null,
-        status: toolResultOutcome(data),
-        errorName: data.error?.name ?? null,
+        callId: outcome.callId,
+        /** Which shape supplied the identity; `malformed` means none did. */
+        callIdSource: outcome.callIdSource,
+        /**
+         * The result cannot be paired. §6: fail closed — no guessing the most
+         * recent call, no matching by name or by step, no closing every running
+         * call. The caller decides what to record, and records that it happened.
+         */
+        malformed: outcome.callId === null,
+        status: outcome.status,
+        errorName: outcome.errorName,
+        errorCode: outcome.errorCode,
       }
+    }
     default:
       return { kind: NORMALIZED_KIND.IGNORED, reason: event.type, ...common }
   }
