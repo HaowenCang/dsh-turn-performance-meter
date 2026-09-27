@@ -381,6 +381,90 @@ into its own guard. React comes from the browser module table seed; `window.Reac
 duplicate-instance error appears in the console. The completed card owns no timer at all, which the browser run
 confirms (`scheduler.ticking === false`, `timerCount === 0` with a settled card on screen).
 
+### Phase 7D — tool-role results, window changes and completion evidence
+
+Appended after §12, which remains the closing statement of the document's scope. The plugin targets DSH `0.1.7-rc.2`,
+and this subsection records the contracts that version changed underneath the adapter and the client feed. The
+field-by-field declarations are in `docs/DSH_API_NOTES.md` §13.
+
+#### Call identity moved onto the message
+
+`tool/result` now carries a first-class `ToolResultMessage` (`role: 'tool'`, `toolCallId`, optional `isError`), so the
+call identity is read from `data.message.toolCallId` and the failure flag from `data.message.isError`. The legacy
+0.1.5 nested shape — a `user`-role message whose first content block owned the same two fields — remains a **labelled
+decode path** for the recorded 0.1.5 captures, tagged `TOOL_RESULT_SHAPE.LEGACY_CONTENT_BLOCK`, and it is unreachable
+for a message that declares `role: 'tool'`: the discriminator is the role, not a field probe, so a 0.1.7 message can
+never fall back to reading its content blocks. A result whose identity cannot be read from the location its own role
+declares is `MALFORMED` and fails closed — it closes no call, and it is counted rather than repaired by position. The
+structured `data.error` is allowed only when the message is flagged failed; `src/dsh/adapter.js` (`toolResultIdentity`,
+`toolResultOutcome`) is the single place this is decided, so a tool result can never be paired by arrival order.
+
+#### Window changes
+
+The feed consumes the three entry-bearing change kinds and the settlement kind as four distinct facts:
+
+- `append` — the new entries are processed in order; dedupe is by durable `seq` and, for transient rows, by row
+  identity.
+- `prepend` — older history, outside the live tail and out of chronological order relative to what has already been
+  consumed. It is counted (`ignoredPrepends`) and never guessed at.
+- `replace` — a rebaseline. The feed clears every piece of generation state it owns — durable sequences, transient row
+  identity, the open turn and attempt, the adoption guards, the attempt-to-coordinate map, the settled-attempt set and
+  the outstanding-settlement queue — before replaying the replacement window, and the store resets the same session's
+  evidence (§4).
+- `settle-assistant` — see below.
+
+#### The settle-assistant disambiguation
+
+A bare `settleAssistant(attemptId)` is issued by DSH for two different situations: the normal retirement that follows
+the publication of the retired attempt's `step/end`, and a true abandonment. The absence of an entry does not separate
+them (`docs/DSH_API_NOTES.md` §13.4), so the feed resolves the bare call from **held evidence** instead of from the
+wire form:
+
+- `settledAttemptIds` — the attempts that received a durable settlement *directly*, through a `settle-assistant` change
+  that named the attempt and carried its entry. A bare settle naming one of these can only be a retirement, because the
+  retirement carries no entry.
+- `pendingSettlements` — a queue of durable, non-interrupted `assistant/message` settlements that have been published
+  but not yet retired, oldest first, each keyed by the `(turn, step)` its transient rows declared. The queue is both the
+  proof that a retirement is happening and the **budget** that stops one settlement from excusing a later attempt in the
+  same step; one bare call consumes exactly one entry.
+
+The routes are tried in order of strength — the attempt's own identity, then its recorded coordinate, then a single
+unmatched outstanding settlement — and a bare call that no route covers is recorded as an unresolved settlement and
+emitted as an abandonment. The failure this prevents is specific: treating every bare settle as an abandonment
+overwrites a committed outcome with an abandonment claim, and the 0.1.5-era reading did exactly that. The bare settle
+is a signal that the attempt's transient rows are now redundant, not a claim about how the attempt ended.
+
+#### Diagnostics, turn-end terminality and reconstruction
+
+`controller.diagnostics(sessionId)` is the single read surface for this path and publishes two counter groups, each
+incremented where the fact happens rather than derived later: the feed's raw-versus-accepted counters
+(`rawDurableEvents`, `rawTransientRows`, `rawToolCalls`, `rawToolResults`, `matchedToolResults`,
+`unmatchedToolResults`, `malformedToolResults`, `rawTurnEndSeen`, `normalizedTurnEndSeen`, `bareSettleSeen`,
+`settlementsWithEntry`, `retirementsResolved`, `abandonmentsResolved`, `lateTurnRows`, `lateTurnEvents`) and the
+controller's completion-path counters (`normalizedTurnEndSeen`, `turnEndLookupHit`, `turnEndLookupMiss`,
+`turnEndReconstructed`, `storeEndTurnCalled`, `presenterTurnEndApplied`, `settledSnapshotBuilt`, `ignoredAfterSettled`,
+`matchedToolResults`). A terminal boundary that went missing is then readable as the first counter that stayed at zero,
+and `rawTurnEndSeen` discriminates "the wire never delivered the boundary" from "the plugin discarded it".
+
+A `turn/end` is terminal and is never refused for want of a record. The record is normally present, but the published
+window is a live tail, so a client that attached after the turn began can receive `turn/end` for a turn whose opening
+row is outside the window and whose transient rows were already superseded. That case is counted
+(`turnEndLookupMiss`, `turnEndReconstructed`), recorded as a `turn-end-without-record` issue, and repaired by
+reconstruction from the durable window: `startMs` is taken from the window's `turn/start` when it was observed and
+stays `null` otherwise, the machine is opened as a **recovered** boundary so it can own the turn identity and settle
+it, and the turn is closed with the reason the event carries. Nothing is invented — the reconstruction uses the
+authoritative boundary the host published, and the evidence it never observed stays absent rather than inferred from
+the live display. Late durable rows of a turn that already settled are dropped and counted rather than allowed to
+reopen it, so a completed card cannot be resurrected by evidence that arrives after its boundary.
+
+The feed's diagnostics also keep the three tool quantities separate, because a single counter cannot express the
+distinction the compact pill needs: `historicalTools` is what the settled turn record holds, `liveRunningTools` is the
+live meter's own running set, and `livePresentedToolCount` is the same set gated on the tool stage owning the view. The
+two live counters are read from the meter's own running set rather than from a snapshot taken at the wall clock, because
+evaluating a snapshot evicts expired samples from the rolling window and would silently change the rate the diagnostic
+was only supposed to observe. The gate matters for the same reason: a turn that ended with a call whose result was
+never observed closes its presentation while the unresolved call stays on the record as incomplete evidence.
+
 ## 12. Non-goals
 
 This project is not:

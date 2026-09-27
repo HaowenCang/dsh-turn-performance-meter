@@ -1,9 +1,12 @@
 # DSH turn fixtures
 
-Recorded evidence for the DSH adapter tests. Every file under `dsh-turns/` is one
-real turn captured from the local DSH `0.1.5-rc.2` host by
-`dev/fixture-recorder`; every file under `derived/` is a deterministic mutation
-of one of those and declares its provenance.
+Recorded evidence for the DSH adapter tests. Every file under `dsh-0.1.7/` is one
+real turn captured from the local DSH **`0.1.7-rc.2`** host, which is the
+compatibility target of this project. Every file under `dsh-turns/` is one real
+turn captured from the earlier **`0.1.5-rc.2`** host and is **legacy evidence**:
+see [Legacy corpus](#legacy-corpus). Every file under `derived/` is a
+deterministic mutation of one of the legacy recordings and declares its
+provenance.
 
 Nothing here is hand-written, and no fixture is ever edited to make a test pass —
 if a test needs a shape the recordings do not contain, the shape is produced by
@@ -11,6 +14,44 @@ if a test needs a shape the recordings do not contain, the shape is produced by
 inside the test. The one transformation ever applied to recorded bytes is the
 public-release redaction described under [Sanitization](#sanitization), which is
 deterministic, length-preserving, separately scripted and independently verified.
+
+## Current-target corpus (`dsh-0.1.7/`)
+
+| Fixture | Route | Attempts | Tools | What it proves |
+|---|---|---|---|---|
+| `t01-sequential-tools` | `command-goat` / `deepseek/deepseek-v4.1-flash` | 3 | `pwsh` ×2 | The 0.1.7 **first-class tool-role result message**: `message.toolCallId` is the call identity and the content blocks carry none; `message.isError` is the failure flag; two strictly sequential calls, never more than one running; three transient attempts each with a `start` and an `end` frame; and a normally completed turn whose `turn/end` row is present with reason kind `completed` |
+
+A fixture in this corpus declares `dshVersion: "0.1.7-rc.2"` and
+`captureFamily: "0.1.7"`, and `test/helpers/fixtures.js` refuses to load it as
+target evidence otherwise. Each one also records, in its own `summary`, which
+location supplied the tool-result identity in the bytes it captured:
+
+```jsonc
+"toolResultShape": { "role": "tool", "identityLocation": "message.toolCallId", "isErrorLocation": "message.isError" }
+```
+
+so the shape a capture proves is visible in the fixture rather than asserted only
+by a test.
+
+## Legacy corpus (`dsh-turns/`)
+
+These eight captures were recorded on `0.1.5-rc.2` and are kept because they are
+still real evidence for the things that did not change between the two lines:
+
+- pure metric arithmetic — token allocation, phase attribution, curve geometry;
+- decoder robustness against real streams, including a 1307-delta capture;
+- a real user interruption, a tool-only turn, and a failing shell command;
+- the history of what was verified when.
+
+They may **not** be the only proof of anything the 0.1.7 line changed. Their
+`tool/result` rows are `role: "user"` messages carrying
+`content[0].toolCallId` and `content[0].isError`, a shape the 0.1.7 host does not
+produce at all; their `settle-assistant` interpretation predates the 0.1.7
+retirement path; and their turn-completion lifecycle was recorded before the
+`forked` reason kind existed. The adapter decodes the legacy nesting so the
+arithmetic regressions keep running against recorded bytes, but that path is
+labelled (`TOOL_RESULT_SHAPE.LEGACY_CONTENT_BLOCK`) and is structurally
+unreachable for a message that declares `role: "tool"`.
 
 ## Recorded scenarios
 

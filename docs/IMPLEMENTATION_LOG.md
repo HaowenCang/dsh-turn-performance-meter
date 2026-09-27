@@ -2620,3 +2620,248 @@ integrals in 32 anchored attempts** — the patched `t4` fixture (70 against 144
 expectations above. `test/curve-source.test.js` carries the general sweep: 50 anchored attempts, 0 short integrals, 22
 curve/card comparisons, 0 mismatches. `MAX_RENDER_POINTS_TOTAL`, `SLOT_ORDER`, the 50 ms live cadence, the axis
 endpoint rule, the stream-order tie-break and the coverage vocabulary of Phase 7C.1 are all untouched.
+
+## Phase 7D — DSH 0.1.7-rc.2 migration (2026-09-27)
+
+The local host moved from `0.1.5-rc.2` to `0.1.7-rc.2`, and the plugin's live meter was observed accumulating strictly
+sequential tool calls as though they were concurrent: on a five-call sequential turn the pill printed `pwsh +3` and
+`pwsh +4`, and the reported field observation of the same class reaches `pwsh +192`. Everything below is the evidence
+for what that was, what the new host actually declares, and what was changed.
+
+The normative target from this phase onward is `0.1.7-rc.2`. Sections above that record verification "on
+0.1.5-rc.2" remain historically accurate and are deliberately not rewritten; they document what was measured on the
+host that was installed at the time. The field-by-field declarations this phase is built on are recorded in
+`docs/DSH_API_NOTES.md` §13.
+
+### 1. Runtime baseline and preflight proof
+
+| Fact | Value |
+|---|---|
+| `dsh --version` | `0.1.7-rc.2` |
+| Executable | `C:\Users\20659\AppData\Roaming\npm\dsh.cmd` |
+| Active process | `"D:\softwares\nodejs\node.exe" C:\Users\20659\AppData\Roaming\npm/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open`, PID 42248 |
+| Profile | `web` |
+| Port | 50001 |
+| Public reference commit | `477b4f420553e8a52c2fbccc464d7561b239c443` |
+
+The in-process measurements below were taken pure, with no browser, so the parser could be isolated from presentation
+timing. The baseline is SHA `1f97cfa5bad329e54bdf69debbb40611935827ae`, `648 tests / 648 pass`.
+
+| Measurement | Baseline `1f97cfa` | After the fix |
+|---|---|---|
+| max `runningToolCount` over 100 strictly sequential `pwsh` calls | 100 | 1 |
+| labels observed | up to `pwsh +99` (100 distinct) | `pwsh` |
+| unmatched tool results | 100 | 0 |
+| tools still running at turn end | 100 | 0 |
+
+The baseline column is the whole defect: 100 calls that never overlapped were held as 100 concurrent tools, every
+result failed to pair, and the turn closed with nothing resolved. The historical count of 100 was correct throughout —
+what was wrong was the running set.
+
+### 2. BLOCKER A — the 0.1.7 result identity was never read
+
+Root cause, stated as the two parse locations that changed:
+
+```text
+old (0.1.5 assumption, the only path that existed)
+  src/dsh/durable-path.js:164
+    const callId = Array.isArray(data.message?.content)
+      ? data.message.content[0]?.toolCallId ?? null : null
+  src/dsh/durable-path.js:176
+    record.status = data.error !== undefined || block?.isError === true ? 'error' : 'ok'
+
+new (0.1.7 contract, in src/dsh/adapter.js)
+  toolResultIdentity()  — role 'tool'  -> message.toolCallId / message.isError
+                        — otherwise    -> content[0].toolCallId / content[0].isError, labelled legacy
+  toolResultOutcome()   — data.error admitted only on a message flagged failed
+```
+
+A 0.1.7 result carries `role: 'tool'` with `toolCallId` on the message and no call identity anywhere in its content
+blocks, so the old read returned `null` for every result. `null` is not a match, so `toolSettled` found no call to
+close: the diagnostic counter `unmatchedToolResults` incremented, the call stayed in the running set, and the next call
+was added beside it instead of replacing it. One unpaired result is one stale running tool, which is why the displayed
+count grew monotonically with the number of calls.
+
+`src/dsh/adapter.js` now decides this in one place, and the two shapes are separated structurally rather than by field
+probing: a message that declares `role: 'tool'` can never reach the legacy content-block read, because the role is the
+discriminator. The legacy read remains a labelled decode path (`TOOL_RESULT_SHAPE.LEGACY_CONTENT_BLOCK`) for the
+recorded 0.1.5 captures, which are still replayed by the metric-math regressions. A result that carries no readable
+identity is `MALFORMED` and fails closed: it closes no call and is counted, never repaired by arrival order.
+
+#### 2.1 The same expression existed twice, and only one copy was in scope
+
+The brief for this phase named a single parse site. The repository contained **two**: `src/dsh/adapter.js` (the live
+normalization path) and `src/dsh/durable-path.js` (the durable reconstruction path B). They were identical expressions,
+so fixing only the first would have left a defect that no live browser test can see — path B is what rebuilds a card
+after a reload.
+
+Measured on the recorded 0.1.7 fixture (`fixtures/dsh-0.1.7/t01-sequential-tools.json`), through
+`reconstructFromDurable` alone:
+
+| quantity | baseline | fixed |
+|---|---|---|
+| tools reconstructed | 2 | 2 |
+| calls with a finite `endMs` | **0** | 2 |
+| issue kinds raised | `tool-result-without-call-id`, `unmatched-tool-call` | none |
+
+Both paths now go through one exported contract site (`toolResultOutcome`), so the identity location cannot drift
+between them again, and `test/dsh-017-fixtures.test.js` asserts that the two paths resolve the same identity for the
+same durable event. This second site was found by re-reading the baseline source after the first fix, not by a failing
+test, which is why the regression test was added before the fix was considered finished.
+
+### 3. Browser A/B on a five-call sequential turn
+
+The same workload was driven through the real web client against the clean `0.1.7-rc.2` host, once on the baseline
+bundle and once on the fixed one (`dev/screenshots/phase7d/phase7d-sequential-tools.json`).
+
+| | Baseline bundle (`client.js` 429422 bytes) | Fixed bundle |
+|---|---|---|
+| live labels on a 5-call sequential turn | `pwsh +3`, `pwsh +4` | `pwsh · <t>` single-call labels only |
+| `unmatchedToolResults` | 4–5 | 0 |
+| matched results | — | 5 of 5 |
+| completed card tool line | `工具 5 · 0.0s` | `工具 5 · 1.8s` |
+| `maxPresentedToolCount` / `maxLiveRunningTools` | — | 1 / 1 |
+
+The `+N` suffix is the multi-call label form, so the baseline pill was claiming three and four simultaneous `pwsh`
+calls in a turn whose prompts asked for one call at a time. The card's `0.0s` is the same defect arriving at the
+metric: a tool wall union over intervals whose ends were never observed is empty, and an empty union rounded to zero.
+Once results paired, the union covered the real intervals and the card printed the turn's actual tool time. The three
+`+N` labels were never observed on the fixed bundle, which is asserted rather than assumed
+(`observedLiveLabelsNeverSeen`).
+
+### 4. The completion layer, determined branch by branch
+
+A second, independent failure mode was reported in the same round: the live pill stayed on screen after the turn had
+ended. Rather than guess, all eight candidate layers were enumerated and each was excluded by source or by measurement
+(`dev/screenshots/phase7d/phase7d-completion.json`, `layerDetermination`).
+
+- **B** (`normalizeDurableEvent` ignores `turn/end`) and **C** (the feed drops it) are excluded by source: the
+  normalization case is unconditional, `MutableSessionEventSource.publish` increments the revision on every mutation,
+  and durable sequence numbers are unique, so neither the revision guard nor the seq dedupe can discard a terminal
+  boundary.
+- **D** — `lookupRecord` returning `null` and the handler returning silently — was **reachable and silent at the
+  baseline**: `if (record === null) return` discarded the authoritative boundary with no record, no counter and no
+  issue, and because the feed marks the sequence as seen before emitting, the boundary was unrecoverable. This is the
+  layer that was repaired.
+- **E** (the store throws on a pathological turn) was tested directly with the exact 192-unresolved-tool shape of the
+  reported field screenshot, 192 open calls plus 200k attempt samples: `store.endTurn` completed in 117 ms without
+  throwing.
+- **F** (the presenter never settles) is excluded because the turn-end transition is unconditional once the turn
+  identity matches; **G** (late evidence resurrects the turn) was possible on the durable plane at the baseline and is
+  now excluded by a guard that drops and counts rows of a settled turn; **H** (React serving a stale projection) is
+  excluded by measurement, since the sampled DOM flipped to `completed` within one 16 ms sample.
+- **A** — the wire never exposing `turn/end` at all — remains the only layer outside the plugin's control. The local
+  0.1.7 host does append it, verified in the durable v4 log
+  (`{"type":"turn/end","seq":60,"time":…,"data":{"turn":1,"reason":{"kind":"completed"}}}`), and every real turn
+  measured in this phase delivered `rawTurnEndSeen = 1`. `rawTurnEndSeen` is the instrument that discriminates A from
+  D: it is incremented by the feed before any interpretation, so a future occurrence reports which of the two happened
+  instead of leaving it undecidable.
+
+The repair is reconstruction, not invention. A `turn/end` with no record is counted (`turnEndLookupMiss`,
+`turnEndReconstructed`), recorded as a `turn-end-without-record` issue, and closed against the durable window: the
+record is opened with the `turn/start` time the window supplied and `null` when that row was outside the window, the
+machine is opened as a recovered boundary so it can own the turn identity, and the turn is closed with the reason the
+event carried. Nothing about the live display is converted into evidence.
+
+### 5. Completion trace and reload equivalence
+
+A 16 ms sampler recorded the projected view kind, the rendered node's `data-kind` and the full diagnostics counters
+while a real five-call sequential turn ran to completion
+(`dev/screenshots/phase7d/phase7d-completion.json`).
+
+```text
+t=17     waiting     live        rawDurableEvents 36   rawTurnEndSeen 0
+t=972    tool        live        rawToolCalls 5  rawToolResults 4  matchedToolResults 4
+t=1228   transition  live        rawToolResults 5  matchedToolResults 5  bareSettleSeen 5  retirementsResolved 5
+t=3505   completed   completed   rawTurnEndSeen 1  normalizedTurnEndSeen 1  turnEndLookupHit 1
+                                 storeEndTurnCalled 1  presenterTurnEndApplied 1  settledSnapshotBuilt 1
+```
+
+The view kind and the DOM's `data-kind` both flip to `completed` inside a single 16 ms sample. No intermediate frame
+was observed in which the turn was settled internally but still rendered live, or live internally but rendered as a
+card; the bound is the 50 ms presentation cadence plus one React commit, and the measurement sits below both. After the
+card is on screen the scheduler is stopped (`ticking: false`, `timerCount: 0`, no increasing elapsed number), and
+`livePresentedToolCount` is 0.
+
+Reload equivalence: reloading the page over the same session produced a card whose text is **byte-identical** to the
+pre-reload card, with `rawTransientRows` 0 — the card was rebuilt from the durable plane alone and did not return to
+`tool-running`, `streaming-output` or `waiting-model` on the way.
+
+### 6. A long real session on 0.1.7
+
+The same counters were left running on a real long session rather than on a scripted turn:
+
+| Counter | Value |
+|---|---|
+| tool calls / matched / unmatched | 145 / 145 / 0 |
+| `bareSettleSeen` | 4 |
+| `retirementsResolved` | 4 |
+| `abandonmentsResolved` | 0 |
+
+The `bareSettleSeen` row is the second half of this phase. A bare `settleAssistant(attemptId)` looks like an
+abandonment, and the 0.1.5-era reading treated it as one — which on this session would have mislabelled four
+**successful retirements** as abandonments and overwritten four committed outcomes with an abandonment claim. The two
+situations that issue the bare call, and the algebra that distinguishes them, are recorded in `docs/DSH_API_NOTES.md`
+§13.4; the feed now resolves them from held evidence (the attempts that received a durable settlement directly, plus a
+consumed budget of outstanding settlements keyed by their durable coordinate) and a bare call that no route covers is
+the only one counted as an abandonment. `abandonmentsResolved` 0 beside `retirementsResolved` 4 is that reading
+working on live evidence.
+
+### 7. The 0.1.7 fixture corpus
+
+`fixtures/dsh-0.1.7/t01-sequential-tools.json` was recorded on 2026-09-27 from session `fixture-mujjrw4r-1` through
+`dev/fixture-recorder` against the `0.1.7-rc.2` host. It carries 30 durable rows and 95 transient frames; the turn runs
+model → pwsh → model → pwsh → model and closes with `turn/end` reason kind `completed`. Its own summary records the
+shape it captured:
+
+```json
+"toolResultShape": {
+  "role": "tool",
+  "identityLocation": "message.toolCallId",
+  "isErrorLocation": "message.isError"
+}
+```
+
+The fixture is versioned (`captureFamily: "0.1.7"`, `dshVersion: "0.1.7-rc.2"`) and published through
+`fixtures/dsh-0.1.7/index.json`, so the family a replay is reading is never inferred from the directory it sits in.
+Sanitization was verified clean with 513 redaction markers, and the independent gate
+`node scripts/verify-sanitization.mjs` now covers `fixtures/dsh-0.1.7/` alongside the 0.1.5 capture family and the
+derived mutations.
+
+### 8. Legacy fixture policy
+
+The eight captures under `fixtures/dsh-turns/` are `0.1.5-rc.2` evidence. They may still prove the metric arithmetic,
+the decoder's robustness and historical compatibility — they are the only recordings of several shapes in the set, and
+nothing about them was invalidated by the host moving. They may **no longer** be the only proof of the tool/result
+shape, the settle-assistant semantics, the turn completion lifecycle or the client event-window behaviour, all four of
+which 0.1.7 changed and all four of which are now established from the 0.1.7 declarations and the recorded 0.1.7
+corpus. Where a 0.1.5 capture and a 0.1.7 declaration disagree, the declaration and the 0.1.7 corpus decide, and the
+legacy decode path exists so that the older bytes can still be replayed without being believed about the wire.
+
+### 9. Two defects found in this phase's own code
+
+Both were found while verifying the new code rather than by running the old code, and both were in what this phase
+added.
+
+`controller.diagnostics()` originally obtained the live tool counts by taking a `liveSnapshot` at the wall clock. A
+snapshot evaluated at an arbitrary instant **evicts** expired samples from the rolling window, so the diagnostic was
+mutating the state it was reporting on and could silently change the very rate it was only supposed to observe. The
+two live counters are now read from the meter's own running set and its phase, which observes without evaluating a
+window.
+
+`liveRunningTools` alone could not express the distinction the pill needs when a turn ends with a call whose result was
+never observed: presentation closes at turn end while the unresolved call stays on the record as incomplete evidence,
+and one integer cannot report both. `livePresentedToolCount` was added as the same set gated on the tool stage owning
+the view, so "what the pill would print" and "what the store still holds" are separately readable. On a settled turn
+the pair reads 0 and 0; mid-turn with an unresolved call after the boundary they legitimately disagree.
+
+### 10. Verification for this round
+
+`npm run build:client` + `npm run verify` (`verify-structure.mjs` then the Node test runner) reports **685 tests, 685
+pass, 0 fail** — 37 above the 648-test baseline of `1f97cfa` — across `test/dsh-017-tool-result.test.js` (6),
+`test/dsh-017-tool-concurrency.test.js` (7), `test/dsh-017-settlement.test.js` (7), `test/dsh-017-completion.test.js`
+(9) and `test/dsh-017-fixtures.test.js` (8). The settlement expectations are derived from
+`test/helpers/assistant-stream-fold.js`, a faithful port of the shipped `ClientAssistantStream` algebra, so they test
+the decision the real fold makes rather than a paraphrase of it. `node scripts/verify-sanitization.mjs` passes
+separately with the new corpus included. Browser evidence for the round is under `dev/screenshots/phase7d/`
+(`phase7d-sequential-tools.json`, `phase7d-completion.json`, `sequential-tool-live.png`, `completed-card.png`).

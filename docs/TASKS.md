@@ -272,7 +272,62 @@ failing before the production change.
 Acceptance gate: the phase-7 curve work is complete and ready for external audit. Phase 8 is deliberately **not**
 started.
 
+## Phase 7D — DSH 0.1.7-rc.2 migration (complete)
+
+Opened when the locally installed DSH had moved to `0.1.7-rc.2` and the plugin's live meter was observed accumulating
+strictly sequential tool calls as though they were concurrent. The phase establishes the runtime baseline, reads the new
+contracts out of the installed package, repairs the adapter, the client feed and the completion path, and freezes a
+versioned 0.1.7 fixture corpus. Every contract claim below names the local declaration it was read from, and the
+normative target from this phase onward is `0.1.7-rc.2` (public reference commit
+`477b4f420553e8a52c2fbccc464d7561b239c443`).
+
+- [x] Preflight proof of the runtime: `dsh --version` → `0.1.7-rc.2`, the executable and the active web process
+      identified by path and PID, profile `web`, port 50001.
+- [x] Baseline measurement at SHA `1f97cfa5bad329e54bdf69debbb40611935827ae`: 648 tests / 648 pass, and a pure
+      in-process run of 100 strictly sequential `pwsh` calls recording max `runningToolCount` 100, labels reaching
+      `pwsh +99`, 100 unmatched results and 100 tools still running.
+- [x] Local contract inspection, field by field: `ToolResultMessage` (`role: 'tool'`, `toolCallId`, `isError`),
+      `SessionEventMap['tool/result']`, the seven-variant `TurnEndReasonMap` including the new `forked`,
+      `SessionEventChange`, `SessionEventWindow`/`SessionEventSource`, `AssistantLiveChunkEvent`,
+      `SessionAssistantStreamFrame`, `ClientAssistantStreamResult`, and the v4 session log format. Recorded in
+      `docs/DSH_API_NOTES.md` §13.
+- [x] BLOCKER A — the 0.1.5 nested result shape was still the only decode path, so every 0.1.7 result failed to pair
+      and each new call was added to the running set instead of replacing the previous one. Identity now comes from
+      `message.toolCallId`; the legacy content-block read is labelled and unreachable for `role: 'tool'`.
+- [x] Sequential, parallel and mixed tool regressions: the running count never exceeds the number of genuinely
+      concurrent calls, the wall time stays a union rather than a sum, and pairing is by identity rather than order.
+- [x] Settle-assistant migration: a bare `settleAssistant(attemptId)` is resolved from held evidence
+      (`settledAttemptIds` plus a consumed `pendingSettlements` budget) instead of being read as an abandonment, which
+      the 0.1.5-era code did for every successful retirement.
+- [x] Completion trace and repair: the completion path was traced layer by layer (branches A–H), the reachable silent
+      branch was counted, recorded and repaired by reconstruction from the durable window, and `rawTurnEndSeen` was
+      added as the instrument that discriminates it from a boundary the wire never delivered.
+- [x] 0.1.7 fixture corpus: `fixtures/dsh-0.1.7/t01-sequential-tools.json`, recorded from a live 0.1.7-rc.2 host, with
+      its own shape summary and sanitization verified clean.
+- [x] Legacy fixture classification: the eight 0.1.5-rc.2 captures keep their evidentiary role for metric arithmetic,
+      decoder robustness and historical compatibility, and lose their evidentiary role for tool/result shape,
+      settle-assistant semantics, turn completion lifecycle and window behaviour.
+- [x] Docs updated: `DSH_API_NOTES.md` §13, `ARCHITECTURE.md` Phase 7D, `TEST_PLAN.md` §7, `IMPLEMENTATION_LOG.md`
+      Phase 7D, `README.md` compatibility statement.
+- [x] Second contract site found and fixed: the identical `content[0].toolCallId` read also existed in
+      `src/dsh/durable-path.js`, which no live browser test exercises. Measured on the 0.1.7 fixture, path B
+      reconstructed 2 calls with **0** finite end times at the baseline and 2 after the fix; both paths now share one
+      exported contract site and a regression test asserts they resolve the same identity.
+- [x] `npm run build:client` + `npm run verify`: **685 pass / 0 fail**, 37 tests above the 648-test baseline of
+      `1f97cfa`, bundle fresh; `node scripts/verify-sanitization.mjs` passes with the new corpus included.
+- [x] Clean-runtime browser evidence: a baseline-versus-fixed A/B on a five-call sequential turn, the completion
+      lifecycle trace, and the reload equivalence, recorded under `dev/screenshots/phase7d/`.
+- [ ] Push to `origin/main`. Pending as of this record: the phase's changes are still uncommitted on `main`, whose
+      `HEAD` is `1f97cfa`, and `origin/main` is level with it.
+
+Acceptance gate: the plugin is verified against the only DSH it claims, `0.1.7-rc.2`, and the sequential-tool defect
+class that opened the phase is closed by regression test and by browser measurement.
+
 ## Phase 8 — Release readiness
+
+**NOT STARTED.** No task in this phase has been begun; the entries below remain the intended work, not a record. Two of
+its bullets — the current README status and the exact supported DSH version — were satisfied early by Phase 7D
+(`README.md` §0 and `docs/DSH_API_NOTES.md` §13); the rest are untouched.
 
 - [ ] Update README from scaffold status to implemented status.
 - [ ] Document exact supported DSH version(s) tested.

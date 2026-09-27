@@ -547,17 +547,20 @@ Final card status must distinguish at least:
 
 An interrupted prefix may still have observed throughput. Status describes settlement, not whether metrics exist.
 
-`turn/end.reason` maps as follows (verified against the local `0.1.5-rc.2` `TurnEndReasonMap`, recorded in `docs/IMPLEMENTATION_LOG.md`):
+`turn/end.reason` maps as follows. The table was re-audited variant by variant against the local **`0.1.7-rc.2`** `TurnEndReasonMap` in Phase 7D (`dsh-session/lib/types/types.d.ts:165-208`, which declares exactly seven variants); the 0.1.5-rc.2 audit it supersedes is kept in `docs/IMPLEMENTATION_LOG.md`, and the field-by-field comparison is `docs/DSH_API_NOTES.md` §13.
 
 | `turn/end.reason.kind` | status | note |
 |---|---|---|
 | `completed` | `completed` | — |
 | `aborted` | `interrupted` | carries the cancellation cause (`user`, `parent`, `hook`, `disposed`, `legacy`) |
-| `interrupted` | `interrupted` | crash-orphaned turn closed after the fact |
+| `interrupted` | `interrupted` | crash-orphaned turn closed after the fact; the loop never emits it live |
+| `forked` | `interrupted` | **added in 0.1.7.** Fork-seed construction closed a turn that was still open at the fork boundary. The turn did not finish, so it is never reported as a completion and never as an error |
 | `blocked` | `errored` | — |
 | `error` | `errored` | carries the structured `LlmFailure` |
 | `max-tokens` | `completed` | truncated; the ceiling is noted on the secondary line |
 | unrecognized | `errored` | reported with `statusKnown: false`; a future reason kind must never be mapped to a known cause |
+
+Every variant, recognized or not, **closes the live view**. A turn is never left live because its reason kind is unknown, and no variant keeps running tool calls alive: presentation lifecycle and evidence completeness are separate facts.
 
 ## 13. Evidence sources
 

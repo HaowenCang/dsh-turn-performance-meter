@@ -449,3 +449,40 @@ Tool/TTFT durable timestamps: equality to recorded timestamps, allowing only dis
 Calibrated curve integral: phase sum should match authoritative phase token total within floating-point tolerance (`< 1e-9` relative for pure calculation before render rounding).
 
 UI displayed TPS: tolerance determined by display rounding, not by silently changing underlying metrics.
+
+## 7. Phase 7D — DSH 0.1.7-rc.2 migration
+
+The whole suite targets the locally installed `0.1.7-rc.2`; §13 of `docs/DSH_API_NOTES.md` records the declarations the
+new cases are written against. Five files were added, 36 tests in total, and each asserts a contract the 0.1.5-era
+assumption got wrong or never covered.
+
+- `test/dsh-017-tool-result.test.js` (6 tests) — the tool-role result contract and nothing else. The identity is read
+  from `message.toolCallId`, the failure flag from `message.isError`, and the structured `data.error` is admitted only
+  on a message already flagged failed; a result whose identity is unreadable fails closed, closes no call and is
+  counted rather than repaired by position; and the legacy 0.1.5 nested shape is proved reachable only for a message
+  that does not declare `role: 'tool'`, so a 0.1.7 message can never be answered from its content blocks.
+- `test/dsh-017-tool-concurrency.test.js` (7 tests) — the sequential-tool defect class directly. A hundred strictly
+  sequential calls never exceed one running tool; the running count steps 3 → 2 → 1 → 0; the tool wall time is the union
+  of the intervals and not their sum; mixed tool names are counted per call; a malformed result closes nothing; a failed
+  tool still finishes; and a result pairs with its call by identity when the results arrive out of order.
+- `test/dsh-017-settlement.test.js` (7 tests) — retirement versus abandonment. The expectations are derived from
+  `test/helpers/assistant-stream-fold.js`, a faithful port of the real `ClientAssistantStream` algebra, so the test
+  exercises the same decision the shipped fold makes rather than a paraphrase of it: a bare settle with a matching
+  durable settlement is a retirement, a bare settle with none is an abandonment, one queued settlement cannot excuse a
+  later attempt in the same step, and a directly settled attempt cannot be re-labelled by a later bare call.
+- `test/dsh-017-completion.test.js` (9 tests) — the turn completion lifecycle. All seven `TurnEndReason` variants
+  terminate the turn with the right status, including `forked`; a turn ends with a call still unresolved; evidence
+  arriving after the boundary cannot resurrect the turn; a `turn/end` with no record is counted, recorded and repaired
+  by reconstruction from the durable window; a reload rebuilds the same card; historical and live tool counts stay
+  separate; and the four window-change kinds are each exercised end to end.
+- `test/dsh-017-fixtures.test.js` (8 tests) — the versioned 0.1.7 fixture corpus. Every capture declares its family and
+  provenance; every recorded result uses the tool-role shape; every call pairs with exactly one result by identity; the
+  turn carries a durable `turn/end` row and is a normally completed turn; a replay leaves no unmatched result and no
+  running call, and a replay through the controller ends settled with no live pill; the durable reconstruction path
+  pairs the same results through the same contract site; and the transient plane carries three attempts, each bounded by
+  a start and an end frame.
+
+Baseline for this phase: **685 tests, 685 pass, 0 fail** (648 before the phase). `npm run verify` runs
+`scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`. Sanitization is a separate gate —
+`node scripts/verify-sanitization.mjs` — and it now also covers `fixtures/dsh-0.1.7/` alongside the 0.1.5 capture family
+and the derived mutations.

@@ -33,6 +33,29 @@ A turn-level performance meter for DeepSeek Harness (DSH) agent workflows. It is
 > `refreshMs` 选项，暗示 core 负责屏幕刷新。每项修复都附带一个旧实现必然失败的测试，并新增三段真实录制（`t6` 纯工具、
 > `t7` 命令失败、`t8` 无重试）。
 
+## 0. DSH compatibility / 兼容性
+
+The DSH version this project currently supports and tests is **`0.1.7-rc.2`** (public reference commit
+`477b4f420553e8a52c2fbccc464d7561b239c443`), verified against the locally installed package. Phase 7D migrated the
+adapter, the client feed and the completion path to that version: tool results are identified through the first-class
+tool-role message (`message.toolCallId`, `message.isError`), the bare `settleAssistant(attemptId)` is resolved from
+held evidence instead of being read as an abandonment, a `turn/end` is terminal even when no record is open, and the
+session log format is v4. `0.1.5` is no longer claimed as supported: the eight captures under `fixtures/dsh-turns/`
+remain evidence for the metric arithmetic, the decoder and historical compatibility, and they are no longer evidence
+for the tool/result shape, the settle-assistant semantics, the turn completion lifecycle or the client event-window
+behaviour. No `package.json` compatibility-range field is added, because DSH's plugin peer/preflight mechanism was not
+verified as a supported gating schema for this project. The field-by-field contract record is in
+`docs/DSH_API_NOTES.md` §13.
+
+本项目当前支持并测试的 DSH 版本为 **`0.1.7-rc.2`**（公开参考 commit
+`477b4f420553e8a52c2fbccc464d7561b239c443`），已针对本机安装的包验证。Phase 7D 将 adapter、client feed 与完成态路径迁移到
+该版本：工具结果经一等公民的 tool-role message 识别（`message.toolCallId`、`message.isError`）；裸
+`settleAssistant(attemptId)` 依据已持有的证据判定，而不再一律读作 abandonment；`turn/end` 即使没有已打开的 record 也具
+终止性；会话日志格式为 v4。`0.1.5` 不再声明为受支持版本：`fixtures/dsh-turns/` 下的八段录制仍是指标算术、解码器与历史
+兼容性的证据，但不再是 tool/result 形状、settle-assistant 语义、turn 完成生命周期或客户端事件窗口行为的证据。不新增
+`package.json` 兼容范围字段，因为 DSH 的 plugin peer/preflight 机制未被验证为本项目可用的门控 schema。逐字段契约记录见
+`docs/DSH_API_NOTES.md` §13。
+
 ## 1. Frozen product requirements / 已冻结需求
 
 The statistical boundary is a **turn**, not a single model step. One user turn can contain `LLM -> tool -> LLM -> tool -> ... -> final answer`, and the completed metrics aggregate the entire turn. Per-step TPS values must never be arithmetically averaged.

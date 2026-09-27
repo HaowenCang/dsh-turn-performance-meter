@@ -256,3 +256,90 @@ Then inspect, by whichever local development/Creator tools are available:
 - whether native stats can/should remain visible beside this plugin.
 
 Write findings and source locations into `IMPLEMENTATION_LOG.md` before Phase 1 integration.
+
+## 13. DSH 0.1.7-rc.2 compatibility baseline
+
+| Item | Value |
+|---|---|
+| Local installed version | `0.1.7-rc.2` |
+| Public reference commit | `477b4f420553e8a52c2fbccc464d7561b239c443` |
+| Verified local package path | `C:\Users\20659\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh` (recorded form: `%APPDATA%\npm\node_modules\@deepseek-ai\dsh`; the shipped packages it composes resolve under `...\dsh\node_modules\@deepseek-ai\*`, which is the root the declaration paths below are relative to) |
+| Verified date | 2026-09-27 |
+
+This section supersedes the 0.1.5-era reading of the contracts it names. It is deliberately **not** a statement that
+0.1.7 is "the same as 0.1.5": the declarations below differ from the 0.1.5 assumption in the places the project reads,
+and the differences are the whole content of the section. The earlier sections above were verified against public
+`master` and against the locally installed `0.1.5-rc.2`, and they remain as written for the surfaces they cover.
+
+### 13.1 Field-by-field comparison
+
+| Contract | Local declaration | 0.1.5 assumption | 0.1.7 reality |
+|---|---|---|---|
+| `ToolResultMessage` | `dsh-llm/lib/types/message.d.ts:152-160` | the result is a `user`-role message whose identity sits inside the content: `content[0].toolCallId`, `content[0].isError` | `interface ToolResultMessage extends MessageBase { readonly role: 'tool'; readonly source: ToolMessageSource; readonly toolCallId: ToolCallId; readonly isError?: boolean }` — a first-class tool-role message owning both fields directly |
+| `SessionEventMap['tool/result']` | `dsh-session/lib/types/types.d.ts:374-388` | the payload's message was the nested 0.1.5 form above | `{ turn, step, message: ToolResultMessage, error?: { name, code, reason? }, meta? }`; the declared comment restricts `error` to a message carrying `isError: true` |
+| `TurnEndReasonMap` | `dsh-session/lib/types/types.d.ts:165-208` | fewer terminal reasons, with no fork marker among them | exactly seven variants: `completed`, `aborted { reason: TurnEndCancelCause }`, `blocked`, `error { error: LlmFailure }`, `max-tokens`, `interrupted`, `forked` |
+| `turn/start` / `turn/end` | `dsh-session/lib/types/types.d.ts:262-286` | present | unchanged: `turn/start { turn }` and `turn/end { turn, reason }` still exist, confirmed against the local runtime log row `{"type":"turn/end","seq":60,"time":…,"data":{"turn":1,"reason":{"kind":"completed"}}}` |
+| Session log format | local session store | an earlier log generation | **v4** — `session.v4.jsonl.zstd`, written as concatenated zstd frames |
+| `AssistantLiveChunkEvent` | `dsh-api-session-controller/lib/types/client/contract/events.d.ts:6-16` | the live-chunk row was not modelled as a first-class client event | `{ type: 'assistant/live-chunk', seq, time, data: { attemptId, turn, step, chunk } }` |
+| `SessionEventChange` | `…/events.d.ts:41-54` | three window deltas, with a settlement whose absent entry was taken to mean abandonment | four change kinds: `replace`, `prepend` and `append` (each carrying `entries`), plus `{ kind: 'settle-assistant', attemptId, entry?: SessionAssistantSettlementEntry }` |
+| `SessionEventWindow` / source | `…/events.d.ts:56-63` | the window snapshot and its change payload were read as one thing | `{ entries, hasMore, revision, change }`, exposed as `SessionEventSource = ObservableSnapshot<SessionEventWindow>` |
+| `SessionAssistantStreamFrame` | `dsh-api-session-controller/lib/types/types.d.ts:482-509` | the frame shape recorded from public master in §5 above | `start { attemptId, revision, startedAfterSeq, turn, step }`, `chunk { attemptId, revision, index, time, chunk }` and `end { attemptId, revision, index, outcome }`, where `outcome` is `{ kind: 'committed', eventType: 'assistant/message' or 'assistant/attempt', seq }` or `{ kind: 'abandoned' }` |
+| `ClientAssistantStreamResult` | `dsh-api-session-controller/lib/types/client/sessions/assistant-stream.d.ts:6-23` | the client fold's decisions were not enumerated | `publish { entry, retireAttemptId? }`, `settlement { attemptId, entry }`, `abandonment { attemptId }`, `transient { entry }`, `rebaseline`, or `undefined` |
+
+### 13.2 `TurnEndReasonMap` and the fork boundary
+
+`forked` is new in 0.1.7. Its declaration (`dsh-session/lib/types/types.d.ts:199-207`) states that fork-seed
+construction closed a turn that was still open at the fork boundary in the source session, that only fork seeds carry
+the marker, and that the loop never emits it live. The source events before the boundary remain intact in the child.
+A turn carrying it genuinely did not finish, so it is an interruption and never a completion.
+
+`TurnEndCancelCause = AgentCancelCause | { kind: 'legacy' }` (`…/types.d.ts:159`), and
+`AgentCancelCause = { kind: 'user' } | { kind: 'parent' } | { kind: 'hook', reason } | { kind: 'disposed' }`
+(`…/types.d.ts:148`). The `legacy` arm covers an import whose coarse record carried no cause.
+
+### 13.3 The tool-role result message
+
+`dsh-llm/lib/types/message.d.ts:152-160` declares `ToolResultMessage` as a first-class tool-role message carrying the
+result of one tool invocation, with `toolCallId` and optional `isError` on the message itself. The call identity is
+therefore `data.message.toolCallId` and the failure flag is `data.message.isError`. In a 0.1.7 recording the content
+blocks are result **content** and carry no call identity at all, so `content[0].toolCallId` is not a fallback and not a
+repair path. `dsh-session/lib/types/types.d.ts:374-388` places that message in the durable event as
+`'tool/result': { turn, step, message: ToolResultMessage, error?, meta? }`, and the structured `error` is declared
+"outside model content" and allowed only when the message has `isError: true`.
+
+The legacy 0.1.5 nested shape is still decoded, because the recorded 0.1.5 captures are replayed as evidence by the
+metric-math regressions. The two shapes are separated by a **structural** discriminator — `message.role` — so the
+legacy read is unreachable for a message that declares `role: 'tool'`, and every normalization states which shape it
+used. A tool result whose identity cannot be read is malformed and fails closed rather than being repaired by position.
+
+### 13.4 The bare `settleAssistant(attemptId)` is ambiguous
+
+`SessionEventChange`'s `settle-assistant` arm makes `entry` optional, and the absence of an entry is **not** by itself
+an abandonment. In the installed 0.1.7, one bare call is issued for two different situations.
+
+Normal successful retirement. On an `end` frame whose outcome is `committed` to `assistant/message` and whose
+`interrupted` flag is not true, `ClientAssistantStream.acceptFrame` deletes the staged settlement from `pending`, sets
+`retainedAttempt`, and returns `publish(entry)`
+(`dsh-api-session-controller/lib/client.js:1489-1539`). The attempt is retired later, when that attempt's `step/end` is
+published: `publish()` returns `{ type: 'publish', entry, retireAttemptId }` (`…/client.js:1524-1539`), and
+`publishAssistantEntry` (`…/client.js:2105-2130`, the branch at `:2124-2127`) calls
+`eventSource.settleAssistant(retireAttemptId)` with no entry.
+
+True abandonment. On an `end` frame whose outcome is `abandoned` with `pending.size === 0`, `acceptFrame` returns
+`{ type: 'abandonment', attemptId }` (`…/client.js:1494-1497`), and the same no-entry call is made
+(`…/client.js:2119-2122`).
+
+Since both situations produce the same wire form, `entry === undefined` alone proves nothing. A consumer must resolve
+the bare call from whether a durable settlement for that attempt is already known; the plugin does this by holding the
+attempt identities that received a durable settlement directly and a budget of outstanding settlements keyed by their
+durable coordinate, and it consumes one budget entry per bare call (see `docs/ARCHITECTURE.md`, §"Phase 7D — tool-role
+results, window changes and completion evidence").
+
+### 13.5 Supported version
+
+The only supported and tested DSH for this project is `0.1.7-rc.2`, verified against the locally installed package
+recorded above. This project does **not** claim 0.1.5 support. The 0.1.5-rc.2 captures retained under
+`fixtures/dsh-turns/` remain usable as evidence about the metric arithmetic, the decoder's robustness and historical
+compatibility; they are no longer evidence for the tool/result shape, settle-assistant semantics, the turn completion
+lifecycle or the client event-window contract, all of which are established from the 0.1.7 declarations and the
+recorded 0.1.7 corpus.
