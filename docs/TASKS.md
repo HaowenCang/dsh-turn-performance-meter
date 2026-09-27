@@ -317,8 +317,12 @@ normative target from this phase onward is `0.1.7-rc.2` (public reference commit
       `1f97cfa`, bundle fresh; `node scripts/verify-sanitization.mjs` passes with the new corpus included.
 - [x] Clean-runtime browser evidence: a baseline-versus-fixed A/B on a five-call sequential turn, the completion
       lifecycle trace, and the reload equivalence, recorded under `dev/screenshots/phase7d/`.
-- [ ] Push to `origin/main`. Pending as of this record: the phase's changes are still uncommitted on `main`, whose
-      `HEAD` is `1f97cfa`, and `origin/main` is level with it.
+- [x] Pushed to `origin/main`. `1f97cfa5bad329e54bdf69debbb40611935827ae` ->
+      `5182344dc56553120e77d00fcaea11cf1416e57c`, three commits:
+      `d70bbe5dd1f2e44078cb48fd1c2f47965464b8c3` (fix: tool results and completion),
+      `e38cd0d1e1b0b9d1e5ab78054a8a9d7f7c9d5e02` (test: 0.1.7 integration fixtures),
+      `5182344dc56553120e77d00fcaea11cf1416e57c` (docs: 0.1.7-rc.2 baseline).
+      `git rev-list --left-right --count origin/main...HEAD` reports `0 0`.
 
 Acceptance gate: the plugin is verified against the only DSH it claims, `0.1.7-rc.2`, and the sequential-tool defect
 class that opened the phase is closed by regression test and by browser measurement.
