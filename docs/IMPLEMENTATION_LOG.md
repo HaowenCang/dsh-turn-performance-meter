@@ -2763,6 +2763,17 @@ record is opened with the `turn/start` time the window supplied and `null` when 
 machine is opened as a recovered boundary so it can own the turn identity, and the turn is closed with the reason the
 event carried. Nothing about the live display is converted into evidence.
 
+**Correction (Phase 7D.1).** The paragraph above overstates what this phase actually built, and the overstatement is
+kept here rather than edited away because it is the reason Phase 7D.1 exists. What Phase 7D repaired was the terminal
+**lifecycle**: the boundary is no longer discarded, and a completed card is always produced. It did **not** repair
+metric **reconstruction**. The code opened an empty record — `store.beginTurn(...)` immediately followed by
+`store.endTurn(...)` — so every durable fact of that turn still present in the same window (the `assistant/message`
+settlements and their embedded compact streams, usage, the `tool/call` and `tool/result` boundaries) was dropped on the
+way to it. A recovered card therefore closed with zero attempts, zero generated tokens and no tools while the evidence
+for all of them sat in the window the handler had just read, and the log line `reconstructed from the durable window`
+described an action the code did not take. The metric half is Phase 7D.1, appended below; the claim "reconstruction from
+the durable window" is accurate only from that phase onward.
+
 ### 5. Completion trace and reload equivalence
 
 A 16 ms sampler recorded the projected view kind, the rendered node's `data-kind` and the full diagnostics counters
@@ -2865,3 +2876,263 @@ pass, 0 fail** — 37 above the 648-test baseline of `1f97cfa` — across `test/
 the decision the real fold makes rather than a paraphrase of it. `node scripts/verify-sanitization.mjs` passes
 separately with the new corpus included. Browser evidence for the round is under `dev/screenshots/phase7d/`
 (`phase7d-sequential-tools.json`, `phase7d-completion.json`, `sequential-tool-live.png`, `completed-card.png`).
+
+## Phase 7D.1 — terminal-tail durable metric reconstruction (2026-09-27)
+
+A correctness closure on one defect, with no change to any frozen metric, UI or curve semantic. The target remains DSH
+`0.1.7-rc.2`; nothing in this phase re-opens the tool-identity migration or the settle-assistant disambiguation, and
+both are re-verified below against the same evidence as before.
+
+Baseline SHA `3602ce9179be22bcdc4259303546ebae4b827436`, equal to `origin/main`, working tree clean.
+
+### 1. The defect
+
+`src/client/live/controller.js` handled `NORMALIZED_KIND.TURN_END` with `lookupRecord(...) === null` by opening an
+**empty** record and closing it:
+
+```text
+lookupRecord(state, event.turn) === null
+  -> state.counters.turnEndLookupMiss += 1
+  -> record = store.beginTurn({ sessionId, turn, timeMs: startMs })   // empty
+  -> presenter.apply({ type: 'turn-start', recovered: true })
+  -> store.endTurn(record, { ... })                                   // settles 0 attempts, 0 tools
+```
+
+`reconstructFromDurable()` was never called, and no attempt was made to consume the durable evidence for that turn that
+the same window had already delivered. The consequence is a completed card for a turn whose metrics are known:
+
+```text
+window contains no turn/start
+  durable assistant/message  -> feed emits ATTEMPT_SETTLE  -> record is null -> attempt dropped
+  durable tool/call          -> feed emits TOOL_CALL       -> record is null -> return
+  durable tool/result        -> feed emits TOOL_RESULT     -> record is null -> return
+  durable turn/end           -> record is null -> EMPTY beginTurn -> endTurn
+completed card exists, durable metrics absent
+```
+
+The three `record === null` guards are individually correct — fabricating a record from a stray event would attach
+evidence to a turn the client cannot identify — but together they discard a turn's whole evidence base, which the
+terminal boundary then closes over. The log line `reconstructed from the durable window` named an action the code did
+not take; see the correction note in §4 of the Phase 7D entry above.
+
+### 2. Failing test recorded before any production change
+
+`test/dsh-017-terminal-tail-recovery.test.js`, first case
+`a terminal durable tail without turn/start reconstructs the turn's durable metrics`, run against baseline `3602ce9`
+with no production edit in place.
+
+| | |
+|---|---|
+| fixture | `fixtures/dsh-0.1.7/t01-sequential-tools.json` (real 0.1.7-rc.2 capture), durable rows with `seq >= 5` |
+| tail contents | 3 `assistant/message`, 2 `tool/call`, 2 `tool/result`, `step/start`, `step/end`, 1 `turn/end` |
+| deliberately absent | `turn/start` (seq 4), and every transient row |
+| reference | `reconstructFromDurable({sessionId, turn: 1, events: tail})` reduced through `TurnTelemetryStore` |
+
+| quantity | reference | baseline controller, recovered record |
+|---|---|---|
+| `attempts.length` | 3 | **0** |
+| tools | 2 × `pwsh` (361 ms, 345 ms), both `ok` | **0** |
+| `generatedTokens` | 147 | **`null`** (`observedGeneratedTokens` 0) |
+| `curve.attempts.length` | 3 | **0** |
+| `curve.peakTps` | 76.0 | **0** |
+| `curve.source.calibrationCoverage` | `full` | **`none`** |
+
+Failing assertion: `AssertionError [ERR_ASSERTION]: recovered record == durable reconstruction of the same tail`, first
+diff `+ attempts: []` against `- attempts: [ { sampleCount: 40, settlementSeq: 16, ... }, ... ]`. Ten of the eleven
+cases in the file failed on the baseline; seven of those ten are the same equality stated against a different ingestion
+route, generation boundary or session, and the remaining three assert the unknown-boundary and minimal-evidence
+contracts that an empty record trivially satisfies but that must keep holding once reconstruction is real.
+
+### 3. The repair
+
+Two modules and one handler.
+
+**`SessionEventFeed` retains raw durable evidence.** A bounded, per-generation pool
+(`DurableEvidencePool`, `MAX_RETAINED_TURNS = 32`, oldest turn evicted first) keeps every durable row exactly as it
+arrived, keyed by the turn its `data.turn` names, with its own `seq`. Retention is hooked into **both** routes by which
+a durable row enters the feed — `processDurable` for appended entries, and the `entry`-bearing `settle-assistant`
+change for the route DSH uses for interrupted messages and non-surface `assistant/attempt` settlements — because a
+retention path covering only the append route would lose attempts that travelled the other. `rebaseline()` clears the
+pool with the rest of the generation state, which is the explicit boundary that stops one generation's settlement being
+reconstructed together with another's `turn/end`. Consumers read it through `turnEvents(turn)`; nothing is decoded in
+the feed.
+
+**`src/dsh/reconstruction.js` bridges reconstruction into the store.** `materializeReconstructedTurn()` calls
+`reconstructFromDurable`, then routes its output through the store's own methods — `beginTurn`,
+`turnStartObserved`, `beginAttempt`, `acceptChunk`, `setAttemptUsage`, `settleAttempt`, `toolStarted`, `toolSettled`.
+It contains no decoder, no tool pairing, no retry correlation and no settlement classification:
+
+```text
+feed.turnEvents(turn)
+  -> reconstructFromDurable()                     (src/dsh/durable-path.js — the only durable parser)
+  -> store.beginTurn / beginAttempt / acceptChunk / setAttemptUsage / settleAttempt / toolStarted / toolSettled
+  -> controller: store.endTurn()
+  -> aggregateTurn -> curveSource -> compressAttempts -> attemptTraces -> render budgeting
+  -> completed card
+```
+
+The recovered record is therefore an ordinary store record, and the curve it produces is the ordinary curve. No
+`tail recovery curve` exists. Attempt identity — which the durable plane does not carry, since `attemptId` is
+process-local to the client fold and never appears in a settlement — is `settlement:<settlementSeq>`
+(`reconstructedAttemptId`), derived from the settlement's own sequence rather than from a wall clock or a UUID so that
+replaying one window twice produces the same store key. It is a store-internal key and is never presented as a DSH
+attempt identity.
+
+**The handler consumes the evidence.** `NORMALIZED_KIND.TURN_END` on a lookup miss now materializes the record from
+`state.feed.turnEvents(event.turn)` and closes it. The `observedTurnStart` fallback is retained but narrowed to its
+correct role: it supplies a start only for a turn whose `turn/start` this session actually observed, and the
+reconstruction reports the same instant, so it is never a substitute for a boundary nobody saw.
+
+### 4. Equality achieved, and the boundary that stays unknown
+
+Measured on the tail of `t01` after the repair:
+
+| field | reference (`reconstructFromDurable(tail)`) | recovered turn |
+|---|---|---|
+| attempts | 3 (`seq` 16, 22, 27) | identical |
+| samples per attempt | 40 / 27 / 6 | identical |
+| generated tokens | 147 | 147 |
+| reasoning / non-reasoning split | `null` / `null` (provider reported no `reasoningTokens`) | identical |
+| tools | 2 × `pwsh`, `workMs` 706, `wallMs` 706 | identical |
+| status / note | `completed` / `null`, reason kind known | identical |
+| temporal allocation mode | `total-anchored` | identical |
+| curve source | `aligned` true, `full` coverage, 3 contributing / 3 calibrated | identical |
+| curve peak / duration | 76.0 / 259 ms | identical |
+
+With no `turn/start` in the tail the start stays unknown, and that is the correct outcome rather than a gap:
+
+| field | full recording (has `turn/start`) | tail recovery |
+|---|---|---|
+| `record.startMs` | 1790497151824 | **`null`** |
+| `record.firstTokenMs` | 1790497154164 | **1790497154164** (durable sample evidence) |
+| TTFT | 2340 ms | **`null` — unavailable, not fabricated** |
+| turn elapsed | 6938 ms | **`null` — unavailable, not fabricated** |
+
+A known first token beside an unavailable TTFT is a legitimate state: TTFT is an interval from the start, and only one
+of its two boundaries exists here. Nothing is inferred from the first delta, a `step/start`, a `tool/call`, the attach
+time or the current clock. Comparing the two references confirms the boundary is exact — every other field of the tail
+reconstruction equals the full recording's — so the tail loses precisely the start-dependent fields and nothing else.
+
+A window whose only evidence is `turn/end` reconstructs to an empty turn: 0 attempts, 0 tools, `startMs` `null`,
+`observedGeneratedTokens` 0, `curve.peakTps` 0, `calibrationCoverage` `none`, `aligned` true. No attempt, tool,
+duration or sample is manufactured to make the card look complete.
+
+### 5. Diagnostic semantics
+
+`turnEndReconstructed` previously counted an empty `beginTurn()` as a reconstruction, so the counter was satisfied by
+an action that consumed nothing. It now counts one reconciliation: the boundary arrived, no record existed, and a record
+was built from `feed.turnEvents(turn)` through `reconstructFromDurable`. It deliberately does not claim the evidence was
+non-empty — a turn whose only visible row is its own `turn/end` reconstructs to an empty turn, which is correct and is
+counted the same way. The `turn-end-without-record` issue now carries `reconstructedAttempts`, `reconstructedTools` and
+`startKnown`, so a caller that needs to distinguish "reconciled from evidence" from "reconciled from nothing" can, and
+no counter was added that has no reader. The distinction is documented on the counter itself rather than only here.
+
+### 6. Discovery during this phase
+
+The `settle-assistant`-with-entry restore path in the same handler passed `settlementEventType` to `attemptFromDecoded`
+— the value was already in scope — but never landed it on the store record, because `settleAttempt` does not accept it
+(which is correct: it is the durable surface's own type, not settlement state). The field is now attached to the
+restored attempt beside the state, matching what the durable reconstruction path publishes. Without it, a card rebuilt
+by reload carried `settlementEventType: null` on every attempt, and the reload-equivalence test could not compare the
+field at all. Found by writing the equality contract rather than by a failing production report.
+
+### 7. Fixture corpus: what is recorded and what is not
+
+The 0.1.7 corpus remains `fixtures/dsh-0.1.7/{index.json,t01-sequential-tools.json}`. **No lifecycle fixture was
+added, and the corpus is not complete.** The reason is structural rather than an omission:
+
+```text
+recorder observation points (dev/fixture-recorder/lib/index.js)
+  ctx.on('session/event', (session, event) => ...)              -> durable plane
+  ctx.on('agent/assistant-stream', ({agent, frame}) => ...)     -> transient plane
+```
+
+The `settle-assistant` window change is neither. It is emitted by the **browser-side** client fold
+(`ClientAssistantStream`) when it supersedes an attempt's transient rows, and the host process the recorder lives in
+never sees it. No recorded fixture can therefore contain a bare `settle-assistant`, and `t01` proves the tool-identity
+and completion facts it was captured for — it does not prove the retirement lifecycle. Capturing one would require
+either re-running the fold inside the host recorder, which would make the row a *derived* artifact rather than observed
+evidence, or a browser-side recorder, which is a new tracing facility. Neither was undertaken, so that boundary is
+recorded rather than papered over.
+
+The retirement-versus-abandonment distinction is consequently covered by **synthetic contract tests** against
+`test/helpers/assistant-stream-fold.js`, a faithful port of the shipped `ClientAssistantStream` algebra:
+`test/dsh-017-settlement.test.js` (7 cases) establishes normal retirement, true abandonment, the retirement budget, and
+the attempt-without-observed-rows case. Those cases are synthetic and are labelled synthetic; the `t01` capture is
+recorded evidence, and it covers the tool-identity, window and completion contracts only.
+
+### 8. Regression matrix re-verified
+
+| Property | Evidence | Kind |
+|---|---|---|
+| terminal tail without `turn/start` recovers full durable metrics | `dsh-017-terminal-tail-recovery` (11) | synthetic replay of a **recorded** 0.1.7 fixture |
+| `only turn/end` closes terminally with no invented data | same file | synthetic |
+| full durable reload unchanged | same file + `dsh-017-completion` | recorded 0.1.7 / synthetic |
+| 100 sequential calls, `runningToolCount` max 1 | `dsh-017-tool-concurrency` | synthetic |
+| `message.toolCallId`, `role: 'tool'`, `message.isError`, fail closed | `dsh-017-tool-result` (6) | recorded 0.1.7 + derived |
+| bare settle-assistant retirement vs abandonment | `dsh-017-settlement` (7) | synthetic (see §7) |
+| all seven `TurnEndReason` variants terminal; unknown reason `statusKnown false` | `dsh-017-completion` | synthetic |
+| late evidence does not resurrect a settled turn | `dsh-017-completion` | synthetic |
+| rebaseline drops the previous generation's retained evidence | `dsh-017-terminal-tail-recovery` | synthetic replay of a recorded fixture |
+| session isolation of retained evidence | same file | synthetic |
+
+### 9. Verification for this round
+
+`npm run build:client` then `npm run verify` reports **696 tests, 696 pass, 0 fail**, 11 above the Phase 7D figure of
+685. `node scripts/verify-sanitization.mjs` passes, `git diff --check` is clean, and `verify-structure.mjs` reports the
+client bundle fresh. Live-vs-durable equivalence over all eight 0.1.5 recordings (`dsh-equivalence`) and the rebaseline
+and mid-turn-reload suites all pass unchanged, as does `curve-source`, which is what keeps the recovered path inside the
+existing calibration pipeline rather than beside it.
+
+### 10. Runtime evidence, and the one case a live session cannot produce
+
+Re-verified at the start of the round rather than quoted: `dsh --version` → `0.1.7-rc.2`; executable
+`C:\Users\20659\AppData\Roaming\npm\dsh.cmd`; the installed package declares `0.1.7-rc.2`; the running web host is
+`"D:\softwares\nodejs\node.exe" C:\Users\20659\AppData\Roaming\npm/node_modules/@deepseek-ai/dsh/lib/bin.js web
+--no-open` (PID 38056). No restart and no `dev_reload_package` was used for the evidence below.
+
+**The Phase 7D.1 bundle is what the browser is served.** `window.__DSH_BOOT__.entries` carries
+`{"id":"dsh-turn-performance-meter","url":"plugins/??dsh-turn-performance-meter/client.js&rev=7e89ed4086d7"}` after a
+fresh page load, and that URL returns the module table containing `src/dsh/reconstruction.js`,
+`materializeReconstructedTurn`, `reconstructedAttemptId` and `MAX_RETAINED_TURNS`, with the Phase 7D log line
+`reconstructed from the durable window` absent.
+
+**Live meter contract, sampled in the page at 50 ms** during a real turn of this session: 3,945 samples, five distinct
+presentation states, and the observed transitions in order — `streaming-output` → `tool-running` → `waiting-model` →
+`streaming-output` → `tool-running` → `transition` → `waiting-model` → `streaming-reasoning` → `streaming-output` →
+`tool-running` → …, cycling through all five several times. Two properties are load-bearing:
+
+- **zero samples carried a `+N` label.** The defect class Phase 7D closed — a multi-call label claiming simultaneous
+  tools — did not reappear. Every tool sample named exactly one call (`mcp__chrome-devtool…`), which is also the
+  observation that matters for the running set: the plugin never held more than the calls it had actually seen open.
+- **the `transition` stage is reachable and reached**, so the settle → tool → step cycle is being folded rather than
+  skipped.
+
+**Completed card on a durable-only reload.** Reopening an existing settled session
+(`Sequential pwsh calls with sleeps`, `session-47771d28-…`) with no live turn running rendered
+`data-kind="completed" data-status="completed" data-quality="estimated" data-view="summary"`, cells
+`思考 TPS ≈227 tokens/s`, `输出 TPS ≈266 tokens/s`, `生成 Tokens 1,513 tokens · 总用时 66.9s`, `首响应 1.51 s`,
+`已完成`, footer `工具 8 · 35.8s`, `模型调用 9` — a card rebuilt entirely from the durable plane. Its text was byte-stable
+across a two-second resample, so no ticker or scheduler survives onto a static card.
+
+**No plugin console error.** The page's two errors are `useSessionPendingInteraction is not a function` and its
+consequent `slot entry crashed in 'conversation.session.header.utilities'`; the stack of the first is entirely inside
+the DSH shell bundle `assets/index-Q6zc2uHV.js` with no frame from `dsh-turn-performance-meter`, the crashing slot is
+the session header rather than `conversation.input.dock`, and the symbol is the pre-existing DSH template artifact
+recorded in §"Phase 5" of this log. Neither is evidence about this plugin.
+
+**What was not reproduced, stated plainly.** The tail scenario — a window whose `turn/start` has actually slid out
+while the turn's later rows remain — was **not** produced in the browser. Live observation uses the window as the
+session presents it, and a freshly loaded session carries the turn's opening row; on reload the page re-reads the whole
+window, so the miss path is not what a normal page load exercises. The case is nonetheless a real shape of the contract
+rather than a hypothetical one, which is why the fix is stated against the feed and not against a page load:
+`SessionEventWindow` is declared as a *contiguous* window carrying `hasMore` — "whether older history remains" —
+(`dsh-api-session-controller/lib/types/client/contract/events.d.ts:55-61`, `:77-93`), so the window is explicitly a
+bounded tail, `turn/start` can be outside it, and `replace` (loading a bounded window) plus `prepend` (paging older
+history) are the operations that produce exactly that state.
+
+The tail under test in §2 is therefore a **replay of recorded durable bytes in the tail's real shape**, not a
+DOM manipulation and not a synthetic session event: the rows are the fixture's own, at their recorded sequence numbers
+and timestamps, with the window cut after `turn/start` — which is the position `hasMore: true` describes. Browser-level
+instantiation of the cut is the one part of this phase that rests on the contract plus the replay rather than on a live
+observation, and it is marked as such here instead of being claimed.

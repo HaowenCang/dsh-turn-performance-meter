@@ -327,6 +327,75 @@ normative target from this phase onward is `0.1.7-rc.2` (public reference commit
 Acceptance gate: the plugin is verified against the only DSH it claims, `0.1.7-rc.2`, and the sequential-tool defect
 class that opened the phase is closed by regression test and by browser measurement.
 
+## Phase 7D.1 — terminal-tail durable metric reconstruction (complete)
+
+A correctness closure on the one thing Phase 7D left half-done. Phase 7D repaired the terminal **lifecycle** — a
+`turn/end` with no open record no longer returns silently — but not the metric **reconstruction**: the miss path opened
+an empty record and closed it, so a recovered card reported zero attempts, zero tokens and no tools while the turn's
+durable evidence sat in the window the handler had just read. No frozen metric, UI or curve semantic was re-opened, and
+Phase 8 was not begun.
+
+Baseline SHA `3602ce9179be22bcdc4259303546ebae4b827436`, equal to `origin/main`, working tree clean.
+
+- [x] Baseline re-verified rather than quoted: `git status` clean, `HEAD == origin/main == 3602ce9`, divergence `0 0`;
+      `dsh --version` → `0.1.7-rc.2`; executable `C:\Users\20659\AppData\Roaming\npm\dsh.cmd`; the running web process
+      resolved to `…/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open` (PID 38056) and the installed package
+      declares `0.1.7-rc.2`.
+- [x] Failing test written and run **before** any production change:
+      `test/dsh-017-terminal-tail-recovery.test.js`, first case
+      `a terminal durable tail without turn/start reconstructs the turn's durable metrics`, against baseline `3602ce9`.
+      Recorded result — reference 3 attempts / 2 tools / 147 generated tokens / `full` calibration coverage against a
+      recovered record of **0 attempts / 0 tools / `null` tokens / `none` coverage**; 10 of 11 cases failed.
+- [x] Durable evidence retention added to `SessionEventFeed` (`DurableEvidencePool`, bounded at 32 turns, oldest
+      released first), hooked into **both** entry routes — appended window entries and the entry carried by a
+      `settle-assistant` change — cleared by `rebaseline()`, per feed so sessions stay isolated, expose-only through
+      `turnEvents(turn)`, and decoding nothing.
+- [x] `src/dsh/reconstruction.js` added: `materializeReconstructedTurn()` calls `reconstructFromDurable` and routes its
+      output through the store's own methods, so the recovered record enters `aggregateTurn → curveSource →
+      attemptTraces` and the ordinary completed pipeline. **No third durable parser**: no decoding, tool pairing, retry
+      correlation or settlement classification outside `src/dsh/durable-path.js` and `src/dsh/adapter.js`.
+- [x] `TURN_END` + missing record now consumes the turn's durable evidence instead of opening an empty record.
+- [x] Unknown boundaries preserved: with no `turn/start` the recovery keeps `startMs` `null` and reports TTFT and turn
+      elapsed as **unavailable**, while recovering `firstTokenMs` from the durable generated samples. No value inferred
+      from a first delta, a `step/start`, a `tool/call`, the attach instant or the clock.
+- [x] Minimal case preserved: a window whose only evidence is `turn/end` closes terminally with 0 attempts, 0 tools, no
+      start, no TTFT, no elapsed and no fabricated sample or duration.
+- [x] `turnEndReconstructed` semantics narrowed and documented: it counts one reconciliation from available durable
+      evidence and deliberately does not claim the evidence was non-empty; the `turn-end-without-record` issue now
+      carries `reconstructedAttempts`, `reconstructedTools` and `startKnown`. No counter without a reader was added.
+- [x] Defect found inside Phase 7D.1's own scope: the `settle-assistant`-with-entry restore path already computed
+      `settlementEventType` but never landed it on the store record, so a reload-rebuilt card published `null` for every
+      attempt. Now attached beside the settlement state, matching the durable reconstruction path.
+- [x] Regression matrix re-verified: `message.toolCallId` / `role: 'tool'` / `message.isError` and malformed-identity
+      fail-closed unchanged (6 tests); 100 strictly sequential calls with maximum running count 1 and 0 unmatched
+      results unchanged (7); bare `settle-assistant` retirement versus true abandonment unchanged (7); all seven
+      `TurnEndReason` variants terminal and unknown reasons `statusKnown false` unchanged; late evidence cannot
+      resurrect a settled turn; rebaseline and per-session isolation of retained evidence covered by new tests.
+- [x] Fixture corpus audited honestly: `fixtures/dsh-0.1.7/` still holds exactly `index.json` and
+      `t01-sequential-tools.json`. **No lifecycle fixture was added and the corpus is not complete.** The recorder
+      observes only `ctx.on('session/event')` and `ctx.on('agent/assistant-stream')`; the `settle-assistant` window
+      change is emitted by the browser-side `ClientAssistantStream` fold and is never visible to the host process, so no
+      recorded fixture can contain one. Capturing it would require re-running the fold inside the host recorder (a
+      derived, not observed, artifact) or a new browser-side tracing facility. The retirement/abandonment distinction is
+      therefore covered by synthetic contract tests against the ported fold algebra, and is labelled synthetic.
+- [x] Documentation audited — `IMPLEMENTATION_LOG.md` (Phase 7D correction note plus the Phase 7D.1 entry),
+      `ARCHITECTURE.md`, `TEST_PLAN.md` §8, `TASKS.md`, `DSH_API_NOTES.md` §13.5. The sequential-tool distinction
+      (`actual concurrency 1` / `buggy running set 100` / `historical call count 100` / `unmatched results 100 → 0`)
+      was found **already correct on the baseline**; no documentation churn was required.
+- [x] `npm run build:client` then `npm run verify`: **696 tests, 696 pass, 0 fail**, 11 above the Phase 7D figure of
+      685; `node scripts/verify-sanitization.mjs` passes; `git diff --check` clean; bundle fresh.
+- [x] Runtime evidence without a reload shortcut: `dsh --version` `0.1.7-rc.2` and the web host process re-identified;
+      `window.__DSH_BOOT__` resolving the plugin to `…client.js&rev=7e89ed4086d7`, whose served module table contains
+      `src/dsh/reconstruction.js` and no longer the old log line; a 3,945-sample 50 ms page sampler over a real turn
+      recording five presentation states and **zero** `+N` labels; and a durable-only completed card on reopening an
+      existing settled session, byte-stable across a two-second resample. The one case not reproduced in the browser —
+      a window whose `turn/start` has actually slid out — is recorded as contract-plus-replay evidence rather than
+      claimed as an observation.
+- [x] Pushed to `origin/main`.
+
+Acceptance gate: `turn/end` terminal recovery with no live record and available durable tail evidence closes the
+lifecycle unconditionally **and** reconstructs the metrics from that evidence **and** fabricates no unavailable fact.
+
 ## Phase 8 — Release readiness
 
 **NOT STARTED.** No task in this phase has been begun; the entries below remain the intended work, not a record. Two of

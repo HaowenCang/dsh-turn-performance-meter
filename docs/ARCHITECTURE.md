@@ -449,13 +449,62 @@ and `rawTurnEndSeen` discriminates "the wire never delivered the boundary" from 
 A `turn/end` is terminal and is never refused for want of a record. The record is normally present, but the published
 window is a live tail, so a client that attached after the turn began can receive `turn/end` for a turn whose opening
 row is outside the window and whose transient rows were already superseded. That case is counted
-(`turnEndLookupMiss`, `turnEndReconstructed`), recorded as a `turn-end-without-record` issue, and repaired by
-reconstruction from the durable window: `startMs` is taken from the window's `turn/start` when it was observed and
-stays `null` otherwise, the machine is opened as a **recovered** boundary so it can own the turn identity and settle
-it, and the turn is closed with the reason the event carries. Nothing is invented — the reconstruction uses the
-authoritative boundary the host published, and the evidence it never observed stays absent rather than inferred from
-the live display. Late durable rows of a turn that already settled are dropped and counted rather than allowed to
-reopen it, so a completed card cannot be resurrected by evidence that arrives after its boundary.
+(`turnEndLookupMiss`, `turnEndReconstructed`) and recorded as a `turn-end-without-record` issue; the machine is opened
+as a **recovered** boundary so it can own the turn identity and settle it, and the turn is closed with the reason the
+event carries — which the host published authoritatively, so nothing about the live display is converted into evidence.
+Late durable rows of a turn that already settled are dropped and counted rather than allowed to reopen it, so a
+completed card cannot be resurrected by evidence that arrives after its boundary.
+
+As Phase 7D left it, that handling was **lifecycle only**: `startMs` came from `observedTurnStart` and the record was
+otherwise empty, so the card closed with no metrics. The paragraph above describes the behaviour from Phase 7D.1
+onward; the retention and materialization that make it true are the next subsection.
+
+#### Retention and the Phase 7D.1 repair of that reconstruction
+
+Phase 7D repaired the terminal **lifecycle** only: the miss path opened an empty record and closed it, so the card
+appeared with zero attempts, zero tokens and no tools while the turn's durable evidence sat in the window the handler
+had just read. Phase 7D.1 closes the metric half. Two things were added, and neither is a second parser.
+
+`SessionEventFeed` retains every durable row it accepts, keyed by the turn the row names, for the lifetime of the
+current window generation (`DurableEvidencePool`, bounded at `MAX_RETAINED_TURNS = 32` turns, oldest released first).
+Retention is hooked into **both** routes by which a durable row enters the feed — an appended window entry, and the
+entry carried by a `settle-assistant` change — because DSH delivers a settlement by both and a path covering only one
+would lose the attempts that travelled the other. `rebaseline()` clears the pool with the rest of the generation state;
+that boundary is what stops one generation's settlement being reconstructed together with another's `turn/end`.
+Consumers read rows through `turnEvents(turn)`; the feed decodes nothing.
+
+`src/dsh/reconstruction.js` bridges the reconstruction into the store.
+`materializeReconstructedTurn()` calls `reconstructFromDurable` (`src/dsh/durable-path.js`, still the only module that
+decodes a settlement) and routes its output through the store's own methods — `beginTurn`, `turnStartObserved`,
+`beginAttempt`, `acceptChunk`, `setAttemptUsage`, `settleAttempt`, `toolStarted`, `toolSettled`:
+
+```text
+turn/end with no open record
+  -> feed.turnEvents(turn)
+  -> reconstructFromDurable()
+  -> store.beginTurn / beginAttempt / acceptChunk / setAttemptUsage / settleAttempt / toolStarted / toolSettled
+  -> store.endTurn()
+  -> aggregateTurn -> curveSource -> compressAttempts -> attemptTraces -> render budgeting
+  -> completed card
+```
+
+The recovered record is therefore an ordinary store record and the recovered curve is the ordinary curve; there is no
+`tail recovery curve`. Attempt identity, which the durable plane does not carry (`attemptId` is process-local to the
+client fold and never enters a settlement), is `settlement:<settlementSeq>` — derived from the settlement's own
+sequence, never from a wall clock or a UUID, so replaying one window twice yields the same store key. It is a
+store-internal key and is never presented as a DSH attempt identity.
+
+What stays unknown is exactly what the tail cannot determine. With no `turn/start` row the record's `startMs` is
+`null`, and TTFT and turn elapsed — both intervals from the start — are `null` as well rather than inferred from the
+first delta, a `step/start`, a `tool/call`, the attach instant or the clock. `record.firstTokenMs` *is* recovered,
+because the settlement's embedded compact stream preserves the original delta timestamps and the earliest generated
+sample is observed durable evidence; a known first token beside an unavailable TTFT is the correct state, not a gap. A
+turn whose only visible row is its own `turn/end` reconstructs to an empty turn with no attempt, tool, duration or
+sample manufactured to fill the card.
+
+`turnEndReconstructed` counts one reconciliation — a miss that was closed from available durable evidence — and
+deliberately does not claim that evidence was non-empty; the `turn-end-without-record` issue carries
+`reconstructedAttempts`, `reconstructedTools` and `startKnown` for a caller that needs the distinction.
 
 The feed's diagnostics also keep the three tool quantities separate, because a single counter cannot express the
 distinction the compact pill needs: `historicalTools` is what the settled turn record holds, `liveRunningTools` is the

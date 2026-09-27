@@ -486,3 +486,40 @@ Baseline for this phase: **685 tests, 685 pass, 0 fail** (648 before the phase).
 `scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`. Sanitization is a separate gate —
 `node scripts/verify-sanitization.mjs` — and it now also covers `fixtures/dsh-0.1.7/` alongside the 0.1.5 capture family
 and the derived mutations.
+
+## 8. Phase 7D.1 — terminal-tail durable metric reconstruction
+
+One defect, one file of new tests, no frozen semantic touched. The subject is the equality
+
+```text
+terminal-tail recovery  ==  durable reconstruction of the same evidence
+```
+
+and its complement: a field the tail's evidence does not determine must be `unavailable`, never inferred.
+
+- `test/dsh-017-terminal-tail-recovery.test.js` (11 tests). The tail under test is the real
+  `fixtures/dsh-0.1.7/t01-sequential-tools.json` recording with `turn/start` (seq 4) removed and nothing else: 3
+  `assistant/message`, 2 `tool/call`, 2 `tool/result`, the step boundaries and `turn/end`, with no transient row at all.
+  Expected values are never written by hand — they come from `reconstructFromDurable()` over the same tail reduced
+  through `TurnTelemetryStore`, so a disagreement is a disagreement about evidence rather than about a literal.
+  - **the main blocker** — a terminal durable tail without `turn/start` reconstructs the turn's durable metrics:
+    attempts, per-attempt sample times and phase segmentation, usage and its source, settlement kind/outcome/sequence,
+    tool intervals and statuses, `startMs`, `firstTokenMs`, status and note, duration, and the whole settled metric
+    tuple including `temporalAllocationMode` and the three quality axes — compared field by field against a second
+    reference built from the **full** recording, which proves the tail loses exactly the start-dependent fields;
+  - **the metric pipeline** — the recovered curve is `full`-coverage calibrated, its attempt count matches the turn's,
+    and its peak equals the reference peak, which is what shows the recovery re-entered `aggregateTurn → curveSource →
+    attemptTraces` rather than assembling a card of its own;
+  - **unknown boundaries** — TTFT and turn elapsed are `null` with no `turn/start`, while `firstTokenMs` is recovered
+    from the durable generated samples; no value is inferred from a first delta, a `step/start`, a `tool/call`, the
+    attach instant or the clock;
+  - **ingestion routes** — the same equality holds when the tail arrives one `append` at a time, and when settlements
+    are inserted by `settle-assistant` with their entry rather than appended, which is the route DSH uses for
+    interrupted messages and non-surface `attempt` settlements;
+  - **minimal evidence** — a window whose only row is `turn/end` closes terminally with zero attempts, zero tools, no
+    start, no TTFT, no elapsed, no samples and no fabricated duration;
+  - **no regression** — a full durable window containing `turn/start` takes the ordinary path with
+    `turnEndLookupMiss` 0 and equals the full-recording reference including TTFT and elapsed;
+  - **generation and session isolation** — a `replace` drops the superseded generation's retained evidence, so no old
+    settlement can be reconstructed together with a new `turn/end`; two sessions using the same turn number do not
+    share retained rows; and a recovered turn leaves nothing behind for the turn that follows it.

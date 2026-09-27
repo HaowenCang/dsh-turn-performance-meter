@@ -4,34 +4,48 @@ A turn-level performance meter for DeepSeek Harness (DSH) agent workflows. It is
 
 面向 DeepSeek Harness（DSH）Agent 工作流的 turn 级性能统计插件。它适用于一个 turn 内存在多次模型调用、工具调用、重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计卡片。完成态卡片按整个 turn 聚合。
 
-> Status: Phase 6 complete. The turn-level engine, the DSH adapter with both semantic preflight audits, the production
-> Live Client integration, the **completed turn summary card** and the **hover/focus TPS curve** are in place, and the
-> curve's attempt semantics were hardened against an independent audit of the Phase 5 commit. The live meter and the
-> completed card run inside the real DSH web client against `ctx.sessions.binding().eventSource`, verified by 454
-> offline tests and by instrumented real-browser sessions (light, dark, narrow, and a measured 200/50/10 ms
-> presentation-cadence A/B). Both views are a projection of settled or live evidence and never re-derive a metric in
-> React. The meter sits in `conversation.input.dock`, above the composer; the native statistics keep their own seat
-> below it.
+> Status: Phase 7D.1 complete; Phase 8 (release readiness) not started. The turn-level engine, the DSH adapter with both
+> semantic preflight audits, the production Live Client integration, the **completed turn summary card** and the
+> **hover/focus TPS curve** are in place, and the plugin is verified against DSH `0.1.7-rc.2`. The live meter and the
+> completed card run inside the real DSH web client against `ctx.sessions.binding().eventSource`, verified by offline
+> tests and by instrumented real-browser sessions (light, dark, narrow, and a measured 200/50/10 ms presentation-cadence
+> A/B). Both views are a projection of settled or live evidence and never re-derive a metric in React. The meter sits in
+> `conversation.input.dock`, above the composer; the native statistics keep their own seat below it.
 >
-> Phase 6 corrected two blocking defects and two smaller ones, all found by reading the Phase 5 code rather than by
-> running it: the completed rolling TPS window had been rolled across attempt boundaries (the compressed x-axis is
-> continuous, the measurement window is not); one interval per phase could not express a phase occurring in several
-> disjoint episodes and drew a zero line through the stretches where it was absent; `curve.quality` was derived from
-> `usageComplete` instead of the temporal-shape axis; and core `LiveMeter`/`TurnTelemetryStore` carried a dead
-> `refreshMs` option that implied the core scheduled the screen. Each correction ships with a test the old
+> Phase 7D.1 closed one correctness gap in the completion path. A `turn/end` arriving with no open record — the normal
+> case when the published window is a live tail that has slid past the turn's opening row — previously produced a card
+> whose metrics were empty while that turn's settlements, usage and tool boundaries were in the same window. The
+> terminal boundary now reconstructs the record from the durable evidence the window still holds, through the existing
+> `reconstructFromDurable` pipeline and the ordinary `aggregateTurn → curveSource → attemptTraces` route, so the
+> recovered card carries the same numbers as a durable reconstruction of the same evidence. A start boundary the tail
+> never contained is not invented: TTFT and turn elapsed report as unavailable. Curves, calibration vocabulary, the
+> 512-point budget and every frozen metric semantic are untouched.
+>
+> 状态：Phase 7D.1 已完成；Phase 8（发布准备）尚未开始。指标口径、DSH adapter（含两项前置语义审计）、生产级实时 Client
+> 集成、**完成态统计卡片**与**悬停/聚焦 TPS 曲线**均已落地，并针对 DSH `0.1.7-rc.2` 完成验证。实时组件与完成态卡片都在
+> 真实 DSH Web 客户端中基于 `ctx.sessions.binding().eventSource` 运行，由离线测试与带页面内埋点的真实浏览器会话
+> （light / dark / narrow，以及 200/50/10 ms 刷新节奏 A/B 实测）共同验证。两个视图都只是既有证据的投影，React 层不重新
+> 计算任何指标。插件挂载在 `conversation.input.dock`（输入框上方）；原生统计保留其输入框下方的原位置。
+>
+> Phase 7D.1 收口了完成态路径上的一处正确性缺口。当 `turn/end` 到达而当前没有已打开的 record 时（发布窗口是实时 tail、
+> 已滑过该 turn 起始行时的常见情形），旧实现会产出一张指标为空的卡片，而该 turn 的 settlement、usage 与工具边界就在同一个
+> 窗口里。现在终末边界会从窗口仍持有的 durable 证据重建 record，沿用既有 `reconstructFromDurable` 管线与常规
+> `aggregateTurn → curveSource → attemptTraces` 路径，因此恢复出的卡片与同一证据的 durable 重建得到相同数字。tail 从未包含
+> 的 start 边界不会被编造：TTFT 与 turn elapsed 如实报告为不可用。曲线、校准词汇、512 点预算与全部已冻结的指标语义均未改动。
+>
+> Earlier phases, retained as history. Phase 6 corrected two blocking defects and two smaller ones, all found by reading
+> the Phase 5 code rather than by running it: the completed rolling TPS window had been rolled across attempt boundaries
+> (the compressed x-axis is continuous, the measurement window is not); one interval per phase could not express a phase
+> occurring in several disjoint episodes and drew a zero line through the stretches where it was absent; `curve.quality`
+> was derived from `usageComplete` instead of the temporal-shape axis; and core `LiveMeter`/`TurnTelemetryStore` carried
+> a dead `refreshMs` option that implied the core scheduled the screen. Each correction ships with a test the old
 > implementation fails, and three turns were recorded (`t6` tool-only, `t7` failing command, `t8` no-retry).
 >
-> 状态：Phase 6 已完成。指标口径、DSH adapter（含两项前置语义审计）、生产级实时 Client 集成、**完成态统计卡片**与
-> **悬停/聚焦 TPS 曲线**均已落地；曲线的 attempt 语义已按 Phase 5 commit 的独立代码审计完成加固。实时组件与完成态
-> 卡片都在真实 DSH Web 客户端中基于 `ctx.sessions.binding().eventSource` 运行，由 454 个离线测试与带页面内埋点的
-> 真实浏览器会话（light / dark / narrow，以及 200/50/10 ms 刷新节奏 A/B 实测）共同验证。两个视图都只是既有证据的
-> 投影，React 层不重新计算任何指标。插件挂载在 `conversation.input.dock`（输入框上方）；原生统计保留其输入框下方的原位置。
->
-> Phase 6 修复了两个阻断缺陷与两个次要问题，全部来自阅读 Phase 5 代码而非运行结果：完成态滑动 TPS 窗口曾被跨 attempt
-> 拼接（压缩横轴连续，测量窗口不连续）；每个 phase 仅一个区间无法表达离散 episode，会在 phase 缺席的区段画出零线；
-> `curve.quality` 曾由 `usageComplete` 推导而非时间形状轴；core 的 `LiveMeter` / `TurnTelemetryStore` 残留了一个无效的
-> `refreshMs` 选项，暗示 core 负责屏幕刷新。每项修复都附带一个旧实现必然失败的测试，并新增三段真实录制（`t6` 纯工具、
-> `t7` 命令失败、`t8` 无重试）。
+> 早前阶段（作为历史保留）。Phase 6 修复了两个阻断缺陷与两个次要问题，全部来自阅读 Phase 5 代码而非运行结果：完成态滑动
+> TPS 窗口曾被跨 attempt 拼接（压缩横轴连续，测量窗口不连续）；每个 phase 仅一个区间无法表达离散 episode，会在 phase 缺席
+> 的区段画出零线；`curve.quality` 曾由 `usageComplete` 推导而非时间形状轴；core 的 `LiveMeter` / `TurnTelemetryStore`
+> 残留了一个无效的 `refreshMs` 选项，暗示 core 负责屏幕刷新。每项修复都附带一个旧实现必然失败的测试，并新增三段真实录制
+> （`t6` 纯工具、`t7` 命令失败、`t8` 无重试）。
 
 ## 0. DSH compatibility / 兼容性
 
@@ -45,7 +59,10 @@ remain evidence for the metric arithmetic, the decoder and historical compatibil
 for the tool/result shape, the settle-assistant semantics, the turn completion lifecycle or the client event-window
 behaviour. No `package.json` compatibility-range field is added, because DSH's plugin peer/preflight mechanism was not
 verified as a supported gating schema for this project. The field-by-field contract record is in
-`docs/DSH_API_NOTES.md` §13.
+`docs/DSH_API_NOTES.md` §13. Phase 7D.1 completes the terminal-tail handling that Phase 7D left at the lifecycle level:
+a `turn/end` arriving with no open record now reconstructs the turn from the durable evidence the window still holds —
+attempts, embedded streams, usage, tool intervals — instead of closing an empty record, while a start boundary the tail
+never contained stays unknown and TTFT and elapsed stay unavailable rather than inferred.
 
 本项目当前支持并测试的 DSH 版本为 **`0.1.7-rc.2`**（公开参考 commit
 `477b4f420553e8a52c2fbccc464d7561b239c443`），已针对本机安装的包验证。Phase 7D 将 adapter、client feed 与完成态路径迁移到
@@ -54,7 +71,9 @@ verified as a supported gating schema for this project. The field-by-field contr
 终止性；会话日志格式为 v4。`0.1.5` 不再声明为受支持版本：`fixtures/dsh-turns/` 下的八段录制仍是指标算术、解码器与历史
 兼容性的证据，但不再是 tool/result 形状、settle-assistant 语义、turn 完成生命周期或客户端事件窗口行为的证据。不新增
 `package.json` 兼容范围字段，因为 DSH 的 plugin peer/preflight 机制未被验证为本项目可用的门控 schema。逐字段契约记录见
-`docs/DSH_API_NOTES.md` §13。
+`docs/DSH_API_NOTES.md` §13。Phase 7D.1 补齐 Phase 7D 只做到生命周期层面的终末 tail 处理：当 `turn/end` 到达而当前没有
+已打开的 record 时，改为从窗口仍持有的 durable 证据（attempt、内嵌 stream、usage、工具区间）重建该 turn，而不是关闭一个
+空 record；而 tail 从未包含的 start 边界仍保持未知，TTFT 与 elapsed 保持不可用，不再被推断。
 
 ## 1. Frozen product requirements / 已冻结需求
 
@@ -185,7 +204,7 @@ dsh-turn-performance-meter/
 │     ├─ live/          state machine, presenter, scheduler, controller, MeterRoot,
 │     │                 React pill, locale, CSS
 │     └─ completed/     completed-card view tree + React binding + card CSS
-├─ test/                39 test files (core / dsh / live / completed / bundle)
+├─ test/                60 test files (core / dsh / live / completed / bundle)
 └─ scripts/             verify-structure, bundle-client, build-client, sanitize-fixtures
 
 dev/                    dev-only tooling, not part of the bundle
@@ -276,9 +295,9 @@ localStorage.setItem('dsh-turn-performance-meter.debug', '1')
 
 ## 7. Build order / 构建顺序
 
-Do not start from visual polish. The order is: local API reconnaissance → telemetry normalization → pure metric tests → live rolling TPS → tool timing → completed turn aggregation → compressed timeline → calibrated curve → completed/hover UI → interruption/retry/error handling → browser/E2E verification. Phases 0–4 (reconnaissance, pure engine, DSH telemetry normalization, live client integration + live meter UI, completed turn summary card) are complete; Phase 5 (the mandatory completed TPS curve and its hover/focus alternate view) is next.
+Do not start from visual polish. The order is: local API reconnaissance → telemetry normalization → pure metric tests → live rolling TPS → tool timing → completed turn aggregation → compressed timeline → calibrated curve → completed/hover UI → interruption/retry/error handling → browser/E2E verification. Phases 0–7D.1 are complete, ending with the terminal-tail reconstruction closure; Phase 8 (release readiness) has not been started.
 
-不要从视觉细节开始。顺序为：本机 API 勘察 → 遥测归一化 → 纯指标测试 → 实时滚动 TPS → 工具计时 → turn 完成态聚合 → 压缩时间轴 → 校准 TPS 曲线 → 完成态/悬停 UI → 中断/重试/错误处理 → 浏览器/E2E 验证。Phase 0–4（勘察、纯引擎、DSH 遥测归一化、实时 Client 集成 + 实时组件 UI、完成态统计卡片）已完成，下一步为 Phase 5（必选的完成态 TPS 曲线及其悬停/聚焦切换视图）。
+不要从视觉细节开始。顺序为：本机 API 勘察 → 遥测归一化 → 纯指标测试 → 实时滚动 TPS → 工具计时 → turn 完成态聚合 → 压缩时间轴 → 校准 TPS 曲线 → 完成态/悬停 UI → 中断/重试/错误处理 → 浏览器/E2E 验证。Phase 0–7D.1 已完成，最后一项为终末 tail 重建收口；Phase 8（发布准备）尚未开始。
 
 The executable task list and acceptance gates are in `docs/TASKS.md`. The prompt to start DeepSeek V4.1 Flash is in `docs/START_PROMPT.md`.
 

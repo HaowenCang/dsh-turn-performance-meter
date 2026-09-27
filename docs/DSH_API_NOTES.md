@@ -335,7 +335,32 @@ attempt identities that received a durable settlement directly and a budget of o
 durable coordinate, and it consumes one budget entry per bare call (see `docs/ARCHITECTURE.md`, §"Phase 7D — tool-role
 results, window changes and completion evidence").
 
-### 13.5 Supported version
+### 13.5 `SessionEventWindow`, and the evidence a host-side recorder cannot see
+
+`SessionEventChange` (`dsh-api-session-controller/lib/types/client/contract/events.d.ts:41-61`) has four arms —
+`replace`, `append`, `prepend` and `settle-assistant` — and `settle-assistant` carries an **optional** `entry`. The
+window is a **live tail**, so a client that attaches mid-turn normally holds no `turn/start` for the open turn while
+holding that turn's settlements, tool boundaries and terminal `turn/end`. Nothing in the contract obliges the window to
+begin at a turn boundary, and nothing marks where it begins.
+
+That has a consequence for evidence collection that is worth recording here rather than in a test file. The host-side
+recorder observes exactly two seams:
+
+```text
+ctx.on('session/event', (session, event) => …)             durable plane
+ctx.on('agent/assistant-stream', ({agent, frame}) => …)    transient plane
+```
+
+The `settle-assistant` **change** is neither. It is produced by the browser-side client fold
+(`ClientAssistantStream`, §13.4) when it supersedes an attempt's transient rows, and it is delivered to the browser's
+window subscriber; the host process never sees it as a row. A recorded fixture therefore **cannot** contain a
+`settle-assistant` change, however faithfully it captures the two planes, and `fixtures/dsh-0.1.7/t01-sequential-tools.json`
+does not exercise the retirement lifecycle. Reproducing that change in a recording would require either running the fold
+inside the host recorder — which would make the row a derived artifact rather than observed evidence — or a browser-side
+recorder, which is a different kind of instrument. The retirement/abandonment distinction is consequently established by
+the fold algebra above and by synthetic contract tests against a port of it, not by a capture.
+
+### 13.6 Supported version
 
 The only supported and tested DSH for this project is `0.1.7-rc.2`, verified against the locally installed package
 recorded above. This project does **not** claim 0.1.5 support. The 0.1.5-rc.2 captures retained under
