@@ -461,6 +461,72 @@ identical in implementation, comments, documentation and tests; every Phase 7D /
 verify run reports 0 failures; and the phase lands as an ordinary fast-forward push with `HEAD == origin/main` and a clean
 working tree, with no force operation of any kind.
 
+## Phase 7D.1.2 — Generation-wide durable identity closure
+
+The last small correctness closure after Phase 7D.1.1. No metric semantics, no UI, no curve arithmetic, no DSH
+0.1.7-rc.2 contract, and no re-design of the eviction policy. Baseline
+`b188511e80653f2cb9d54a046fdeabe1fc0e1e4a`, re-verified at the start of the round rather than quoted
+(`HEAD == origin/main`, divergence `0 0`, working tree clean, `dsh --version` → `0.1.7-rc.2`).
+
+- [x] Both Phase 7D.1.1 repairs re-verified as frozen and left untouched: `materializeReconstructedTurn()` still accepts
+      no caller `timeMs`, a missing durable `turn/start` still yields `startMs` / `ttftMs` / `turnElapsedMs` `null` while
+      a real `turn/start` is still used, and eviction is still least-recently-updated with another durable row of a turn
+      refreshing its retention position.
+- [x] **Defect closed — a duplicate `seq` can no longer touch retention.** Root cause: two structures answered "has this
+      row been seen" differently. `DurableEvidencePool.seqs` released a row's seq on eviction while the feed's
+      generation-wide `durableSeqs` did not, and `processDurable()` retained *before* the generation-wide duplicate
+      check — so replaying `row(turn 1, seq 1)` after turn 1's eviction had that one call both re-admit the row (with a
+      counter increment and a different later eviction victim) and reject it as `duplicate-durable-event`. Two frozen
+      statements were violated: a duplicate does not count as activity, and `retainedDurableEvents` counts the distinct
+      durable rows admitted during the generation.
+- [x] **Fix — admission precedes retention, and identity lives in one set.** A single gate,
+      `SessionEventFeed.admitDurable(event)`, records the `seq` as seen before retention is attempted and before
+      normalization, so a row refused for either reason is refused for good; both durable entry routes call it.
+      `DurableEvidencePool` now holds evidence bytes only — no seq set — so `record()` validates the turn and stores the
+      row, and `evict()` is a single map `delete` per released turn with no walk over that turn's rows, since nothing
+      outside the map is derived from them. Eviction forgets retained row bytes but not the fact that the `seq` was
+      already seen; `rebaseline()` remains the only boundary that clears both, so the fix is not process-lifetime dedupe.
+      Source comments state the real complexity and the two lifetimes; `docs/ARCHITECTURE.md` agrees.
+- [x] **Second entry route closed.** `applySettlement()` previously retained the settlement and added its seq without any
+      duplicate check, so a repeated `settle-assistant` entry refreshed its turn and emitted a second `attempt-settle`
+      over an already-committed outcome. It now passes the same admission gate, fails closed, and records
+      `duplicate-durable-event`. Normal retirement and abandonment semantics are unchanged.
+- [x] `counters.retainedDurableEvents` now genuinely counts **distinct durable rows admitted into retention during the
+      generation**: eviction does not decrement it, a duplicate does not increment it whether the original row is
+      resident or evicted, a row naming no turn is admitted as an identity but not counted because `turnEvents(turn)`
+      can never retrieve it, `rebaseline()` resets it, and a seq admitted in the replayed generation counts again.
+- [x] Failing tests written and run **first**, on `b188511`: `test/dsh-017-durable-identity.test.js` (5 tests) failed 3
+      of 5 — the post-eviction duplicate re-entered retention, the duplicate settlement emitted twice (`2 !== 1`), and
+      the counter reached `34` where `33` is the contract. The two complements (a duplicate of a still-resident row, and
+      seq reuse after a rebaseline) passed and were pinned. The decisive case is a **control comparison**: two feeds
+      receive the same legitimate evidence and only one receives the replayed row, so the harm shows as a later
+      legitimate turn being released rather than as a number that a re-admission back to the bound would hide.
+- [x] Two Phase 7D.1.1 cases in `test/dsh-017-retention-contract.test.js` were moved onto the real `append` route, since
+      admission is what refuses a duplicate and `retainDurable()` is the storage primitive below that gate; the
+      assertions themselves are unchanged.
+- [x] Gates, reported as a **local test result** because this repository has no CI runner: `npm run build:client`
+      rebuilt the bundle to 481,581 bytes mirrored to `lib/client.js`; `npm run verify` reports **714 tests, 714 pass,
+      0 fail** (5 above the Phase 7D.1.1 figure of 709) with `structure OK (14 required files, 16 core modules,
+      63 test files, client bundle fresh)`; `git diff --check` is clean; `node scripts/verify-sanitization.mjs` passes;
+      `client.js` and `lib/client.js` are byte-identical.
+- [x] Minimal clean-runtime smoke, no `dev_reload_package` as evidence: after a cache-ignoring reload the plugin's
+      loader entry is active and the live meter renders in the composer dock
+      (`.dsh-tpm-root[data-kind="live"][data-state="tool-running"]`, `aria-label="工具 · 8m48s"`), the served bundle
+      contains this phase's `admitDurable` gate and generation-wide identity vocabulary, and no new plugin console error
+      appears. The completed card was not separately re-observed: live and completed are mutually exclusive projections of
+      one slot and the conversation mounts only the turn being read, so a card cannot be mounted while the agent's own turn
+      is running; card rendering stays covered by the `live-presenter` and `completed-lifecycle` suites. No long browser
+      A/B was repeated, because no presentation path changed.
+- [x] Documentation scope kept to `src/dsh/client-feed.js` comments, `docs/ARCHITECTURE.md`,
+      `docs/IMPLEMENTATION_LOG.md`, `docs/TASKS.md` and `docs/TEST_PLAN.md`. No README or release material was touched.
+
+Acceptance gate: a post-eviction duplicate cannot re-enter retention, refresh an LRU position, change an eviction victim
+or increment `retainedDurableEvents`; a duplicate `settle-assistant` entry cannot emit a second settlement; durable seq
+identity is generation-wide while `rebaseline()` still permits reuse in the next generation; the least-recently-updated
+policy is unchanged for genuinely new evidence; every previous regression suite passes; the local verify run reports
+0 failures; and the phase lands as an ordinary fast-forward push with `HEAD == origin/main` and a clean working tree,
+with no force operation of any kind.
+
 ## Phase 8 — Release readiness
 
 **NOT STARTED.** No task in this phase has been begun; the entries below remain the intended work, not a record. Two of

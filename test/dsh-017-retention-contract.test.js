@@ -27,6 +27,15 @@
  * The eviction assertions are deliberately observable through the public surface
  * (`retainedTurnCount()`, `turnEvents()`) rather than through the pool's internals,
  * so they constrain the shipped behaviour rather than a private field.
+ *
+ * Two routes reach the retention, and this file uses both for what each one is able to
+ * show. `retainDurable(row)` is the storage primitive: it retains exactly the row it is
+ * given, which is what makes capacity and ordering assertions readable as arithmetic.
+ * `applyWindow(...)` is the wire route, and it is the only route that also *admits* —
+ * a durable `seq` is recorded as seen at admission, before retention is attempted, so a
+ * duplicate is refused there and never reaches the pool at all. Where a test is about a
+ * duplicate, it goes through `applyWindow`; the pool-level cases that must be pinned
+ * past eviction live in `dsh-017-durable-identity.test.js`.
  */
 
 import test from 'node:test'
@@ -226,22 +235,29 @@ test('a surviving turn returns its rows in durable arrival order, interleaved ar
 test('a duplicate seq neither duplicates a row nor refreshes its turn', () => {
   /**
    * Two separate guarantees. A replayed row must not appear twice in `turnEvents`,
-   * and — because a duplicate is refused before the map is touched — it must not
-   * count as activity either. Otherwise replaying one generation's rows in order
-   * would refresh every turn in replay order and could evict a turn that the same
-   * evidence delivered once would have kept.
+   * and — because a duplicate is refused at admission, before retention is touched —
+   * it must not count as activity either. Otherwise replaying one generation's rows in
+   * order would refresh every turn in replay order and could evict a turn that the
+   * same evidence delivered once would have kept.
    *
    * The observable consequence is the eviction victim. Turns 1..32 are resident and
    * their last arrivals are in that order, so admitting turn 33 releases turn 1 —
    * unless a re-delivered row of turn 1 had refreshed it, in which case turn 2 would
    * be released instead.
+   *
+   * The replay travels the real `append` route rather than calling `retainDurable`
+   * directly: admission is what refuses a duplicate, and `retainDurable` is the
+   * storage primitive *below* that gate (see `dsh-017-durable-identity.test.js` for
+   * the post-eviction case, where the row itself has been released).
    */
   const { feed } = makeFeed()
-  retainAll(feed, ALL_32.map(turn => row(turn, turn)))
+  const generation = ALL_32.map(turn => row(turn, turn))
+  feed.applyWindow({ entries: windowEntries(generation), revision: 1, change: { kind: 'replace', entries: windowEntries(generation) } })
 
-  const replayed = feed.retainDurable(row(1, 1))
-  assert.equal(replayed, false, 'the duplicate was refused')
-  assert.deepEqual(feed.turnEvents(1).map(entry => entry.seq), [1], 'and did not duplicate the row')
+  const replayed = row(1, 1)
+  feed.applyWindow({ entries: windowEntries([replayed]), revision: 2, change: { kind: 'append', entries: windowEntries([replayed]) } })
+  assert.deepEqual(feed.turnEvents(1).map(entry => entry.seq), [1], 'the duplicate did not duplicate the row')
+  assert.equal(feed.counters.retainedDurableEvents, MAX_RETAINED_TURNS, 'and was not counted as an admission')
 
   feed.retainDurable(row(33, 200))
   assert.deepEqual(feed.turnEvents(1), [], 'the duplicate did not refresh turn 1: it was released')
@@ -296,18 +312,27 @@ test('a rebaseline clears the whole pool, not just its dedupe state', () => {
  * retainedDurableEvents semantics
  * ------------------------------------------------------------------ */
 
-test('retainedDurableEvents is a cumulative ingest count, not the current row count', () => {
+test('retainedDurableEvents is a cumulative admission count, not the current row count', () => {
   /**
-   * The counter is republished from the pool's `eventCount`, which is never
-   * decremented on eviction. Its contract is therefore "unique durable rows admitted
-   * into retention during this generation", and a consumer that reads it as current
-   * occupancy is reading it wrong. The live occupancy has a separate, honest accessor
-   * (`retainedTurnCount()`), so the difference is asserted here rather than papered
-   * over with a decrement.
+   * The counter is incremented once per durable `seq` admitted to the generation, and
+   * is never decremented on eviction. Its contract is therefore "distinct durable rows
+   * admitted into retention during this generation", and a consumer that reads it as
+   * current occupancy is reading it wrong. The live occupancy has a separate, honest
+   * accessor (`retainedTurnCount()`), so the difference is asserted here rather than
+   * papered over with a decrement.
+   *
+   * The rows travel the real `append` route, because admission is what the counter
+   * counts; `retainDurable` alone is the storage primitive below that gate and does
+   * not admit anything.
    */
   const { feed } = makeFeed()
   const admitted = MAX_RETAINED_TURNS + 8
-  for (let turn = 1; turn <= admitted; turn += 1) feed.retainDurable(row(turn, turn))
+  const first = [row(1, 1)]
+  feed.applyWindow({ entries: windowEntries(first), revision: 1, change: { kind: 'replace', entries: windowEntries(first) } })
+  for (let turn = 2; turn <= admitted; turn += 1) {
+    const appended = [row(turn, turn)]
+    feed.applyWindow({ entries: windowEntries(appended), revision: turn, change: { kind: 'append', entries: windowEntries(appended) } })
+  }
 
   const currentlyHeld = residentTurns(feed, Array.from({ length: admitted }, (_, index) => index + 1))
   assert.equal(feed.counters.retainedDurableEvents, admitted, 'cumulative: every admission counted once')
@@ -320,11 +345,14 @@ test('retainedDurableEvents is a cumulative ingest count, not the current row co
   )
 
   /** A duplicate is not an admission. */
-  feed.retainDurable(row(admitted, admitted))
+  const replay = [row(admitted, admitted)]
+  feed.applyWindow({ entries: windowEntries(replay), revision: 1000, change: { kind: 'append', entries: windowEntries(replay) } })
   assert.equal(feed.counters.retainedDurableEvents, admitted, 'a refused duplicate did not increment the counter')
-  /** A row naming no finite turn is not an admission either: it cannot be retrieved. */
-  feed.retainDurable({ type: 'assistant/message', seq: 99999, data: {} })
-  assert.equal(feed.counters.retainedDurableEvents, admitted, 'an unkeyable row did not increment the counter')
+  /** Neither is a row that names no finite turn: there is no turn to retrieve it by. */
+  const unkeyable = [{ type: 'event', event: { type: 'assistant/message', seq: 99999, time: 1, data: {} } }]
+  feed.applyWindow({ entries: unkeyable, revision: 1001, change: { kind: 'append', entries: unkeyable } })
+  assert.equal(feed.counters.retainedDurableEvents, admitted, 'an unkeyable row is not retained, and not an admission')
+  assert.equal(feed.retainedTurnCount(), MAX_RETAINED_TURNS, 'and it occupies no slot')
 })
 
 /* ------------------------------------------------------------------ *

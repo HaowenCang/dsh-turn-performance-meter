@@ -3303,3 +3303,114 @@ settled session `Sequential pwsh calls with sleeps`: `.dsh-tpm-root[data-kind="c
 pre-existing `useSessionPendingInteraction` template artifact, whose stack is entirely inside the DSH shell bundle
 `assets/index-Q6zc2uHV.js` with no frame from this plugin, plus shell and other-plugin 404 polling. No long browser
 performance A/B was repeated, because no presentation path changed.
+
+## Phase 7D.1.2 — generation-wide durable identity closure
+
+### 1. Scope, and what was deliberately not touched
+
+A closure phase with one subject. Baseline `b188511e80653f2cb9d54a046fdeabe1fc0e1e4a`, re-verified at the start of the
+round rather than quoted (`HEAD == origin/main`, divergence `0 0`, working tree clean, `dsh --version` → `0.1.7-rc.2`).
+No metric semantics, no UI, no curve arithmetic, no DSH 0.1.7-rc.2 contract and no eviction policy was reopened. The two
+Phase 7D.1.1 repairs were treated as frozen: `materializeReconstructedTurn()` still accepts no caller `timeMs`, and
+eviction is still least-recently-updated with another row of a turn refreshing that turn's retention position.
+
+### 2. The defect — eviction and generation-wide dedupe disagreed about identity
+
+Two structures held different answers to "has this durable row been seen", and the retention consulted the weaker one:
+
+```text
+DurableEvidencePool.seqs        released a row's seq when its turn was evicted
+SessionEventFeed.durableSeqs    generation-wide, cleared only by rebaseline()
+```
+
+`processDurable()` then ran `retainDurable(event)` *before* the generation-wide duplicate check. A replayed row of an
+evicted turn was therefore no longer a duplicate for retention while still being one for ingestion, so the same call both
+accepted and refused it. The deterministic counterexample is short: retain turns 1..32, admit turn 33 (turn 1 released,
+`pool.seqs` forgets seq 1), then replay `row(turn 1, seq 1)` in the same generation. `retainDurable` re-admitted it,
+which incremented `retainedDurableEvents` and put the pool one turn over its bound, so the **next** admission released a
+turn that the identical evidence without the replay would have kept; only afterwards did `durableSeqs.has(1)` report
+`duplicate-durable-event` and drop the normalized event.
+
+Two frozen statements were violated by that: a duplicate `seq` does not count as activity, and
+`retainedDurableEvents` counts the distinct durable rows admitted during the generation. A row that ingestion rejected
+still mutated retention, and the same `seq` could increase the counter twice.
+
+The reachable form is worth stating precisely, because it bounds what a test can show. A duplicate is refused while its
+seq is still in the retention set, so the only duplicate that could be re-admitted is one whose row had already been
+evicted — and a duplicate that pushes the pool back to its bound is invisible in both the counter and the occupancy. The
+observable harm is therefore a *later legitimate* turn being released, which is why the new test asserts a control
+comparison rather than a number: two feeds receive the same legitimate evidence, one of them additionally receives the
+replayed row, and their resident sets and counters must agree.
+
+### 3. The fix — admission before retention, and one identity set
+
+Every durable entry route now passes one gate, `SessionEventFeed.admitDurable(event)`, whose substance is its order: the
+`seq` is recorded as seen before retention is attempted and before normalization, so a row refused for either reason is
+refused for good. Both routes call it — `processDurable()` for appended window entries and `applySettlement()` for the
+entry carried by a `settle-assistant` — and both retain only after it has admitted them. The second route previously had
+no duplicate check at all, so a repeated settlement entry could both refresh its turn and emit a second `attempt-settle`
+over an outcome that was already committed.
+
+Retention itself lost its private identity set. `DurableEvidencePool` now holds evidence bytes only: `record()` validates
+the turn and stores the row, and `evict()` is a single map `delete` per released turn with no walk over that turn's rows,
+because nothing outside the map is derived from them. Eviction forgets retained row bytes but not the fact that the `seq`
+was already seen; `rebaseline()` remains the only boundary that clears both, which is what keeps a new generation free to
+reuse a sequence number the previous one admitted. Comments in the module docstring, `MAX_RETAINED_TURNS`, the pool class,
+`record()`, `evict()`, `admitDurable()`, `retainDurable()` and `docs/ARCHITECTURE.md` were rewritten to match, including
+the complexity claim: the eviction no longer walks anything.
+
+One accounting detail was separated deliberately. A row naming no finite turn is admitted as an identity — so a repeat of
+it is refused rather than recounted — but it is not *retained*, because `turnEvents(turn)` can never retrieve it. The
+counter tracks rows admitted **into retention** and is republished from the pool's `eventCount`, so an unkeyable row
+leaves it unchanged, while identity still closes against it.
+
+### 4. Failing tests written and run first
+
+`test/dsh-017-durable-identity.test.js` (5 tests) was written against `b188511` and run before any production edit. Three
+cases failed, and the other two are the complements that had to keep passing:
+
+| case | on `b188511` |
+|---|---|
+| post-eviction duplicate appended | **FAIL** — `turnEvents(1)` returned the replayed row after turn 1 had been released |
+| duplicate `settle-assistant` entry | **FAIL** — `2 !== 1` settlements emitted for one durable row |
+| counter matrix | **FAIL** — `34 !== 33`, an evicted row's duplicate incremented `retainedDurableEvents` |
+| duplicate of a still-resident row | pass (the pre-existing case, pinned so the fix cannot narrow it) |
+| rebaseline permits seq reuse | pass (the complement: the fix must not become process-lifetime dedupe) |
+
+Two Phase 7D.1.1 cases in `test/dsh-017-retention-contract.test.js` changed with the contract rather than against it.
+`a duplicate seq neither duplicates a row nor refreshes its turn` asserted the return value of a direct `retainDurable()`
+call; it now travels the real `append` route, because admission is what refuses a duplicate and `retainDurable()` is the
+storage primitive *below* that gate. `retainedDurableEvents is a cumulative ingest count...` was repopulated through
+`applyWindow` for the same reason and renamed to "cumulative admission count". Both still assert the same behaviour.
+
+### 5. Verification for this round
+
+Reported as a **local test result**: this repository has no CI runner, so `npm run verify` here is not CI verification and
+is not described as such.
+
+`npm run build:client` reports `client.js rebuilt (481581 bytes, mirrored to lib/client.js)`. `npm run verify` —
+`scripts/verify-structure.mjs` followed by the Node test runner over `test/*.test.js` — reports **714 tests, 714 pass,
+0 fail**, 5 above the Phase 7D.1.1 figure of 709 (all 5 in `test/dsh-017-durable-identity.test.js`), with
+`structure OK (14 required files, 16 core modules, 63 test files, client bundle fresh)`. `git diff --check` is clean and
+`node scripts/verify-sanitization.mjs` reports `sanitization verified — no personal content, all structural evidence
+preserved`. `client.js` and `lib/client.js` are byte-identical.
+
+### 6. Minimal clean-runtime smoke, no reload shortcut
+
+No `dev_reload_package` was used as release evidence, and no long browser A/B was repeated, because no presentation path
+changed. After a cache-ignoring reload of `http://127.0.0.1:50001/` the plugin's loader entry is `[active]` —
+`turn-performance-meter (dsh-turn-performance-meter) [injected]`, entry `E:/Projects/DSHarness/dsh-turn-performance-meter/index.js`
+— and the live meter is mounted and rendering in the conversation composer dock:
+`.dsh-tpm-root[data-kind="live"][data-state="tool-running"]`, `aria-label="工具 · 8m48s"`, showing the running
+`mcp__chrome-devtools__evaluate_script` call with its own elapsed time. No new plugin console error appeared: the page's
+errors remain the pre-existing `useSessionPendingInteraction is not a function` template artifact — whose slot is
+`conversation.session.header.utilities`, with no frame from this plugin — plus shell and other-plugin 404 polling.
+
+The bundle the browser is actually served was re-fetched after the reload and contains this phase's code: 2,289,659 bytes,
+5 occurrences of `admitDurable`, the generation-wide identity vocabulary, the withdrawal of the pool-local seq set, and
+the single-`delete` eviction comment. Two limits on this smoke are stated rather than glossed over. The completed card
+was not separately observed in this round: live and completed are mutually exclusive projections of one slot, the
+conversation mounts only the turn currently being read, and a card therefore cannot be mounted while the agent's own turn
+is still running — so the card's rendering is covered by the test suite (`live-presenter` / `completed-lifecycle`) and by
+the Phase 7D.1.1 live observation rather than re-observed here. And the smoke ran against the running development
+workspace (`E:/Projects/...`), not a packaged install; packaging is Phase 8 work.

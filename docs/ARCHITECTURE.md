@@ -404,13 +404,15 @@ structured `data.error` is allowed only when the message is flagged failed; `src
 The feed consumes the three entry-bearing change kinds and the settlement kind as four distinct facts:
 
 - `append` — the new entries are processed in order; dedupe is by durable `seq` and, for transient rows, by row
-  identity.
+  identity. A durable `seq` is admitted once per generation and a repeat is inert: it produces a `duplicate-durable-event`
+  diagnostic and nothing else, so a replayed row cannot refresh its turn's retention position or its admission count.
 - `prepend` — older history, outside the live tail and out of chronological order relative to what has already been
   consumed. It is counted (`ignoredPrepends`) and never guessed at.
 - `replace` — a rebaseline. The feed clears every piece of generation state it owns — durable sequences, transient row
   identity, the open turn and attempt, the adoption guards, the attempt-to-coordinate map, the settled-attempt set and
   the outstanding-settlement queue — before replaying the replacement window, and the store resets the same session's
-  evidence (§4).
+  evidence (§4). The durable `seq` set is cleared here and only here, which is what lets the next generation reuse a
+  sequence number the previous one had admitted.
 - `settle-assistant` — see below.
 
 #### The settle-assistant disambiguation
@@ -479,11 +481,27 @@ would lose the attempts that travelled the other. `rebaseline()` clears the pool
 that boundary is what stops one generation's settlement being reconstructed together with another's `turn/end`.
 Consumers read rows through `turnEvents(turn)`; the feed decodes nothing.
 
+Two quantities are bounded here, and they have different lifetimes. **Row retention is bounded by turns**: eviction
+releases the least recently updated turn's rows to bound memory. **Durable seq identity is generation-wide**: a `seq`
+admitted earlier in the generation can never become new evidence again, even after the row carrying it has been evicted,
+because DSH's sequence numbers are only distinct within a generation and a replayed row is the same durable fact whether
+or not this client still holds its bytes. Eviction therefore forgets the retained row bytes but not the fact that the
+`seq` was already seen, and `rebaseline()` is the only boundary that clears both. This is why eviction is a single map
+`delete` with no walk over the released turn's rows: nothing outside the map is derived from them.
+
+Every durable entry route passes one admission gate, `admitDurable(event)`, and its substance is its **order**: the
+`seq` is recorded as seen before retention is attempted and before normalization, so a row refused for either reason is
+refused for good. Because admission precedes retention, a duplicate cannot reach the pool at all — it cannot count as
+activity of its turn, cannot refresh that turn's retention position, and cannot change which turn a later admission
+evicts. Keeping the generation-wide identity in the pool instead, with eviction trimming it, is what made a row that
+ingestion rejected still mutate retention.
+
 Retention diagnostics distinguish two different quantities, and the distinction is deliberate: `retainedTurnCount()`
 reports **current** occupancy in turns (bounded by `MAX_RETAINED_TURNS`, decreasing on eviction), while
-`counters.retainedDurableEvents` is a **cumulative ingest count** of unique rows admitted during the generation — it is
-never decremented on eviction and resets with the pool at a rebaseline, so it is not a current row count and must not be
-read as one.
+`counters.retainedDurableEvents` is a **cumulative ingest count** of distinct durable rows admitted into retention during
+the generation — it is never decremented on eviction and resets with the pool at a rebaseline, so it is not a current row
+count and must not be read as one. It counts rows *retained*, not seqs *admitted*: a row naming no turn is admitted as an
+identity but cannot be retrieved by `turnEvents(turn)`, so it is not one of them.
 
 `src/dsh/reconstruction.js` bridges the reconstruction into the store.
 `materializeReconstructedTurn()` calls `reconstructFromDurable` (`src/dsh/durable-path.js`, still the only module that

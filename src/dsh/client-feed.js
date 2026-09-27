@@ -49,6 +49,16 @@
  * `turn/end` would be a metric assembled from two windows. And it is per
  * `SessionEventFeed`, so a second session's feed cannot reach it.
  *
+ * Two different things are bounded here, and only one of them is the retention. The
+ * rows are bounded *by turns*: eviction releases the bytes of the least recently
+ * updated turn. The **durable seq identity is generation-wide**: a `seq` that has been
+ * admitted can never be new again until `rebaseline()`, even after the row carrying
+ * it was evicted. Eviction therefore forgets a row's bytes but not the fact that its
+ * `seq` was already seen, and `rebaseline()` is the only boundary that clears both.
+ * Keeping the two in one structure — a pool-local `seq` set that eviction also
+ * trimmed — is what made a duplicate row able to re-enter retention; see
+ * `admitDurable`.
+ *
  * ## `settle-assistant` is ambiguous in DSH 0.1.7-rc.2, and this is where it is resolved
  *
  * The published contract calls the entry optional and the 0.1.5 reading treated
@@ -150,14 +160,19 @@ export const MAX_RETAINED_TURNS = 32
  * and that turn is by construction the one still producing durable rows; refreshing
  * on every arrival is what keeps it resident, and is what makes "the oldest turn is
  * evicted first" *false* of this structure in the first-seen sense.
+ *
+ * The structure holds **evidence bytes only**. Which durable identities the
+ * generation has seen is the feed's question, not this pool's: a released turn's rows
+ * are gone from here and their `seq`s remain refused by the caller, so eviction
+ * bounds memory without re-opening an identity. `record()` is therefore called only
+ * for a row the caller has already admitted as new, and it holds no dedupe state of
+ * its own.
  */
 class DurableEvidencePool {
   constructor(limit = MAX_RETAINED_TURNS) {
     this.limit = limit
     /** @type {Map<number, object[]>} turn -> raw `SessionEvent` rows */
     this.byTurn = new Map()
-    /** Sequence numbers retained in the current generation; keeps retention duplicate-free. */
-    this.seqs = new Set()
     /**
      * Unique durable rows admitted into this pool during the current generation.
      *
@@ -174,24 +189,23 @@ class DurableEvidencePool {
   }
 
   /**
-   * Retain one raw durable row. Returns whether it was newly retained.
+   * Retain one raw durable row. Returns whether it was retained.
    *
    * A row naming no finite turn is not retained: the map is keyed by turn identity,
    * and a row that cannot name one cannot be retrieved by the consumer this exists
    * for. The row is still processed normally — retention is an addition to
    * ingestion, never a condition on it.
    *
-   * A row whose `seq` is already retained is refused before any bookkeeping, so a
-   * duplicate cannot reorder the map: re-recording an existing row must not count as
-   * activity, or a replayed window would refresh turns in replay order and could
-   * evict a different turn than the same evidence delivered once would.
+   * The caller has already refused a `seq` this generation admitted, so a row that
+   * reaches here is new by construction and recording it is an arrival of new
+   * evidence: it refreshes the turn's position in the map's iteration order, which
+   * is what makes eviction least-recently-updated rather than first-seen.
    */
   record(event) {
     if (event === null || typeof event !== 'object') return false
-    if (!Number.isFinite(event.seq) || this.seqs.has(event.seq)) return false
+    if (!Number.isFinite(event.seq)) return false
     const turn = event.data?.turn
     if (!Number.isFinite(turn)) return false
-    this.seqs.add(event.seq)
     const rows = this.byTurn.get(turn)
     if (rows === undefined) this.byTurn.set(turn, [event])
     else {
@@ -207,11 +221,20 @@ class DurableEvidencePool {
     return true
   }
 
+  /**
+   * Release the least recently updated turns until the bound holds again.
+   *
+   * One `delete` per released turn, and no walk over the turn's rows: the rows of a
+   * released turn are the only record of it this structure keeps, so dropping the
+   * map entry is the whole eviction. Nothing else is derived from them — the durable
+   * identity a released row carried stays with the caller, which is what stops the
+   * same `seq` from being re-admitted later in the generation.
+   */
   evict() {
+    if (this.byTurn.size <= this.limit) return
     while (this.byTurn.size > this.limit) {
       const oldest = this.byTurn.keys().next()
       if (oldest.done === true) return
-      for (const row of this.byTurn.get(oldest.value) ?? []) this.seqs.delete(row.seq)
       this.byTurn.delete(oldest.value)
     }
   }
@@ -224,7 +247,6 @@ class DurableEvidencePool {
 
   clear() {
     this.byTurn.clear()
-    this.seqs.clear()
     this.eventCount = 0
   }
 }
@@ -244,7 +266,16 @@ export class SessionEventFeed {
     /** Whether the initial full window pass has happened. */
     this.initialized = false
     this.revision = -1
-    /** Durable sequence dedupe within the current window generation. */
+    /**
+     * Durable sequence numbers admitted in the current window generation.
+     *
+     * Durable seq identity is **generation-wide**: once a `seq` has been admitted it
+     * can never be new again until `rebaseline()`, whether or not its row is still
+     * retained. This set is therefore the only dedupe state the durable plane has, and
+     * retention consults it rather than keeping a second set of its own — two sets with
+     * different release rules is exactly how a rejected row used to keep mutating
+     * retention (see the module docstring).
+     */
     this.durableSeqs = new Set()
     /** Transient row dedupe keyed by the fold's event object identity. */
     this.transientRows = new WeakSet()
@@ -313,7 +344,7 @@ export class SessionEventFeed {
       rawTurnEndSeen: 0,
       normalizedTurnEndSeen: 0,
       /**
-       * Cumulative unique durable rows admitted into reconstruction retention during
+       * Cumulative distinct durable rows admitted into reconstruction retention during
        * this window generation. It counts retention *events*, not rows currently
        * held: eviction does not decrement it, and `rebaseline()` resets it to zero
        * with the pool. For current occupancy use `retainedTurnCount()` (turns) — see
@@ -420,21 +451,54 @@ export class SessionEventFeed {
   }
 
   /**
+   * Admit one raw durable row's identity to this generation, or refuse it as already
+   * seen.
+   *
+   * This is the single gate every durable entry route passes — an appended window entry
+   * and the entry carried by a `settle-assistant` change alike — and its whole substance
+   * is the order of its two halves. The `seq` is recorded as seen **at the moment of
+   * admission**, before retention is attempted and before normalization, so a row that
+   * is refused for either reason is refused for good. Recording it later would leave a
+   * row that ingested nothing but was counted as seen anyway (or the reverse), and
+   * leaving identity to the retention pool would let eviction re-open it: the pool
+   * releases rows to bound memory, which is not the same thing as forgetting that their
+   * `seq`s were already admitted.
+   *
+   * Because admission precedes retention, a refused duplicate cannot reach the retention
+   * pool at all. That is the contract, not an incidental consequence of the pool
+   * refusing it too: a duplicate must not count as activity of its turn, must not
+   * refresh that turn's retention position, and must not change which turn a later
+   * admission evicts.
+   *
+   * @returns {boolean} whether the row is new to this generation
+   */
+  admitDurable(event) {
+    if (event === null || typeof event !== 'object' || !Number.isFinite(event.seq)) return false
+    if (this.durableSeqs.has(event.seq)) return false
+    this.durableSeqs.add(event.seq)
+    return true
+  }
+
+  /**
    * Retain one raw durable row as reconstruction evidence for its turn.
    *
-   * Called on **every** route by which a durable row enters this feed — an appended
-   * window entry and the entry carried by a `settle-assistant` change alike — because
-   * DSH delivers a settlement by both, and a retention path that covered only one of
-   * them would silently lose the attempts that travelled the other.
+   * Called after `admitDurable` on **both** routes by which a durable row enters this
+   * feed — an appended window entry and the entry carried by a `settle-assistant`
+   * change — because DSH delivers a settlement by both, and a retention path that
+   * covered only one of them would silently lose the attempts that travelled the other.
    *
-   * The row is stored exactly as it arrived: same object, same `seq`, no
-   * normalization and no decoding. Retention is duplicate-free within the generation,
-   * and the global `durableSeqs` dedupe is unaffected by it.
+   * The row is stored exactly as it arrived: same object, same `seq`, no normalization
+   * and no decoding. Duplicate-free retention is not restated here; it follows from the
+   * caller having admitted the `seq`, and the import of that ordering is that an evicted
+   * row's identity survives its own eviction.
    *
-   * `counters.retainedDurableEvents` is republished here from the pool's cumulative
-   * ingest counter; it is not the number of rows the pool currently holds.
+   * `counters.retainedDurableEvents` is republished from the pool's cumulative counter,
+   * which is what keeps it "distinct durable rows admitted into retention" rather than
+   * "distinct seqs that arrived": a row naming no finite turn is admitted as an identity
+   * but cannot be retained, so it is not one of them. The counter is not the rows the
+   * pool currently holds either — eviction does not decrement it.
    *
-   * @returns {boolean} whether the row was newly retained
+   * @returns {boolean} whether the row was retained
    */
   retainDurable(event) {
     const retained = this.durableEvidence.record(event)
@@ -539,14 +603,17 @@ export class SessionEventFeed {
     this.counters.settlementsWithEntry += 1
     const event = entry.event
     /**
-     * The retention runs before the dedupe bookkeeping so that a settlement delivered
-     * by this route is reconstructible exactly like an appended one. This is the route
-     * DSH uses for interrupted messages and non-surface `assistant/attempt`
-     * settlements, and a turn whose only settlement arrived here would otherwise
-     * reconstruct without it.
+     * The admission gate runs **before** retention on this route too. A settlement
+     * delivered by `settle-assistant` is the same durable row a window entry would
+     * have carried, so a second delivery of it is a duplicate, not new evidence: it
+     * must not refresh its turn's retention position, and it must not emit a second
+     * attempt outcome over one that is already committed.
      */
+    if (!this.admitDurable(event)) {
+      this.issue(FEED_ISSUE.DUPLICATE_DURABLE, event === null || typeof event !== 'object' ? null : event.seq)
+      return
+    }
     this.retainDurable(event)
-    if (event && typeof event === 'object' && Number.isFinite(event.seq)) this.durableSeqs.add(event.seq)
     const normalized = normalizeDurableEvent(event)
     if (normalized.kind !== NORMALIZED_KIND.ATTEMPT_SETTLE) {
       this.issue(FEED_ISSUE.UNMATCHED_SETTLEMENT, normalized.kind)
@@ -735,13 +802,19 @@ export class SessionEventFeed {
       this.issue(FEED_ISSUE.MALFORMED_ENTRY)
       return
     }
-    /** Retained before the dedupe check, so a replayed generation stays reconstructible. */
-    this.retainDurable(event)
-    if (this.durableSeqs.has(event.seq)) {
+    /**
+     * Admission first, retention second. Every effect of a durable row on this feed's
+     * bookkeeping — the generation-wide seq identity, the ingest counter, its turn's
+     * retention position — is downstream of this one check, so a duplicate is inert
+     * rather than half-applied. Retention used to run first, which made a replayed row
+     * of an evicted turn a duplicate for ingestion and new evidence for retention at
+     * the same time.
+     */
+    if (!this.admitDurable(event)) {
       this.issue(FEED_ISSUE.DUPLICATE_DURABLE, event.seq)
       return
     }
-    this.durableSeqs.add(event.seq)
+    this.retainDurable(event)
     this.counters.rawDurableEvents += 1
     const normalized = normalizeDurableEvent(event)
     switch (normalized.kind) {

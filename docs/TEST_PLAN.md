@@ -565,11 +565,37 @@ not enforce, or an invariant the code implemented that the documentation denied.
     survivor's rows come back in durable arrival order with the retained objects identical by reference; a duplicate
     `seq` neither duplicates a row **nor counts as activity** (so a replayed window cannot refresh turns in replay order
     and change the victim); a `replace` clears the pool, resets the cumulative counter and frees the old generation's
-    sequence numbers for reuse; and `counters.retainedDurableEvents` is asserted to be a cumulative ingest count that
-    exceeds current occupancy after eviction, with current occupancy reported separately by `retainedTurnCount()`.
+    sequence numbers for reuse; and `counters.retainedDurableEvents` is asserted to be a cumulative admission count that
+    exceeds current occupancy after eviction, with current occupancy reported separately by `retainedTurnCount()`. The
+    duplicate and counter cases travel the real `append` route, because admission — not storage — is what refuses a
+    duplicate; `retainDurable()` is the storage primitive *below* that gate, and the cases that must be pinned after
+    eviction live in the file below.
   - **documentation/implementation agreement is itself a test** — the retired first-seen vocabulary is asserted absent
     from the source and all four documents, and the implemented policy is asserted present in the source and in
     `ARCHITECTURE.md`. A future re-wording that reintroduces the old claim fails the suite rather than passing silently.
+- `test/dsh-017-durable-identity.test.js` (5 tests, Phase 7D.1.2). Durable `seq` identity in one generation is
+  **generation-wide**, and every durable entry route passes the single admission gate that enforces it. The defect these
+  tests were written against is an ordering interaction: the retention pool held its own `seq` set, eviction trimmed it,
+  and retention ran before the feed's generation-wide duplicate check — so a replayed row of an evicted turn was refused
+  by ingestion and accepted by retention in the same call.
+  - **post-eviction duplicate by `append` (§8)** — turns 1..32 resident, turn 33 admitted, turn 1 released; the replayed
+    row is then appended and four further turns are admitted. The assertion is a **control comparison**, because a
+    counter or a row count cannot distinguish acceptance from refusal: an accepted duplicate pushes the pool back to its
+    bound, so the harm is that a later legitimate turn is released. The control replays the identical legitimate rows
+    without the duplicate, and the two resident sets and counters must agree.
+  - **post-eviction duplicate by `settle-assistant` (§7)** — the same fact on the other durable route. The settlement is
+    delivered once, retained once, admitted once, normalized into exactly one `attempt-settle`, and the repeat produces a
+    `duplicate-durable-event` diagnostic and nothing else. A second `attempt-settle` would overwrite a committed attempt
+    outcome, so this fails closed rather than trusting the fold never to re-publish.
+  - **a duplicate of a still-resident row** — pinned so the fix cannot narrow the pre-existing case: no duplicated row,
+    no refreshed retention position, and turn 1 is still the eviction victim when turn 33 arrives.
+  - **the complement (§9)** — `rebaseline()` is the only boundary that clears seq identity: generation 1 admits seq 1,
+    generation 2 admits seq 1 again as new evidence, and generation 2 then refuses its own duplicate of it. The fix is
+    not process-lifetime dedupe.
+  - **the counter's matrix (§10)** — eviction does not decrement `retainedDurableEvents`; a duplicate does not increment
+    it whether the original row is resident or evicted; a row naming no turn is admitted as an identity but is not
+    counted, because it cannot be retrieved; `rebaseline()` resets it to zero; and a seq admitted in the replayed
+    generation counts again.
 
 Verification for this phase is reported as a **local** result: the repository has no CI runner, so `npm run verify` here
 is a local test result and is not described as CI-verified anywhere.
