@@ -1644,7 +1644,8 @@ from the running host and inspected directly — the stronger check for a client
 ### Phase 7–8
 
 - E2E:
-- Release:
+- Release: `v0.1.0` publication — see "v0.1.0 publication record" at the end of this file. It is a **release plan**
+  written before the tag exists; the outcome is reported in the round's final report rather than as a post-tag commit.
 
 ## Known limitations
 
@@ -3593,3 +3594,42 @@ One ordinary fast-forward push of the single Phase 8 commit; `HEAD == origin/mai
 `git diff --check` clean. No `--amend` after push, no rebase, no `--force`, no `--force-with-lease`, no reset of remote
 `main`. No npm publish, no `npm access`, no git tag, no GitHub Release, and `private: true` retained. Version stays
 `0.1.0`.
+
+## v0.1.0 publication record
+
+**Status: release plan — pending publication.** This section records the release contract as it is fixed *before* the tag
+and the GitHub Release are created. It deliberately does not yet claim that a tag exists, that a Release exists or that
+publication succeeded; those are claimed only if the gates below actually pass, and the outcome of the round is reported
+in the round's own final report rather than in a post-tag commit, so that `main` HEAD and `v0.1.0` stay on one commit.
+
+### 1. Contract
+
+| Item | Value |
+|---|---|
+| Version | `0.1.0` (`package.json`, unchanged; no `npm version` was run) |
+| `private` | `true`, retained |
+| Baseline entering the round | `80057aebc9ea4d6b1cb487a2f850a12ed4faf438`, `HEAD == origin/main`, divergence `0 0` |
+| Release target | the final release-state commit of this round, which is `main` HEAD at tag time |
+| Tag | `v0.1.0`, annotated, created from that commit |
+| Release type | final, not draft, not prerelease, marked latest |
+| Asset | `dsh-turn-performance-meter-0.1.0.tgz`, produced by `npm pack` from the release commit |
+| Checksum sidecar | `dsh-turn-performance-meter-0.1.0.tgz.sha256` |
+| npm | unpublished; no `npm publish` and no `npm access` in this round either |
+| DSH | `0.1.7-rc.2` only — no wider compatibility claim was added |
+
+### 2. Round scope
+
+Documentation only, plus the release machinery. No metric semantics, UI, curve arithmetic, adapter, retention or
+eviction behaviour is in scope, and none was modified. The documentation edits flip statements that were true of a local
+release candidate into statements that are true of a GitHub Release: the README status and install sections, the
+CHANGELOG heading and distribution status, and the release records here and in `docs/TASKS.md`. `package.json` is
+untouched.
+
+### 3. Gates required before the tag is created
+
+Baseline identity and the absence of an existing `v0.1.0` tag or Release; `npm run build:client`, `npm run verify`,
+`node scripts/verify-sanitization.mjs` and `git diff --check` all passing; the packed tarball inspected for forbidden
+content; the tarball installed into a disposable DSH profile; and that exact tarball cold-started in that disposable
+profile against DSH `0.1.7-rc.2`. The user's real `web` profile is not restarted at any point. Only if every gate passes
+are the annotated tag and the GitHub Release created, after which the published asset is downloaded again and its
+SHA-256 compared against the pre-upload value.

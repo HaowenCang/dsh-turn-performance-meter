@@ -665,9 +665,12 @@ divergence `0 0`, working tree clean, `dsh --version` → `0.1.7-rc.2`, `npm lis
       `npm run verify` → **714 tests, 714 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo**, `duration_ms` 1078.3746, with
       `structure OK (14 required files, 16 core modules, 63 test files, client bundle fresh, lib/client.js mirrored)`;
       `git diff --check` clean; `node scripts/verify-sanitization.mjs` passes.
-- [x] **npm publication, git tag and GitHub Release: N/A — not requested.** The package remains `private: true` at
-      version `0.1.0`; no `npm publish`, no `npm access`, no `git tag`, and no `gh release create` was run, and the
-      README/CHANGELOG state the local-only distribution rather than implying a registry one.
+- [x] **npm publication, git tag and GitHub Release: N/A in Phase 8 — not requested then.** The package remains
+      `private: true` at version `0.1.0`; Phase 8 ran no `npm publish`, no `npm access`, no `git tag` and no
+      `gh release create`, and the README/CHANGELOG of that phase stated the local-only distribution rather than
+      implying a registry one. The git tag and the GitHub Release were created in the later `v0.1.0` publication round
+      recorded below; npm publication remains permanently out of scope for this project, because the package stays
+      `private: true`.
 - [x] **Changelog added as a user-facing summary, kept short.** `CHANGELOG.md` carries one entry, `0.1.0 — local release
       candidate (initial release)`, listing the features a user sees and the supported DSH version. The Phase 7D.x
       internal defects are deliberately not restated there; they stay in `docs/IMPLEMENTATION_LOG.md`.
@@ -692,3 +695,79 @@ Known evidence boundaries carried into the release report: the Phase 7D.1 termin
 a browser** (real recorded durable bytes + real feed/controller replay + the DSH bounded-window contract); the completed
 card and curve were observed in this phase, so the Phase 7D.1.2 gap is closed; the `web` profile was **not** cold-restarted,
 because the verifying session runs inside it; and `npm run verify` remains a local result rather than CI.
+
+## v0.1.0 publication (2026-09-27)
+
+**Status: release plan — pending publication.** The public GitHub Release of the frozen `0.1.0` state. Documentation and
+release mechanics only: no metric semantics, UI, curve arithmetic, adapter, retention or eviction change, and no
+`package.json` edit. This section fixes the contract *before* the tag and the Release exist, and therefore does not yet
+claim that either exists; the round's outcome is reported in the round's own final report rather than in a post-tag
+commit, so that `main` HEAD and `v0.1.0` remain the same commit.
+
+- [x] **Preflight against the audited baseline, before any modification.** `git fetch origin` → `HEAD == origin/main ==
+      80057aebc9ea4d6b1cb487a2f850a12ed4faf438`, `git rev-list --left-right --count HEAD...origin/main` → `0 0`, working
+      tree clean. `& "$env:APPDATA\npm\dsh.cmd" --version` → `0.1.7-rc.2`; `npm list -g @deepseek-ai/dsh --depth=0` →
+      `@deepseek-ai/dsh@0.1.7-rc.2`. `gh auth status` → authenticated to `github.com` as `HaowenCang` with the `repo`
+      scope, so Release/tag write access was confirmed **before** the first irreversible step rather than after it; the
+      target repository is `HaowenCang/dsh-turn-performance-meter`, visibility `PUBLIC`, default branch `main`.
+- [x] **`v0.1.0` confirmed absent on all three surfaces.** Local tag list empty, `git ls-remote --tags origin
+      refs/tags/v0.1.0` empty, `gh release view v0.1.0` exiting non-zero with `release not found`. Nothing was
+      overwritten, moved or deleted — an existing tag or Release would have stopped the round instead.
+- [x] **Version and privacy frozen.** `package.json` reads `0.1.0 true`; `npm version` is deliberately **not** run, so no
+      second version commit exists and the mapping stays `v0.1.0 ↔ package.json 0.1.0`. `private: true` is retained and
+      no compatibility claim was widened: DSH `0.1.7-rc.2` remains the only supported version.
+- [x] **Release-state documentation commit.** `README.md` status and install sections, `CHANGELOG.md` heading and
+      distribution status, this file and `docs/IMPLEMENTATION_LOG.md` were updated to describe a GitHub Release instead
+      of a local release candidate. The README now separates the §3.1 release-asset path (`file:` on
+      `dsh-turn-performance-meter-0.1.0.tgz`, the recommended immutable installation, with the `.sha256` sidecar check)
+      from the §3.2 development path (`link:`), and no longer presents `link:` as the distribution form. The CHANGELOG
+      heading is `0.1.0 — Initial release` with its feature list preserved and no Phase 7D.x internal chronology added.
+- [x] **Gates re-run at release state, reported as LOCAL TEST RESULTS** (verified again: no `.github/` in the tracked
+      tree, so this repository has no CI runner):
+      `npm run build:client` → `client.js rebuilt (481581 bytes, mirrored to lib/client.js)`; `npm run verify` →
+      **714 tests, 714 pass, 0 fail** with `structure OK (…, client bundle fresh, lib/client.js mirrored)`;
+      `node scripts/verify-sanitization.mjs` → PASS; `git diff --check` → clean. `client.js`, `lib/client.js`,
+      `src/**` and `package.json` carry no release-induced modification.
+- [x] **Release asset built from the release commit and inspected.** `npm pack --pack-destination <repo-external temp>`
+      produced `dsh-turn-performance-meter-0.1.0.tgz` (173 packaged files) outside the repository, so no temporary JSON
+      or tarball entered the tree. The listing was checked for `node_modules`, `fixtures/raw`, `.env`, logs, credentials,
+      `*.pem`/`*.key`/`*.p12`/`*.pfx`/`*.har`/`*.pcap`/`*.sqlite`/`*.db` and stray repository-root files, and required
+      entries (`package/package.json`, `package/index.js`, `package/client.js`, `package/lib/client.js`,
+      `package/cordis.patch.yml`, `package/README.md`, `package/LICENSE`) were confirmed present. The release-state
+      documentation edit legitimately changes packed/unpacked bytes and the SHA-256 relative to Phase 8; the frozen
+      figure is the file count, not the byte size.
+- [x] **SHA-256 sidecar written as an ASCII line.** `dsh-turn-performance-meter-0.1.0.tgz.sha256` holds
+      `<lowercase hash>  <asset name>`; both files are the two Release assets.
+- [x] **The actual release tarball installed into a disposable profile.** A disposable profile was initialized from the
+      shipped web template (`dsh --profile <probe> --from-default-profile web --dump-config`) and then given the packed
+      tarball through the documented `file:` form. The composed configuration contains `dsh-turn-performance-meter` and
+      `turn-performance-meter`, with no compatibility rejection. The user's `web` profile was not touched.
+- [ ] **Cold-start smoke on that disposable profile — the check Phase 8 could not perform.** Phase 8 verified a
+      disposable-profile install and a served-bundle identity, but explicitly did **not** cold-restart any host, because
+      the verifying session ran inside the `web` profile. This round's procedure is: stop the first disposable host, run
+      the same disposable profile again on a port confirmed free first, and confirm the host starts, the web app is
+      reachable, the plugin loader is active and the `dsh-turn-performance-meter` client bundle is served with no plugin
+      startup error. The disposable host's processes are then closed and the disposable profile deleted; the `web`
+      profile is untouched throughout.
+- [ ] **Annotated tag and GitHub Release created only after every gate passed.** `git tag -a v0.1.0 <release commit>`
+      followed by an ordinary `git push origin v0.1.0` — no force, no `--force-with-lease`, no re-tag. The Release is
+      created with the audited notes file, `--verify-tag`, and `--latest`, and **not** with `--prerelease`, `--draft` or
+      `--generate-notes`, so `draft = false`, `prerelease = false` and `latest = true` on tag `v0.1.0`.
+- [ ] **Published assets re-downloaded and verified.** The `.tgz` is downloaded back from the Release and its SHA-256
+      compared against the pre-upload hash, with the sidecar contents cross-checked; a mismatch is reported as a release
+      asset integrity failure rather than passed over. The downloaded tarball is additionally installed into a second
+      disposable profile, closing the chain release commit → `npm pack` → GitHub upload → GitHub download → DSH install.
+- [x] **No post-tag documentation commit, and no `npm publish`.** The round ends with `main` HEAD, the peeled `v0.1.0`
+      commit and the Release target all on one commit, so `main` is not ahead of the tag. npm publication was never in
+      scope: the package stays `private: true`.
+
+Acceptance gate: baseline `80057aeb…` re-verified and unchanged at preflight; DSH exactly `0.1.7-rc.2`; `gh` authenticated
+with repository Release/tag write access before the first irreversible action; `v0.1.0` absent locally, remotely and on
+GitHub before creation; `package.json` still `0.1.0` + `private: true` with no second version commit; documentation
+describing a GitHub Release rather than a local candidate; 714/714 tests, sanitization PASS and `git diff --check` clean at
+release state; the tarball built outside the repository from the release commit, inspected, checksummed and installed into
+a disposable profile; the exact release tarball cold-starting successfully in a fresh DSH `0.1.7-rc.2` profile; annotated
+tag `v0.1.0` peeled to the release commit and pushed without force; Release published as final/latest with exactly the two
+assets; re-downloaded asset SHA-256 equal to the pre-upload value; `HEAD == origin/main`, divergence `0 0` and a clean
+working tree at the end; and no force, no re-tag, no tag or Release deletion, no `npm publish`, no `npm access` and no
+widened compatibility claim at any point.

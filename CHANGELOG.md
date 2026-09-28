@@ -4,10 +4,10 @@ User-facing release history for `dsh-turn-performance-meter`. The per-phase impl
 counterexamples, fixture provenance and gate evidence — is in `docs/IMPLEMENTATION_LOG.md`; this file is the summary a
 user of the plugin reads.
 
-Distribution status: the package is `private: true` and is installed as a local DSH file plugin. Nothing here has been
-published to npm, tagged, or attached to a GitHub Release.
+Distribution status: released through GitHub Releases. The npm package remains `private: true` and is not published to
+the npm registry.
 
-## 0.1.0 — local release candidate (initial release)
+## 0.1.0 — Initial release
 
 Supported and tested against DSH `0.1.7-rc.2`
 (public reference commit `477b4f420553e8a52c2fbccc464d7561b239c443`).

@@ -8,14 +8,13 @@ provides two UI modes: a compact live meter during execution and a completed tur
 重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计
 卡片。完成态卡片按整个 turn 聚合。
 
-> **Release-ready for local use on DSH `0.1.7-rc.2`.** Version `0.1.0`, `private: true`, distributed as a local DSH
-> file plugin. Phases 0–8 are complete; Phase 8 (release readiness) closed the documentation, compatibility, packaging,
-> privacy and runtime gates. The package is not published to npm, carries no git tag and has no GitHub Release —
-> distribution is local only.
+> **Released as `v0.1.0` on GitHub, for DSH `0.1.7-rc.2`.** Version `0.1.0`, `private: true`. Distribution is the GitHub
+> Release asset `dsh-turn-performance-meter-0.1.0.tgz` plus the local checkout; the package is **not** published to npm.
+> Phases 0–8 are complete and the `v0.1.0` tag points at the release commit on `main`.
 >
-> **本地可用发布版（DSH `0.1.7-rc.2`）。** 版本 `0.1.0`，`private: true`，以本地 DSH file 插件形式分发。
-> Phase 0–8 全部完成；Phase 8（发布准备）收口了文档、兼容性、打包、隐私与运行时各项门槛。本包未发布到 npm、未打 tag、
-> 未创建 GitHub Release —— 分发方式仅限本地。
+> **已发布 GitHub `v0.1.0`，面向 DSH `0.1.7-rc.2`。** 版本 `0.1.0`，`private: true`。分发方式为 GitHub Release 资产
+> `dsh-turn-performance-meter-0.1.0.tgz` 与本地检出目录；本包**未**发布到 npm。Phase 0–8 全部完成，`v0.1.0` tag 指向
+> `main` 上的发布 commit。
 
 ## 1. What it does / 功能
 
@@ -41,8 +40,10 @@ React layer never re-derives a metric.
 ## 2. Support status / 支持状态
 
 ```text
+Version:           0.1.0
 Supported/tested:  DSH 0.1.7-rc.2
-Distribution:      local file plugin; package private
+Distribution:      GitHub Release + local checkout; package private
+npm:               not published
 Verification:      local automated suite + real DSH browser smoke
 ```
 
@@ -79,24 +80,60 @@ was not verified as a supported gating schema for this project.
 
 ## 3. Install / 安装
 
-DSH accepts an absolute local bundle path through the plugin manager. The verified command form for `0.1.7-rc.2` is:
+There are two installation paths. Use the release asset for a fixed `v0.1.0`; use the checkout only while developing the
+plugin itself.
 
-当前 DSH 允许插件管理器使用绝对本地 bundle 路径。`0.1.7-rc.2` 上已验证的命令形式为：
+安装方式有两种。固定使用 `v0.1.0` 时采用 Release 资产；仅在开发插件本身时使用检出目录。
+
+### 3.1 Stable release / 稳定发行版
+
+Download `dsh-turn-performance-meter-0.1.0.tgz` from the
+[v0.1.0 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.0), then install it:
+
+从 [v0.1.0 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.0) 下载
+`dsh-turn-performance-meter-0.1.0.tgz` 后安装：
+
+```powershell
+dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.0.tgz"
+```
+
+This is the recommended immutable `v0.1.0` installation. `file:` on a tarball is a frozen artifact, which is the point:
+the installed bytes cannot drift from the published release, and the release carries a `.sha256` sidecar for verifying
+the download before installation.
+
+这是推荐的固定 `v0.1.0` 安装方式。对 tarball 使用 `file:` 得到的是一份冻结产物，这正是目的所在：安装的字节不会相对
+已发布 release 漂移，且该 release 附带 `.sha256` sidecar，可在安装前校验下载内容。
+
+Verify the download before installing:
+
+安装前校验下载内容：
+
+```powershell
+Get-FileHash .\dsh-turn-performance-meter-0.1.0.tgz -Algorithm SHA256
+Get-Content .\dsh-turn-performance-meter-0.1.0.tgz.sha256
+```
+
+### 3.2 Development checkout / 开发检出
 
 ```powershell
 dsh plugin --profile web add "link:C:/path/to/dsh-turn-performance-meter"
 ```
 
-`link:` is the form this project documents, and the reason is measured rather than stylistic. pnpm installs a `link:`
-spec as a **symlink to the checkout**, so a later `npm run build:client` is picked up by the profile without
-reinstalling; a `file:` spec is installed as a **frozen copy**, and a file created in the checkout after installation
-does not appear through the profile's `node_modules` at all. The command initializes the profile on first use and adds
-the package to `dsh.profile.bundles` automatically, because this package declares `dsh.bundle.patch`.
+`link:` tracks the working checkout and is intended for development. `link:` is the form this project documents for
+development, and the reason is measured rather than stylistic. pnpm installs a `link:` spec as a **symlink to the
+checkout**, so a later `npm run build:client` is picked up by the profile without reinstalling, whereas the `file:` spec
+of §3.1 installs a **frozen copy**. `link:` is therefore not the distribution form: it follows whatever the checkout
+contains, including uncommitted work, so it cannot represent an immutable `v0.1.0` installation.
 
-本项目记录的是 `link:` 形式，其理由来自实测而非风格偏好。pnpm 把 `link:` 安装为**指向检出目录的符号链接**，因此之后
-执行 `npm run build:client` 时 profile 会直接读到新字节，无需重装；而 `file:` 安装的是一份**冻结副本**，安装后在检出
-目录中新建的文件根本不会出现在 profile 的 `node_modules` 中。该命令在首次使用时初始化 profile，并因为本包声明了
-`dsh.bundle.patch` 而自动把包名加入 `dsh.profile.bundles`。
+`link:` 跟踪工作检出目录，仅用于开发。本项目在开发场景下记录 `link:` 形式，其理由来自实测而非风格偏好。pnpm 把
+`link:` 安装为**指向检出目录的符号链接**，因此之后执行 `npm run build:client` 时 profile 会直接读到新字节，无需重装；
+而 §3.1 的 `file:` 安装的是一份**冻结副本**。因此 `link:` 不是分发形式：它跟随检出目录的当前内容（包含未提交的改动），
+无法代表一份不可变的 `v0.1.0` 安装。
+
+Either command initializes the profile on first use and adds the package to `dsh.profile.bundles` automatically, because
+this package declares `dsh.bundle.patch`.
+
+两种命令都会在首次使用时初始化 profile，并因为本包声明了 `dsh.bundle.patch` 而自动把包名加入 `dsh.profile.bundles`。
 
 The reference checkout used for this project's recorded evidence is
 `E:\Projects\DSHarness\dsh-turn-performance-meter`; substitute any absolute path. Reload the page after installing, or
