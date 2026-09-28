@@ -1,18 +1,48 @@
 {
   "name": "dsh-turn-performance-meter",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
   "license": "MIT",
   "type": "module",
   "description": "Turn-level live and completed throughput/latency telemetry for DeepSeek Harness agent workflows.",
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "telemetry",
+    "tps",
+    "performance"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HaowenCang/dsh-turn-performance-meter.git"
+  },
+  "homepage": "https://github.com/HaowenCang/dsh-turn-performance-meter#readme",
+  "bugs": {
+    "url": "https://github.com/HaowenCang/dsh-turn-performance-meter/issues"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
   },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test test/*.test.js",
     "build:client": "node scripts/build-client.mjs",
     "verify": "node scripts/verify-structure.mjs && node --test test/*.test.js"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.1.7-rc.2"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dsh": {
     "bundle": {

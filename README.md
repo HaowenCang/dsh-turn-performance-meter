@@ -8,13 +8,13 @@ provides two UI modes: a compact live meter during execution and a completed tur
 重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计
 卡片。完成态卡片按整个 turn 聚合。
 
-> **Released as `v0.1.0` on GitHub, for DSH `0.1.7-rc.2`.** Version `0.1.0`, `private: true`. Distribution is the GitHub
-> Release asset `dsh-turn-performance-meter-0.1.0.tgz` plus the local checkout; the package is **not** published to npm.
-> Phases 0–8 are complete and the `v0.1.0` tag points at the release commit on `main`.
+> **Released as `v0.1.1` on npm and GitHub, for DSH `0.1.7-rc.2`.** Version `0.1.1`, published to the public npm
+> registry. The primary distribution is the npm package `dsh-turn-performance-meter`; the GitHub Release asset
+> `dsh-turn-performance-meter-0.1.1.tgz` is an offline fallback, and the local checkout is for development.
 >
-> **已发布 GitHub `v0.1.0`，面向 DSH `0.1.7-rc.2`。** 版本 `0.1.0`，`private: true`。分发方式为 GitHub Release 资产
-> `dsh-turn-performance-meter-0.1.0.tgz` 与本地检出目录；本包**未**发布到 npm。Phase 0–8 全部完成，`v0.1.0` tag 指向
-> `main` 上的发布 commit。
+> **已发布 npm 与 GitHub `v0.1.1`，面向 DSH `0.1.7-rc.2`。** 版本 `0.1.1`，已发布到公开 npm registry。主要分发方式为
+> npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.1.tgz` 作为离线回退，本地检出
+> 目录用于开发。
 
 ## 1. What it does / 功能
 
@@ -40,11 +40,12 @@ React layer never re-derives a metric.
 ## 2. Support status / 支持状态
 
 ```text
-Version:           0.1.0
-Supported/tested:  DSH 0.1.7-rc.2
-Distribution:      GitHub Release + local checkout; package private
-npm:               not published
-Verification:      local automated suite + real DSH browser smoke
+Version:               0.1.1
+Supported/tested:      DSH 0.1.7-rc.2 only
+Primary distribution:  npm
+Fallback distribution: GitHub Release .tgz
+Development:           link checkout
+Verification:          local automated suite + real DSH browser smoke
 ```
 
 The only DSH version this project claims is **`0.1.7-rc.2`**, whose public reference commit is
@@ -71,69 +72,114 @@ abandonment；`turn/end` 即使没有已打开的 record 也具终止性；会�
 The eight captures under `fixtures/dsh-turns/` were recorded against `0.1.5`. They remain evidence for the metric
 arithmetic, the decoder and historical compatibility, and they are **not** evidence for the tool/result shape, the
 settle-assistant semantics, the turn completion lifecycle or the client event-window behaviour, nor are they a supported
-runtime contract. No `package.json` compatibility-range field is declared, because DSH's plugin peer/preflight mechanism
-was not verified as a supported gating schema for this project.
+runtime contract. `package.json` declares an exact compatibility gate,
+`"peerDependencies": { "@deepseek-ai/dsh": "0.1.7-rc.2" }`. DSH evaluates that peer against the running runtime version
+before a profile starts the plugin, so an unsupported DSH is rejected instead of silently admitted. The exact range is
+deliberate: `^0.1.7-rc.2`, `~0.1.7-rc.2`, `>=0.1.7-rc.2`, `0.1.x` and `*` would all admit runtimes this project has
+never exercised.
 
 `fixtures/dsh-turns/` 下的八段录制采集自 `0.1.5`。它们仍是指标算术、解码器与历史兼容性的证据，但**不是** tool/result
-形状、settle-assistant 语义、turn 完成生命周期或客户端事件窗口行为的证据，也不构成受支持的运行时契约。本项目不声明
-`package.json` 兼容范围字段，因为 DSH 的 plugin peer/preflight 机制未被验证为本项目可用的门控 schema。
+形状、settle-assistant 语义、turn 完成生命周期或客户端事件窗口行为的证据，也不构成受支持的运行时契约。`package.json`
+声明精确兼容门控 `"peerDependencies": { "@deepseek-ai/dsh": "0.1.7-rc.2" }`。DSH 会在 profile 启动插件前用当前运行时
+版本校验该 peer，因此不受支持的 DSH 会被拒绝，而不会被静默接受。使用精确范围是有意的：`^0.1.7-rc.2`、`~0.1.7-rc.2`、
+`>=0.1.7-rc.2`、`0.1.x` 与 `*` 都会放行本项目从未实际验证过的运行时。
 
 ## 3. Install / 安装
 
-There are two installation paths. Use the release asset for a fixed `v0.1.0`; use the checkout only while developing the
-plugin itself.
+Three installation paths. The npm package is the primary distribution; the GitHub Release tarball is an offline, immutable
+fallback; the checkout is only for developing the plugin itself.
 
-安装方式有两种。固定使用 `v0.1.0` 时采用 Release 资产；仅在开发插件本身时使用检出目录。
+安装方式有三种。npm 包是主要分发方式；GitHub Release tarball 是离线、不可变的回退方式；检出目录仅用于开发插件本身。
 
-### 3.1 Stable release / 稳定发行版
+### 3.1 Prerequisite / 前置条件
 
-Download `dsh-turn-performance-meter-0.1.0.tgz` from the
-[v0.1.0 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.0), then install it:
+`Supported/tested: DSH 0.1.7-rc.2 only`. The plugin declares the exact runtime peer
+`@deepseek-ai/dsh = 0.1.7-rc.2`, and DSH refuses to start a plugin whose DSH peer does not match the running runtime.
+Install that exact version if it is not already present:
 
-从 [v0.1.0 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.0) 下载
-`dsh-turn-performance-meter-0.1.0.tgz` 后安装：
+`Supported/tested: DSH 0.1.7-rc.2 only`。插件声明精确的运行时 peer `@deepseek-ai/dsh = 0.1.7-rc.2`，而 DSH 会拒绝启动
+DSH peer 与当前运行时不匹配的插件。若尚未安装该版本，执行：
 
 ```powershell
-dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.0.tgz"
+npm install -g @deepseek-ai/dsh@0.1.7-rc.2
 ```
 
-This is the recommended immutable `v0.1.0` installation. `file:` on a tarball is a frozen artifact, which is the point:
-the installed bytes cannot drift from the published release, and the release carries a `.sha256` sidecar for verifying
-the download before installation.
+`@deepseek-ai/dsh@0.1.7-rc.2` is currently published under npm's `next` channel. Do not install an arbitrary latest DSH and
+assume the plugin runs on it: the plugin declares exact runtime compatibility only, and no DSH release other than
+`0.1.7-rc.2` has been exercised by this project.
 
-这是推荐的固定 `v0.1.0` 安装方式。对 tarball 使用 `file:` 得到的是一份冻结产物，这正是目的所在：安装的字节不会相对
-已发布 release 漂移，且该 release 附带 `.sha256` sidecar，可在安装前校验下载内容。
+`@deepseek-ai/dsh@0.1.7-rc.2` 目前发布在 npm 的 `next` channel 下。不要安装任意“最新”DSH 并假定插件可在其上运行：本插件
+只声明精确的运行时兼容性，且除 `0.1.7-rc.2` 之外本项目未验证任何 DSH 版本。
+
+### 3.2 npm, the default installation / npm 默认安装
+
+```powershell
+dsh plugin --profile web add dsh-turn-performance-meter
+```
+
+Pin the version for a reproducible install:
+
+固定版本以获得可复现的安装：
+
+```powershell
+dsh plugin --profile web add dsh-turn-performance-meter@0.1.1
+```
+
+The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.1` exactly. Both install a frozen
+copy of the published artifact.
+
+无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.1`。两者安装的都是已发布产物的冻结副本。
+
+### 3.3 GitHub Release tarball (offline fallback) / GitHub Release tarball（离线回退）
+
+Download `dsh-turn-performance-meter-0.1.1.tgz` from the
+[v0.1.1 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.1), then install it:
+
+从 [v0.1.1 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.1) 下载
+`dsh-turn-performance-meter-0.1.1.tgz` 后安装：
+
+```powershell
+dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.1.tgz"
+```
+
+This is the offline and immutable fallback, and the asset is the same tarball the npm registry serves. `file:` on a
+tarball is a frozen artifact, which is the point: the installed bytes cannot drift from the published release, and the
+release carries a `.sha256` sidecar for verifying the download before installation.
+
+这是离线且不可变的回退方式，该资产与 npm registry 所提供的 tarball 为同一份。对 tarball 使用 `file:` 得到的是一份冻结
+产物，这正是目的所在：安装的字节不会相对已发布 release 漂移，且该 release 附带 `.sha256` sidecar，可在安装前校验下载
+内容。
 
 Verify the download before installing:
 
 安装前校验下载内容：
 
 ```powershell
-Get-FileHash .\dsh-turn-performance-meter-0.1.0.tgz -Algorithm SHA256
-Get-Content .\dsh-turn-performance-meter-0.1.0.tgz.sha256
+Get-FileHash .\dsh-turn-performance-meter-0.1.1.tgz -Algorithm SHA256
+Get-Content .\dsh-turn-performance-meter-0.1.1.tgz.sha256
 ```
 
-### 3.2 Development checkout / 开发检出
+### 3.4 Development checkout / 开发检出
 
 ```powershell
 dsh plugin --profile web add "link:C:/path/to/dsh-turn-performance-meter"
 ```
 
-`link:` tracks the working checkout and is intended for development. `link:` is the form this project documents for
-development, and the reason is measured rather than stylistic. pnpm installs a `link:` spec as a **symlink to the
-checkout**, so a later `npm run build:client` is picked up by the profile without reinstalling, whereas the `file:` spec
-of §3.1 installs a **frozen copy**. `link:` is therefore not the distribution form: it follows whatever the checkout
-contains, including uncommitted work, so it cannot represent an immutable `v0.1.0` installation.
+`link:` tracks the working checkout and is intended for **development only**. The reason is measured rather than
+stylistic. pnpm installs a `link:` spec as a **symlink to the checkout**, so a later `npm run build:client` is picked up by
+the profile without reinstalling, whereas the npm and `file:` specs of §3.2 and §3.3 install a **frozen copy**. `link:` is
+therefore not a distribution form: it follows whatever the checkout contains, including uncommitted work, so it cannot
+represent an immutable published installation.
 
-`link:` 跟踪工作检出目录，仅用于开发。本项目在开发场景下记录 `link:` 形式，其理由来自实测而非风格偏好。pnpm 把
-`link:` 安装为**指向检出目录的符号链接**，因此之后执行 `npm run build:client` 时 profile 会直接读到新字节，无需重装；
-而 §3.1 的 `file:` 安装的是一份**冻结副本**。因此 `link:` 不是分发形式：它跟随检出目录的当前内容（包含未提交的改动），
-无法代表一份不可变的 `v0.1.0` 安装。
+`link:` 跟踪工作检出目录，**仅用于开发**。其理由来自实测而非风格偏好。pnpm 把 `link:` 安装为**指向检出目录的符号链接**，
+因此之后执行 `npm run build:client` 时 profile 会直接读到新字节，无需重装；而 §3.2 与 §3.3 的 npm 与 `file:` 形式安装的
+是一份**冻结副本**。因此 `link:` 不是分发形式：它跟随检出目录的当前内容（包含未提交的改动），无法代表一份不可变的已发布
+安装。
 
-Either command initializes the profile on first use and adds the package to `dsh.profile.bundles` automatically, because
-this package declares `dsh.bundle.patch`.
+Every command above initializes the profile on first use and adds the package to `dsh.profile.bundles` automatically,
+because this package declares `dsh.bundle.patch`.
 
-两种命令都会在首次使用时初始化 profile，并因为本包声明了 `dsh.bundle.patch` 而自动把包名加入 `dsh.profile.bundles`。
+以上每种命令都会在首次使用时初始化 profile，并因为本包声明了 `dsh.bundle.patch` 而自动把包名加入 `dsh.profile.bundles`。
 
 The reference checkout used for this project's recorded evidence is
 `E:\Projects\DSHarness\dsh-turn-performance-meter`; substitute any absolute path. Reload the page after installing, or
@@ -333,9 +379,9 @@ this repository is a local test result, not CI. The implementation log keeps the
 ```text
 dsh-turn-performance-meter/
 ├─ README.md
-├─ CHANGELOG.md                      Release history (0.1.0)
+├─ CHANGELOG.md                      Release history (0.1.1)
 ├─ LICENSE                           MIT
-├─ package.json                      version 0.1.0, private, scripts: test / build:client / verify
+├─ package.json                      version 0.1.1, published to npm, scripts: test / build:client / verify
 ├─ cordis.patch.yml                  Bundle row insertion; the only DSH composition this plugin adds
 ├─ index.js                          host entry (no-op by design; telemetry is client-side)
 ├─ client.js                         GENERATED browser bundle (npm run build:client)

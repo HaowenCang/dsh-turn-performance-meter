@@ -3633,3 +3633,116 @@ content; the tarball installed into a disposable DSH profile; and that exact tar
 profile against DSH `0.1.7-rc.2`. The user's real `web` profile is not restarted at any point. Only if every gate passes
 are the annotated tag and the GitHub Release created, after which the published asset is downloaded again and its
 SHA-256 compared against the pre-upload value.
+
+## v0.1.1 npm distribution record
+
+**Status: release plan — npm publication pending.** This round changes distribution only. No metric semantics, live TPS,
+TTFT, curve arithmetic, tool accounting, DSH adapter contract, retention behaviour or client cadence is in scope, and none
+was modified: `git diff -- src client.js lib/client.js index.js cordis.patch.yml` is empty at release state. The outcome
+of the round is reported in the round's own final report rather than in a post-publication commit, so that `main` HEAD and
+`v0.1.1` remain the same commit.
+
+### 1. Contract
+
+| Item | Value |
+|---|---|
+| Version | `0.1.1` (`package.json`; `npm version` was not run) |
+| `private` | removed, not set to `false` |
+| Peer | `@deepseek-ai/dsh` exactly `0.1.7-rc.2`, the only declared peer |
+| Publication target | `https://registry.npmjs.org/`, `access: public`, tag `latest`, locked by `publishConfig` |
+| npm artifact | 8 files: `package.json`, `index.js`, `client.js`, `lib/client.js`, `cordis.patch.yml`, `README.md`, `CHANGELOG.md`, `LICENSE` |
+| Baseline entering the round | `9bd54431bbbaa5b7701939ebe64f598520700dd9`, `HEAD == origin/main`, divergence `0 0` |
+| `v0.1.0` | left at `9bd54431…`; not moved, deleted or re-created |
+| Release target | the final release-state commit of this round, which is `main` HEAD at tag time |
+| Tag | `v0.1.1`, annotated, created from that commit |
+| GitHub asset | the **registry-downloaded** tarball plus a `.sha256` sidecar |
+| DSH | `0.1.7-rc.2` only — no wider compatibility claim was added |
+
+### 2. Why the compatibility field is declared now and was not declared in `0.1.0`
+
+The `0.1.0` README stated that no `package.json` compatibility-range field was declared because DSH's plugin
+peer/preflight mechanism had not been verified as a usable gating schema. That statement was accurate for `0.1.0` and
+became false the moment a peer was declared, so this round verified the mechanism before writing the field rather than
+after.
+
+`@deepseek-ai/dsh-plugin-manager` resolves a named registry spec by running
+`pnpm view <spec> name version peerDependencies --json` against the registry that the run itself will use, and then calls
+`evaluatePluginCompatibility` from `@deepseek-ai/dsh-app-boot`. That function returns `undefined` when the manifest has no
+`peerDependencies` at all — which is precisely why `0.1.0` had no gate. Otherwise it walks the peer entries, ignores every
+name that is neither `@deepseek-ai/dsh` nor `@deepseek-ai/dsh-*`, maps the three `workspace:` forms onto the current
+runtime version, and rejects any range failing
+`semver.satisfies(runtimeVersion, requirement, { includePrerelease: true })`. The runtime version is read from
+`@deepseek-ai/dsh-app-boot/package.json`, which resolves to `0.1.7-rc.2`.
+
+Checked directly against the bundled `semver` rather than reasoned about: `0.1.7-rc.2` satisfies `0.1.7-rc.2` → `true`;
+the same runtime against `0.1.8` → `false` and against `0.1.7` → `false`. The exact range is a genuine gate. It is also
+the only range consistent with §2 of the README: `^0.1.7-rc.2`, `~0.1.7-rc.2`, `>=0.1.7-rc.2`, `0.1.x` and `*` would all
+admit runtimes this project has never exercised, and `^0.1.7-rc.2` in particular would admit `0.1.7` while rejecting
+nothing that matters.
+
+### 3. The import graph, and why only one peer was added
+
+`git grep -n "@deepseek-ai/"` over `src`, `index.js`, `client.js`, `lib/client.js` and `package.json` returns hits in
+three categories, none of which is a package dependency. Most are prose: comments naming the DSH declaration files that
+the adapter contract was read from, and comments asserting the opposite — that `src/core` has zero `@deepseek-ai/*`
+imports and that the bundle cannot require `@deepseek-ai/dsh-llm` or `@deepseek-ai/dsh-session`. Every production import
+in the tree is relative.
+
+The remaining category is the three names under `dsh.client.inject` in `package.json`. That field is part of the frozen
+client contract and names modules the DSH web client provides to the plugin at runtime;
+`@deepseek-ai/dsh-api-session-controller`, `@deepseek-ai/dsh-client-locale` and `@deepseek-ai/dsh-client-ui-conversation`
+are all shipped inside the DSH installation's own `node_modules`. Declaring them as npm peers would have asserted an
+installation requirement that does not exist, so they were left alone and `@deepseek-ai/dsh` was declared alone.
+
+### 4. Why the `files` allowlist is safe
+
+The allowlist was written only after the two entry points were shown to be self-contained, because a `files` list that
+omits a path the runtime reads fails at load time rather than at pack time. `index.js` is a 714-byte host entry exporting
+`name` and a no-op `apply`, with no import, no `require`, no `createRequire` and no path constant. `client.js` is a
+482 479-byte generated browser bundle with no `readFile`, no `__dirname`, no `require.resolve` and no reference to `src/`.
+Neither reads `cordis.patch.yml`; the DSH loader does, from the package root, which is why that file is in the allowlist.
+`lib/client.js` is retained because it is the layout the local injector validates and it is byte-identical to `client.js`
+by construction. Nothing else is reachable from the package at runtime.
+
+One asymmetry is worth recording rather than hiding: `scripts/verify-structure.mjs` asserts the presence of `docs/**`, so
+`npm run verify` is a checkout-side gate and cannot be run from the published artifact. That is deliberate. The published
+package is a prebuilt artifact and carries no test or build tooling, which is why `test`, `build:client` and `verify`
+remain in `scripts` but their targets do not ship.
+
+### 5. Verification performed, and its boundaries
+
+Gates at release state: `npm run build:client` rebuilt both bundle copies with no diff against the committed bytes;
+`npm run verify` → 714 tests, 714 pass, 0 fail, with `structure OK (14 required files, 16 core modules, 63 test files,
+client bundle fresh, lib/client.js mirrored)`; `node scripts/verify-sanitization.mjs` → PASS; `git diff --check` → clean.
+
+The `npm pack` listing and the extracted manifest were checked field by field: 8 entries, no `src/`, `test/`, `fixtures/`,
+`dev/`, `scripts/`, `docs/`, `node_modules/`, `.env`, credential, log or raw fixture; `private` absent; exactly one peer;
+`publishConfig.registry` the official registry; and no lifecycle install script. A `--dry-run` publish reporting
+`dsh-turn-performance-meter@0.1.1`, 8 files, 294.4 kB packed and 1.0 MB unpacked is the same artifact set.
+
+The tarball was then installed into a disposable web-template profile and cold-started. The install reported exit `0` with
+no `incompatible-version` rejection, and the composed configuration contains `turn-performance-meter`. pnpm emitted an
+unsatisfied-peer warning and did **not** auto-install `@deepseek-ai/dsh`; the declared peer is evaluated against the
+running runtime version, not resolved as an installed dependency, which is the behaviour the peer field is there for.
+
+Cold start is evidenced on three surfaces: the host started with a log whose only line is the printed URL, so no plugin
+startup error and no compatibility error occurred; `GET /` returned `200`; and the startup combo route — which is matched
+by exact URL, including its revision, so a stale or unregistered plugin would 404 rather than degrade — returned `200`
+with the plugin bundle present **verbatim**. The served combo contains the repository `client.js` byte-for-byte, probed at
+five offsets, and the installed `client.js` SHA-256 equals the repository's, so the bytes the browser receives are the
+bytes that were packed.
+
+Evidence boundaries carried forward. Neither browser MCP endpoint was reachable in this environment, so the in-browser
+check that an idle session renders no false live meter was **not** performed this round; the bundle-served evidence above
+is a transport-level result, not a rendered-UI result, and the UI behaviour itself remains covered only by the local
+suite. The `npm run verify` result remains a local result rather than CI, because the repository still has no CI runner.
+No VPS, remote host or second machine was used.
+
+### 6. Git gate
+
+One ordinary fast-forward push of the single release commit, made **before** the registry action and re-verified after it;
+`HEAD == origin/main`, divergence `0 0`, working tree clean, `git diff --check` clean. No `--amend` after push, no rebase,
+no `--force`, no `--force-with-lease`, no reset of remote `main`, no movement of `v0.1.0`. The `v0.1.1` tag is created only
+after the npm publication, the registry artifact verification and all three registry install gates pass. No `npm
+unpublish` under any circumstance: a published npm version is an immutable artifact, and a failure after publication is
+reported as a partial state rather than undone.

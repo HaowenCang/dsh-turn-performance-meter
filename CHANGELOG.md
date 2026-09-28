@@ -4,8 +4,25 @@ User-facing release history for `dsh-turn-performance-meter`. The per-phase impl
 counterexamples, fixture provenance and gate evidence — is in `docs/IMPLEMENTATION_LOG.md`; this file is the summary a
 user of the plugin reads.
 
-Distribution status: released through GitHub Releases. The npm package remains `private: true` and is not published to
-the npm registry.
+Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
+`.tgz` retained as an offline, immutable fallback.
+
+## 0.1.1 — npm distribution
+
+Supported and tested against DSH `0.1.7-rc.2` only.
+
+Distribution change only. No metric semantics, UI, curve arithmetic, tool accounting, DSH adapter contract, retention
+behaviour or client cadence is altered; the runtime implementation is the `0.1.0` implementation.
+
+- First npm registry publication. `private: true` is removed and the published artifact is public.
+- Standard DSH registry installation is supported: `dsh plugin --profile web add dsh-turn-performance-meter`, or
+  `…@0.1.1` to pin the version.
+- Exact peer compatibility declared: `@deepseek-ai/dsh = 0.1.7-rc.2`. A different DSH runtime is rejected at plugin
+  preflight rather than silently admitted.
+- The npm artifact is reduced to runtime-only files. `src/`, `test/`, `fixtures/`, `dev/`, `scripts/` and `docs/` are no
+  longer part of the published package.
+- `publishConfig` locks publication to `https://registry.npmjs.org/`.
+- Repository, homepage, bugs and keywords metadata added for the registry listing.
 
 ## 0.1.0 — Initial release
 
