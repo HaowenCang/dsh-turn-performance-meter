@@ -7,6 +7,15 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## Unreleased
+
+Supported and tested against DSH `0.1.7-rc.2` only. Presentation change only.
+
+- completed cards now default to a compact collapsed row
+- expanded detail remains available on demand
+- completed-card surface follows DSH TodoPanel host tokens
+- no metric or telemetry semantics changed
+
 ## 0.1.1 — npm distribution
 
 Supported and tested against DSH `0.1.7-rc.2` only.

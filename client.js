@@ -9497,31 +9497,227 @@ function curveTree(createElement, curveView, keptColumns, translate) {
 
 ;Object.assign(__exports, { curveTree })
 			},
+			"src/client/completed/compact-summary.js": function (__exports) {
+/**
+ * The collapsed card's one summary line — pure, React-free.
+ *
+ * A collapsed row is only worth its space if it still answers the question the
+ * reader opened the card for. `Performance >` would not, so the row carries the
+ * settlement status and the four principal readings on one line, exactly as the
+ * official DSH TodoPanel carries `已完成 19` on its own collapsed row.
+ *
+ * The single rule this module exists to enforce: **it reads, it never recomputes.**
+ * Every number below is a string `src/client/ui-model.js` already decided —
+ * `view.columns[i].display` carries the finished formatting and, where the metric
+ * is approximate, the `≈` marker; `view.columns[i].unit` is `null` for a metric
+ * with no value, which is what keeps an unavailable reading as `—` instead of
+ * turning it into a unit-bearing `— tokens/s`. Nothing here divides, sums, rounds,
+ * calibrates or decides quality, so the compact row and the expanded detail cannot
+ * disagree about a number: they are the same string.
+ *
+ * A dropped column is not an available column, and the two are kept apart below:
+ * the loop skips a part that has no display text at all, while a reading whose
+ * value is genuinely absent prints its em dash.
+ */
+
+/**
+ * The four principal readings, in the card's fixed column order, each joined to
+ * the locale word that names it.
+ *
+ * `thinking`/`output` are reused rather than duplicated so the compact row, the
+ * curve legend and the column labels can never drift apart.
+ */
+const COMPACT_PARTS = Object.freeze([
+  Object.freeze({ key: 'reasoningTps', labelKey: 'thinking' }),
+  Object.freeze({ key: 'outputTps', labelKey: 'output' }),
+  Object.freeze({ key: 'generatedTokens', labelKey: null }),
+  Object.freeze({ key: 'ttft', labelKey: 'colTtft' }),
+])
+
+/**
+ * Compose the collapsed row's progress text.
+ *
+ * The parts are joined with the same ` · ` separator the footer uses, so the card
+ * reads as one instrument rather than as two unrelated reading styles.
+ *
+ * @param {object} view `completedViewModel` output
+ * @param {(key: string) => string} [translate]
+ * @returns {string} one line, always non-empty for a settled view
+ */
+function compactSummary(view, translate) {
+  const t = typeof translate === 'function' ? translate : (key => key)
+  const parts = [t(`status.${view.status}`)]
+
+  for (const part of COMPACT_PARTS) {
+    const column = findColumn(view, part.key)
+    if (column === null) continue
+    /** A unit is present only when the reading is: `—` never grows a unit. */
+    const reading = column.unit === null || column.unit === undefined
+      ? column.display
+      : `${column.display} ${column.unit}`
+    parts.push(part.labelKey === null ? reading : `${t(part.labelKey)} ${reading}`)
+  }
+
+  return parts.join(' · ')
+}
+
+/** One column of the view model by metric key, or `null` when the view has none. */
+function findColumn(view, key) {
+  const columns = Array.isArray(view?.columns) ? view.columns : []
+  const column = columns.find(candidate => candidate?.key === key)
+  if (column === undefined) return null
+  if (typeof column.display !== 'string' || column.display.length === 0) return null
+  return column
+}
+
+;Object.assign(__exports, { compactSummary })
+			},
 			"src/client/completed/completed-tree.js": function (__exports) {
 /**
  * Completed-card element tree — pure, React-free.
  *
  * The card's structure, its visible strings, its accessible names and the
  * decision to hide an item (a turn with no tool call, a phase with no secondary
- * line) are all decided here. `CompletedMeter.js` is the thin React binding over
- * this module, which keeps the render layer thin and lets the tree be tested in
- * Node with a recording `createElement` rather than a DOM.
+ * line, the whole detail region while collapsed) are all decided here.
+ * `CompletedMeter.js` is the thin React binding over this module, which keeps the
+ * render layer thin and lets the tree be tested in Node with a recording
+ * `createElement` rather than a DOM.
  *
- * The card carries **two** views of the same settled turn and shows one at a
- * time: the metric summary (default) and the throughput curve (while hovered or
- * focused). They are stacked in one grid cell rather than swapped, so the card's
- * height is the taller of the two and a switch cannot resize it. The hidden
+ * ## Two nested decisions, two different owners
+ *
+ * The card shell answers *is the detail on screen*: a `button.dsh-tpm-card-header`
+ * spanning the full row, carrying `aria-expanded`, the title, a one-line summary
+ * and a chevron. It mirrors the official DSH TodoPanel header, down to the
+ * direction of the chevron — `ChevronUp` while collapsed, `ChevronDown` while
+ * expanded — because matching the host is the point of the round.
+ *
+ * The detail region answers *which view is on screen*: the metric summary by
+ * default, the throughput curve while hovered or focused. **The two do not share
+ * an element.** The curve handlers and the focus stop are bound to
+ * `.dsh-tpm-detail`, never to the card, so tabbing onto the expand/collapse
+ * button cannot reveal a chart — a reader who only wanted to reopen the card must
+ * not have the view change under them.
+ *
+ * While collapsed the detail is **not rendered at all**, rather than hidden with
+ * `opacity` or `visibility`. A hidden-but-present region would keep its height
+ * above the composer, which is the specific cost this round exists to remove, and
+ * it would also leave four metric groups in the accessibility tree of a row that
+ * visually exposes one line.
+ *
+ * The two views are stacked in one grid cell rather than swapped, so the expanded
+ * card's height is the taller of the two and a switch cannot resize it. The hidden
  * layer is `aria-hidden` and `pointer-events: none`, so assistive technology is
  * never handed two copies of the turn's numbers at once.
  *
  * The tree never computes geometry: the curve panel arrives finished from
- * `curve-view-model.js` and is assembled by `curve-tree.js`.
+ * `curve-view-model.js` and is assembled by `curve-tree.js`. It never computes a
+ * metric either — the collapsed row and the four columns read the same
+ * `view.columns` display strings (`./compact-summary.js`).
  */
 
 const { metricCellTree, secondaryText } = __req("src/client/completed/metric-cell.js")
 const { curveTree } = __req("src/client/completed/curve-tree.js")
+const { compactSummary } = __req("src/client/completed/compact-summary.js")
 
 
+
+/**
+ * The card's decorative leading glyph, in the host's 16x16 slot.
+ *
+ * The official panel passes a primitives-package icon here. This plugin has no
+ * such dependency and will not add one for a single glyph, so the mark is inline
+ * SVG at the same size, drawn in `currentColor` so it follows the host theme, and
+ * `aria-hidden` because the title beside it already names the card.
+ *
+ * The glyph itself is a meter face: a dial arc with a needle at roughly
+ * two-thirds deflection.
+ */
+function leadGlyphTree(createElement) {
+  return createElement('svg', {
+    key: 'glyph',
+    viewBox: '0 0 16 16',
+    width: '16',
+    height: '16',
+    'aria-hidden': 'true',
+    focusable: 'false',
+  }, [
+    createElement('path', {
+      key: 'arc',
+      d: 'M2.2 12.4a6.9 6.9 0 0 1 11.6 0',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: '1.4',
+      strokeLinecap: 'round',
+    }),
+    createElement('path', {
+      key: 'needle',
+      d: 'M8 12.1 11.3 6.9',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: '1.4',
+      strokeLinecap: 'round',
+    }),
+  ])
+}
+
+/**
+ * The chevron, whose direction is the host's rather than the conventional one.
+ *
+ * DSH's TodoPanel shows `ChevronUp` while collapsed and `ChevronDown` while
+ * expanded — the icon promises what the click will do to the panel below the row,
+ * not which end of the list you are looking at. Keeping the same direction is what
+ * makes the two stacked panels in one composer read as one control family.
+ */
+function chevronTree(createElement, collapsed) {
+  const d = collapsed ? 'M4 9.8 8 5.8l4 4' : 'M4 6.2 8 10.2l4-4'
+  return createElement('span', {
+    key: 'chevron',
+    className: 'dsh-tpm-card-chevron',
+    'aria-hidden': 'true',
+  }, createElement('svg', {
+    viewBox: '0 0 16 16',
+    width: '16',
+    height: '16',
+    'aria-hidden': 'true',
+    focusable: 'false',
+  }, createElement('path', {
+    d,
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: '1.5',
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+  })))
+}
+
+/**
+ * The one-row header: lead, title, summary, chevron.
+ *
+ * The whole row is the button, which is the host's structure and also the reason
+ * the hit target is the full card width rather than a 16 px chevron.
+ */
+function headerTree(createElement, view, t, collapsed, onToggle) {
+  const props = {
+    key: 'header',
+    className: 'dsh-tpm-card-header',
+    type: 'button',
+    'aria-expanded': collapsed ? 'false' : 'true',
+    /**
+     * The full name of the card is the accessible one; the visible title is the
+     * short word, because a 21-character title would crowd out the summary line
+     * it sits beside.
+     */
+    'aria-label': `${t('completedLabel')} · ${t('turnLabel')} ${view.turn ?? ''} · ${t(`status.${view.status}`)}`,
+  }
+  if (typeof onToggle === 'function') props.onClick = onToggle
+
+  return createElement('button', props, [
+    createElement('span', { key: 'lead', className: 'dsh-tpm-card-lead', 'aria-hidden': 'true' }, leadGlyphTree(createElement)),
+    createElement('span', { key: 'title', className: 'dsh-tpm-card-title' }, t('performanceTitle')),
+    createElement('span', { key: 'progress', className: 'dsh-tpm-card-progress' }, compactSummary(view, t)),
+    chevronTree(createElement, collapsed),
+  ])
+}
 
 /**
  * Footer items. Tools lead because they are the only footer fact that can be
@@ -9557,24 +9753,15 @@ function viewLayer(createElement, key, visible, children) {
 }
 
 /**
- * The whole card.
+ * The expanded detail: the two stacked views and the footer.
  *
- * @param {(tag: string, props: object, children?: unknown) => object} createElement
- * @param {object} view `completedViewModel` output
- * @param {(key: string) => string} translate
- * @param {{
- *   mode?: 'summary'|'curve',
- *   curveView?: object|null,
- *   onEnter?: Function, onLeave?: Function, onFocus?: Function, onBlur?: Function,
- * }} [interaction] presentation state and handlers owned by `CompletedMeter`
+ * This is the region that owns the curve, so this is where the focus stop, the
+ * pointer handlers and the hint live. `tabindex` is attached only when a curve
+ * exists — a focus stop that changes nothing is worse than no stop at all — and
+ * the hint is attached with it, so the reason the region is focusable is
+ * discoverable rather than implied.
  */
-function completedTree(createElement, view, translate, interaction = {}) {
-  const t = typeof translate === 'function' ? translate : (key => key)
-  const mode = interaction.mode === 'curve' ? 'curve' : 'summary'
-  const curveView = interaction.curveView ?? null
-  const interactive = curveView !== null
-  const statusText = t(`status.${view.status}`)
-
+function detailTree(createElement, view, t, mode, curveView, interaction, interactive) {
   const layers = [
     viewLayer(createElement, 'summary', mode === 'summary', view.columns.map(cell => (
       metricCellTree(createElement, { cell, translate: t })
@@ -9590,19 +9777,10 @@ function completedTree(createElement, view, translate, interaction = {}) {
       curveTree(createElement, curveView, view.columns.slice(2), t)))
   }
 
-  const cardProps = {
-    className: 'dsh-tpm-card',
-    role: 'group',
-    'aria-label': `${t('completedLabel')} · ${t('turnLabel')} ${view.turn ?? ''} · ${statusText}`,
-  }
+  const props = { key: 'detail', className: 'dsh-tpm-detail' }
   if (interactive) {
-    /**
-     * Focusability is tied to the alternate view: a card with nothing behind
-     * hover must not sit in the tab order, because a focus stop that changes
-     * nothing is worse than no stop at all.
-     */
-    cardProps.tabIndex = 0
-    cardProps['aria-description'] = t('curveHint')
+    props.tabIndex = 0
+    props['aria-description'] = t('curveHint')
     /** Only handlers that were actually supplied become props. */
     for (const [prop, handler] of [
       ['onMouseEnter', interaction.onEnter],
@@ -9610,8 +9788,47 @@ function completedTree(createElement, view, translate, interaction = {}) {
       ['onFocus', interaction.onFocus],
       ['onBlur', interaction.onBlur],
     ]) {
-      if (typeof handler === 'function') cardProps[prop] = handler
+      if (typeof handler === 'function') props[prop] = handler
     }
+  }
+
+  return createElement('div', props, [
+    createElement('div', { key: 'views', className: 'dsh-tpm-views' }, layers),
+    footerTree(createElement, view, t),
+  ])
+}
+
+/**
+ * The whole card.
+ *
+ * @param {(tag: string, props: object, children?: unknown) => object} createElement
+ * @param {object} view `completedViewModel` output
+ * @param {(key: string) => string} translate
+ * @param {{
+ *   collapsed?: boolean,
+ *   mode?: 'summary'|'curve',
+ *   curveView?: object|null,
+ *   onToggle?: Function,
+ *   onEnter?: Function, onLeave?: Function, onFocus?: Function, onBlur?: Function,
+ * }} [interaction] presentation state and handlers owned by `CompletedMeter`
+ */
+function completedTree(createElement, view, translate, interaction = {}) {
+  const t = typeof translate === 'function' ? translate : (key => key)
+  /**
+   * Collapsed is the default here as well as in the state machine, so a caller
+   * that passes no presentation state at all — a test, a future embed — gets the
+   * compact row rather than an accidental full panel.
+   */
+  const collapsed = interaction.collapsed !== false
+  const mode = interaction.mode === 'curve' ? 'curve' : 'summary'
+  const curveView = interaction.curveView ?? null
+  const interactive = curveView !== null
+
+  const card = [
+    headerTree(createElement, view, t, collapsed, interaction.onToggle),
+  ]
+  if (!collapsed) {
+    card.push(detailTree(createElement, view, t, mode, curveView, interaction, interactive))
   }
 
   return createElement('div', {
@@ -9619,15 +9836,28 @@ function completedTree(createElement, view, translate, interaction = {}) {
     'data-kind': 'completed',
     'data-status': view.status,
     'data-quality': view.quality?.overall ?? 'unavailable',
+    /**
+     * `data-view` keeps its Phase 5 meaning — which *detail* view is on screen —
+     * because browser diagnostics read it. The collapsed decision is a separate
+     * attribute for the same reason: while collapsed the card is still showing
+     * the summary, so `data-view="summary"` stays true and truthful.
+     */
+    'data-collapsed': collapsed ? 'true' : 'false',
     'data-view': mode,
     'data-turn': view.turn ?? '',
     ...(view.sessionId === null || view.sessionId === undefined ? {} : { 'data-session': view.sessionId }),
-  }, [
-    createElement('div', { key: 'card', ...cardProps }, [
-      createElement('div', { key: 'views', className: 'dsh-tpm-views' }, layers),
-      footerTree(createElement, view, t),
-    ]),
-  ])
+  }, createElement('div', {
+    className: 'dsh-tpm-card',
+    /**
+     * Phase 5 put the accessible name on the card because the card *was* the
+     * interactive surface. Phase 9 split that surface in two: the header button
+     * carries the expand/collapse name, so the card keeps the grouping role and
+     * the accessible name and hands the button its own. The name is therefore
+     * still reachable, and no reader meets the same label twice on one control.
+     */
+    role: 'group',
+    'aria-label': `${t('completedLabel')} · ${t('turnLabel')} ${view.turn ?? ''} · ${t(`status.${view.status}`)}`,
+  }, createElement('div', { className: 'dsh-tpm-card-body' }, card)))
 }
 
 ;Object.assign(__exports, { metricCellTree, secondaryText, completedTree })
@@ -10167,15 +10397,25 @@ function curveViewModel(settled) {
 			},
 			"src/client/completed/view-mode.js": function (__exports) {
 /**
- * Completed-card presentation mode — the whole interaction state machine, pure.
+ * Completed-card presentation state — the whole interaction state machine, pure.
  *
- * The card shows one of two views of the same settled turn: the metric summary
- * by default, the throughput curve while the reader is pointing at or focused on
- * it. That is the entire interaction, so it lives in one pure function that a
- * Node test can drive through every transition without a DOM, and
- * `CompletedMeter.js` is left with nothing but the wiring.
+ * A settled card carries **two** orthogonal presentation decisions, and they are
+ * deliberately kept apart because they answer different questions:
  *
- * Two decisions are worth stating because they are not obvious:
+ *   - `collapsed` — is the detail on screen at all? Every newly materialized
+ *     card starts collapsed, so a transcript of twenty settled turns is twenty
+ *     compact rows rather than twenty metric panels stacked above the composer;
+ *   - `mode` — while the detail *is* on screen, is it showing the metric summary
+ *     or the throughput curve? The curve appears while the reader points at or
+ *     focuses the detail and disappears when they stop.
+ *
+ * Because they are orthogonal, the reader can never reach a settled card that is
+ * expanded-but-curve-first: collapsing resets the mode, so expanding always opens
+ * the summary. That rule exists so the two decisions cannot drift into a state
+ * the reader did not ask for, and it is the reason `toggle` writes both fields
+ * rather than flipping one of them.
+ *
+ * Three further decisions are worth stating because they are not obvious:
  *
  *   - **Focus is the touch path.** A tap focuses a `tabindex="0"` element in
  *     every current mobile browser, so there is no separate touch handler and no
@@ -10183,15 +10423,69 @@ function curveViewModel(settled) {
  *   - **A blur that stays inside the card does not close the curve.** `blur`
  *     fires while focus moves between elements, so without the guard a future
  *     focusable child would make the view flicker shut on the way to it.
+ *   - **The header is not part of the curve surface.** The expand/collapse button
+ *     and the curve hover live on different elements, so a reader who tabs onto
+ *     the toggle never has the chart appear under their cursor. That separation is
+ *     structural (`completed-tree.js` binds the handlers to `.dsh-tpm-detail`), and
+ *     `nextCompletedPresentation` states the half of it that is state: an
+ *     `enter`/`focus` event while collapsed changes nothing at all.
  *
- * An un-interactive card (a turn with no curve data) can never leave the
+ * An un-interactive detail (a turn with no curve data) can never leave the
  * summary: there is nothing behind the hover, so nothing may appear to be.
  */
 
 const COMPLETED_VIEW_SUMMARY = 'summary'
 const COMPLETED_VIEW_CURVE = 'curve'
 
+/** Presentation state of one settled card. `collapsed` is the default for every new card. */
+function defaultCompletedPresentationState() {
+  return { collapsed: true, mode: COMPLETED_VIEW_SUMMARY }
+}
+
 /**
+ * One transition of the completed card's presentation state.
+ *
+ * `toggle` is the header button; `enter`/`leave`/`focus`/`blur` are the detail
+ * region's pointer and keyboard events; `reset` is a new settled view arriving.
+ * Events that the current state does not admit are no-ops rather than resets,
+ * which is what keeps a stray `mouseleave` from collapsing an open card.
+ *
+ * @param {{collapsed: boolean, mode: 'summary'|'curve'}} state current presentation state
+ * @param {{type: string, staysInside?: boolean}} event one presentation event
+ * @param {{interactive: boolean}} context whether an alternate view exists
+ * @returns {{collapsed: boolean, mode: 'summary'|'curve'}} the next presentation state
+ */
+function nextCompletedPresentation(state, event, { interactive }) {
+  const current = normalizePresentation(state)
+
+  switch (event?.type) {
+    case 'reset':
+      return defaultCompletedPresentationState()
+    case 'toggle':
+      /**
+       * Collapsing resets the mode, which is what makes "expand always opens the
+       * summary" true even for a reader who was last looking at the curve.
+       */
+      return current.collapsed
+        ? { collapsed: false, mode: COMPLETED_VIEW_SUMMARY }
+        : defaultCompletedPresentationState()
+    default:
+      break
+  }
+
+  /** Nothing behind the header: a collapsed card ignores hover and focus entirely. */
+  if (current.collapsed) return current
+
+  return { collapsed: false, mode: nextViewMode(current.mode, event, { interactive }) }
+}
+
+/**
+ * The mode half of the machine on its own.
+ *
+ * Retained as its own exported contract because the curve transitions are the
+ * tested Phase 5 behaviour and because `nextCompletedPresentation` is only their
+ * caller: whatever this function says about the curve stays true for the card.
+ *
  * @param {'summary'|'curve'} mode current mode
  * @param {{type: string, staysInside?: boolean}} event one interaction event
  * @param {{interactive: boolean}} context whether an alternate view exists
@@ -10218,7 +10512,22 @@ function nextViewMode(mode, event, { interactive }) {
   }
 }
 
-;Object.assign(__exports, { COMPLETED_VIEW_SUMMARY, COMPLETED_VIEW_CURVE, nextViewMode })
+/**
+ * Coerce an untrusted state object into the two-field shape.
+ *
+ * A state that did not come from `defaultCompletedPresentationState` — a stale
+ * value from an earlier revision of this module, or a hand-written literal in a
+ * test — must not be able to produce a card that is `undefined`-collapsed, which
+ * would render the detail. Anything unrecognized degrades to the default.
+ */
+function normalizePresentation(state) {
+  return {
+    collapsed: state?.collapsed !== false,
+    mode: state?.mode === COMPLETED_VIEW_CURVE ? COMPLETED_VIEW_CURVE : COMPLETED_VIEW_SUMMARY,
+  }
+}
+
+;Object.assign(__exports, { COMPLETED_VIEW_SUMMARY, COMPLETED_VIEW_CURVE, defaultCompletedPresentationState, nextCompletedPresentation, nextViewMode })
 			},
 			"src/client/completed/CompletedMeter.js": function (__exports) {
 /**
@@ -10238,16 +10547,25 @@ function nextViewMode(mode, event, { interactive }) {
  *   - it owns **no timer**. A completed turn is static, so there is no ticker
  *     here, no elapsed refresh and no rolling value. The card changes only when a
  *     new view model arrives (session switch, next turn's end, rebaseline), or
- *     when the reader asks for the other view;
- *   - the interaction is `nextViewMode` in `./view-mode.js`, which is where the
- *     hover/focus/blur rules are stated and tested. This file only translates DOM
- *     events into that function's vocabulary.
+ *     when the reader asks for it — by expanding the row, or by pointing at or
+ *     focusing the detail it revealed;
+ *   - the presentation state is `nextCompletedPresentation` in `./view-mode.js`,
+ *     which is where the collapse, reset, hover/focus/blur rules are stated and
+ *     tested. This file only translates DOM events into that function's
+ *     vocabulary.
+ *
+ * Two pieces of state is the whole component. They are held as **one** value
+ * rather than two `useState` calls because they are written together by the
+ * transitions that matter — a collapse is simultaneously "hide the detail" and
+ * "forget the curve" — and splitting them would allow a render in which the card
+ * is collapsed but still remembers the curve, which is exactly the state the
+ * round forbids.
  */
 
 const { createElement: h, useEffect, useRef, useState } = __ext("react")
 const { completedTree } = __req("src/client/completed/completed-tree.js")
 const { curveViewModel } = __req("src/client/completed/curve-view-model.js")
-const { COMPLETED_VIEW_SUMMARY, nextViewMode } = __req("src/client/completed/view-mode.js")
+const { defaultCompletedPresentationState, nextCompletedPresentation } = __req("src/client/completed/view-mode.js")
 
 /**
  * The card.
@@ -10262,23 +10580,32 @@ function CompletedMeter({ view, translate }) {
    * turn changes.
    */
   const [curveView, setCurveView] = useState(() => curveViewModel(view))
-  const [mode, setMode] = useState(COMPLETED_VIEW_SUMMARY)
+  const [presentation, setPresentation] = useState(defaultCompletedPresentationState)
 
   const previousView = useRef(view)
   useEffect(() => {
     if (previousView.current === view) return
     previousView.current = view
     setCurveView(curveViewModel(view))
-    setMode(COMPLETED_VIEW_SUMMARY)
+    /**
+     * A new settled view is a new card. Phase 5 reset the detail mode here; Phase
+     * 9 resets the collapse with it, so the next turn arrives as a compact row
+     * rather than as whatever the previous turn was left showing. This is also
+     * what makes a reload and a session switch-back start collapsed: both
+     * materialize the component afresh and both land here.
+     */
+    setPresentation(defaultCompletedPresentationState())
   }, [view])
 
-  /** No curve means nothing is hidden behind hover, so the card stays inert. */
+  /** No curve means nothing is hidden behind hover, so the detail stays inert. */
   const interactive = curveView !== null
-  const dispatch = (event) => setMode(current => nextViewMode(current, event, { interactive }))
+  const dispatch = (event) => setPresentation(current => nextCompletedPresentation(current, event, { interactive }))
 
   return completedTree(h, view, translate, {
-    mode,
+    collapsed: presentation.collapsed,
+    mode: presentation.mode,
     curveView,
+    onToggle: () => dispatch({ type: 'toggle' }),
     onEnter: () => dispatch({ type: 'enter' }),
     onLeave: () => dispatch({ type: 'leave' }),
     onFocus: () => dispatch({ type: 'focus' }),
@@ -10392,46 +10719,162 @@ const LIVE_CSS = `
 /**
  * Scoped stylesheet for the completed turn card.
  *
- * References: `docs/assets/reference-completed-summary.png` (the metric grid)
- * and `docs/assets/reference-hover-curve.png` (the alternate view). Both are
- * measured in `docs/IMPLEMENTATION_LOG.md`; the numbers that shaped this file:
+ * ## Two reference layers, deliberately not mixed
  *
- *   - card surface `#f8f7f5` and a roughly 10 px corner radius;
- *   - **four equal columns** with a hairline between each and about 26 px of
- *     inline padding inside every column, so the first label's ink lands about
- *     26 px from the card edge;
- *   - a three-row rhythm per column: 13 px label, 22 px value, 12 px secondary,
- *     with 20 px of card padding above and below. That is about 113 px of card,
- *     which is what the reference measures;
+ * The **card surface** is no longer a measurement. Phase 9 takes it from the
+ * official DSH TodoPanel, because the completed card and the todo panel are
+ * sibling rows in one composer dock and two panels with different corners, fills
+ * and shadows read as two plugins rather than as one product. The contract below
+ * is copied from
+ * `packages/client/ui-conversation/src/client/skeleton/TodoPanel.module.css` at
+ * DSH `0.1.7-rc.2` (reference commit `477b4f4`), token for token — no sampled hex,
+ * no hand-chosen radius, no fallback for a token this version is pinned to.
+ *
+ * The **expanded detail** keeps the Phase 5 metric grid, measured from
+ * `docs/assets/reference-completed-summary.png` and
+ * `docs/assets/reference-hover-curve.png`:
+ *
+ *   - **four equal columns** with a hairline between each, and the first label's
+ *     ink 26 px from the card edge;
+ *   - a three-row rhythm per column: 13 px label, 22 px value, 12 px secondary;
  *   - the curve view replaces the **first two** columns with one panel spanning
  *     the same two grid tracks, so the generated-token and TTFT columns keep
  *     their exact positions and dividers across the switch.
  *
- * Both views are stacked in one grid cell (`.dsh-tpm-views`), which is what makes
- * the card height stable: the container is as tall as the taller view and a
- * switch cannot change it — at any width, at any host font size, and without
- * measuring anything in JavaScript.
+ * The two layers meet at one number. The card shell now carries the host's
+ * `padding: 6px 12px`, so the detail's own inline padding is `26px - 12px = 14px`
+ * rather than the 26 px it used to carry alone: the reference geometry is a
+ * *distance from the card edge*, not a padding of one particular element, and it
+ * survives the shell change only because it is restated on the inner one.
+ *
+ * Both detail views are stacked in one grid cell (`.dsh-tpm-views`), which is
+ * what makes the expanded card's height stable: the container is as tall as the
+ * taller view and a switch cannot change it — at any width, at any host font size,
+ * and without measuring anything in JavaScript.
  *
  * Delivery and scoping rules are documented once in `../base-css.js`.
  */
 
 const COMPLETED_STYLE_ID = 'dsh-tpm-completed-style'
 
+/**
+ * The host's dock geometry, as a repeated expression rather than a variable.
+ *
+ * DSH's TodoPanel writes the two `calc()`s out in full; this constant keeps the
+ * two roots from drifting apart if a future phase has to revisit one of them,
+ * while the emitted CSS stays the same tokens in the same order.
+ */
+const DOCK_WIDTH = 'calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance)'
+  + ' - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset)'
+  + ' - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset))'
+const DOCK_MAX_WIDTH = 'calc(var(--dsh-composer-card-max-width)'
+  + ' - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset)'
+  + ' - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset))'
+
 const COMPLETED_CSS = `
+/* The dock seat. Width, centring and the panel surface come from the host's own
+   dock formula, so the completed card's left and right edges land on the todo
+   panel's rather than near them. The live pill keeps its own contract: it is a
+   different row with a different reference and is not touched here. */
+.dsh-tpm-root[data-kind="completed"] {
+  box-sizing: border-box;
+  width: ${DOCK_WIDTH};
+  max-width: ${DOCK_MAX_WIDTH};
+  margin: 0 auto;
+  display: block;
+  justify-content: flex-start;
+}
+/* The panel itself: TodoPanel's surface, unchanged. \`border: 0\` and the
+   elevation-stroke variable are the host's pair — the hairline an outlined panel
+   would draw is replaced by the elevation's own stroke, which is why the card
+   below declares no border of its own. */
 .dsh-tpm-card {
   box-sizing: border-box;
   width: 100%;
-  max-width: min(100%, var(--dsh-composer-card-max-width, 100%));
-  padding: calc(var(--dsh-tpm-font) * 1.55) 0;
-  border-radius: 10px;
-  border: .5px solid var(--dsh-tpm-hairline);
-  background: var(--dsh-tpm-surface);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  border: 0;
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-specific-menu);
+  backdrop-filter: var(--dsw-menu-backdrop-filter);
+  box-shadow: var(--dsw-elevation-panel);
+  overflow: hidden;
   color: var(--dsw-alias-label-primary, #3c3c3d);
   line-height: 1.4;
 }
-/* The card is focusable only when it has an alternate view to reveal, and the
+/* The host's body rhythm: 6px 12px with an 8px column gap. The gap is unused
+   while collapsed, which is correct — a one-row panel is one row. */
+.dsh-tpm-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 12px;
+}
+/* The whole header row is the button, as in the host. The background and border
+   are reset rather than the button being replaced by a div, so the control keeps
+   its keyboard and pointer semantics. */
+.dsh-tpm-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+.dsh-tpm-card-header:focus-visible {
+  outline: 2px solid var(--dsh-tpm-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.dsh-tpm-card-lead {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+.dsh-tpm-card-title {
+  flex: none;
+  font-size: 13px;
+  line-height: 24px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary, #3c3c3d);
+}
+/* The one line the collapsed row is for. \`flex: auto\` with \`min-width: 0\` is what
+   makes the ellipsis reachable: without the zero floor the flex item refuses to
+   shrink below its content and the row pushes the chevron off the card instead. */
+.dsh-tpm-card-progress {
+  flex: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+.dsh-tpm-card-chevron {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--dsw-alias-label-tertiary, #a2a4a6);
+}
+/* The detail is rendered only while expanded, so it needs no collapsed rule —
+   there is no hidden state to keep out of the layout or the accessibility tree. */
+.dsh-tpm-detail {
+  display: flex;
+  flex-direction: column;
+  /* The reference keeps its first label 26px from the card edge; 12px of that is
+     the shell's own inline padding. */
+  padding: 4px 14px 0;
+}
+/* The detail is focusable only when it has an alternate view to reveal, and the
    ring is replaced rather than removed. */
-.dsh-tpm-card:focus-visible {
+.dsh-tpm-detail:focus-visible {
   outline: 2px solid var(--dsh-tpm-accent);
   outline-offset: 2px;
 }
@@ -10640,7 +11083,9 @@ const COMPLETED_CSS = `
   flex-wrap: wrap;
   align-items: baseline;
   gap: calc(var(--dsh-tpm-font) * .35) calc(var(--dsh-tpm-font) * .8);
-  margin: calc(var(--dsh-tpm-font) * .6) calc(var(--dsh-tpm-font) * 2) 0;
+  /* The same 26px-from-the-card-edge rule as the cells, less the 14px the detail
+     already carries. */
+  margin: calc(var(--dsh-tpm-font) * .6) calc(var(--dsh-tpm-font) * .92) 0;
   padding-top: calc(var(--dsh-tpm-font) * .5);
   border-top: .5px solid var(--dsh-tpm-hairline);
   font-size: calc(var(--dsh-tpm-font) * .85);
@@ -10968,7 +11413,10 @@ const LOCALE_DICTS = Object.freeze({
     transition: 'processing',
     tool: 'tool',
     tpsUnit: 'tokens/s',
-    // Completed card: four principal column labels, then the footer/status copy.
+    // Completed card. `performanceTitle` is the compact header's visible title:
+    // short enough to sit beside a one-line summary, unlike `completedLabel`,
+    // which stays the accessible name of the card and the button.
+    performanceTitle: 'Performance',
     completedLabel: 'Turn performance summary',
     colReasoningTps: 'Reasoning TPS',
     colOutputTps: 'Output TPS',
@@ -11001,6 +11449,7 @@ const LOCALE_DICTS = Object.freeze({
     transition: '处理中',
     tool: '工具',
     tpsUnit: 'tokens/s',
+    performanceTitle: '性能',
     completedLabel: '本轮性能统计',
     colReasoningTps: '思考 TPS',
     colOutputTps: '输出 TPS',

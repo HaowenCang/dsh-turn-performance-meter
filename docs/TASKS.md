@@ -891,3 +891,64 @@ the registry artifact reproducing the local digest and matching the GitHub asset
 unversioned standard install and a registry-installed cold start all passing; annotated tag `v0.1.1` peeled to the release
 commit; `HEAD == origin/main` with divergence `0 0` and a clean working tree at the end; and no force, no re-tag, no
 `v0.1.0` movement, no `npm unpublish` and no widened compatibility claim at any point.
+
+## Phase 9 — Completed Card Collapse & DSH Surface Alignment
+
+- [x] **Baseline re-verified before any edit.** `HEAD == origin/main ==
+      24f69c2c82901aed133ba3465d59b0f1fb584bf4`, divergence `0 0`, working tree clean, `v0.1.1` peeled to the same
+      commit, DSH `0.1.7-rc.2` installed and confirmed by `npm list -g @deepseek-ai/dsh --depth=0`.
+- [x] **The host visual contract read from DSH source, not estimated from a screenshot.** The installed package ships no
+      `src/`, so `TodoPanel.module.css` was read out of `@deepseek-ai/dsh-client-ui-conversation/lib/client.js`, where the
+      sheet is embedded under its plugin-CSS tag, together with the `TodoPanel` component's own structure — `useState(true)`,
+      a single `button` header with `aria-expanded`, the `lead / title / progress / chevron` order and the bundled chevron
+      direction. Exact rules recorded in `IMPLEMENTATION_LOG.md`.
+- [x] **Completed root adopts the host dock width formula**, scoped to `[data-kind="completed"]` so the live root keeps
+      its own contract: two `--dsh-composer-side-clearance`, four `--dsh-composer-dock-inset`, `--dsh-composer-card-max-width`
+      and `margin: 0 auto`.
+- [x] **Completed surface replaced with host tokens.** `border: 0`, `--dsw-elevation-stroke-color: var(--dsw-alias-border-l1)`,
+      `border-radius: var(--dsw-radius-lg)`, `background: var(--dsw-specific-menu)`,
+      `backdrop-filter: var(--dsh-menu-backdrop-filter)`, `box-shadow: var(--dsw-elevation-panel)`, `overflow: hidden`.
+      No hex, no `rgba()`, no 10 px radius and no `.5px` outer stroke remain on this surface; the live pill keeps all four
+      of its own, asserted by test.
+- [x] **Collapsed / expanded presentation state, pure and tested.** `defaultCompletedPresentationState()` and
+      `nextCompletedPresentation()` added to `src/client/completed/view-mode.js`; `nextViewMode` retained unchanged as the
+      mode half. Collapsing resets the mode, so re-expanding always opens the summary; `enter`/`focus` on a collapsed card
+      are no-ops.
+- [x] **Default collapsed on every new materialization.** A single effect in `CompletedMeter.js`, keyed on the view
+      identity, resets curve view and presentation together, so a new turn, a session switch-back and a page reload all
+      arrive collapsed. Nothing is persisted: no session log, no `localStorage`, no profile config.
+- [x] **Compact header carrying a real one-line summary.** `src/client/completed/compact-summary.js` composes the row from
+      `view.status` and the already-formatted `view.columns[i].display` values and recomputes nothing; an unavailable
+      reading is the em dash, and a dash never grows a unit. New locale key `performanceTitle` (`Performance` / `性能`).
+- [x] **Header and curve separated by element.** The curve handlers and the focus stop move to `.dsh-tpm-detail`; the
+      toggle button owns expand/collapse only. Tab order is toggle → detail, and header focus leaves `data-view` at
+      `summary`.
+- [x] **Detail padding moved rather than stacked.** The card shell takes the host's `6px 12px` / `gap: 8px`; the detail's
+      inline padding becomes `14px` and the footer's inline margin `12px`, keeping the measured 26 px to the first label.
+      The old `padding: calc(var(--dsh-tpm-font) * 1.55) 0` is gone from the outer card.
+- [x] **`data-view` semantics preserved and the collapse kept separate.** `data-collapsed="true|false"` is a new attribute;
+      `data-view` stays `summary|curve` and reads `summary` while collapsed.
+- [x] **No timer regression.** The completed card arms nothing: asserted by reading the component sources and, in the
+      browser harness, by counting the timers the component asked the host to arm across expand, collapse and a new turn.
+- [x] **Automated gates.** `npm run build:client` (deterministic, mirrored); `npm run verify` → 747 tests, 747 pass, 0 fail,
+      0 cancelled, 0 skipped, 0 todo, `structure OK (14 required files, 16 core modules, 64 test files, client bundle
+      fresh, lib/client.js mirrored)`; `node scripts/verify-sanitization.mjs` → PASS; `git diff --check` → clean.
+- [x] **Real-browser acceptance on DSH `0.1.7-rc.2`.** Computed-style equality with the live `[data-testid="todo-panel"]`
+      for `borderRadius`, `backgroundColor`, `boxShadow`, `backdropFilter` and `borderTopWidth`, in light **and** dark;
+      geometry deltas of `0` px on left, right and width; collapsed / expanded / curve / header-focus / reload behaviour
+      driven through the real DOM; the live pill measured unchanged beside it. Screenshots in `dev/screenshots/phase9/`
+      (gitignored, retained locally).
+- [x] **Production diff confined to the completed card.** `git diff --name-only 24f69c2c...HEAD` touches
+      `src/client/completed/**`, `src/client/live/locale.js`, the two generated bundle mirrors, `test/**`, `docs/**` and
+      `CHANGELOG.md` only. `src/core/**`, `src/dsh/**` and `src/host/**` are unchanged.
+- [x] **Version and release freeze held.** `package.json` remains `0.1.1`; no `npm version`, no `npm publish`, no
+      `git tag`, no `gh release create`, and `v0.1.1` is not moved.
+- [ ] **`v0.1.2` release.** Deliberately out of scope for this round and not started: it follows an independent review of
+      Phase 9, in its own cycle.
+
+Acceptance gate: the reviewed surface is the host's TodoPanel surface, token for token, verified by computed style
+against the live panel in both themes and by a `0` px geometry delta; the collapsed row is the default for every new
+materialization and carries the status plus all four readings without recomputing any of them; the expanded detail keeps
+the Phase 5 four-column grid, footer and hover/focus curve unchanged; the curve, the header and the toggle stay on
+separate elements so keyboard focus on the toggle cannot reveal a chart; no metric, curve, adapter, store or retention
+semantics changed; and the version, the tag and the release state are exactly as they were at the baseline.

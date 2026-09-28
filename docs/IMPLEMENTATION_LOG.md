@@ -3746,3 +3746,161 @@ no `--force`, no `--force-with-lease`, no reset of remote `main`, no movement of
 after the npm publication, the registry artifact verification and all three registry install gates pass. No `npm
 unpublish` under any circumstance: a published npm version is an immutable artifact, and a failure after publication is
 reported as a partial state rather than undone.
+
+## Phase 9 — Completed Card Collapse & DSH Surface Alignment
+
+Baseline `24f69c2c82901aed133ba3465d59b0f1fb584bf4` (`HEAD == origin/main`, divergence `0 0`, working tree clean,
+`v0.1.1` peeled to the same commit, DSH `0.1.7-rc.2`). Presentation-only round: no version bump, no tag, no release.
+
+Scope: the completed card's presentation state, structure, CSS and accessibility, plus the tests and docs that cover them.
+Frozen and untouched: TURN-level aggregation, ratio-of-sums rates, the reasoning/output split, Generated Tokens, TTFT,
+`toolWorkMs`/`toolWallMs`, attempt counting, the quality model, calibration, the curve rolling window, its compressed axis
+and its peak, durable reconstruction and deduplication, the 0.1.7-rc.2 adapter contract and the 50 ms live cadence.
+`src/core/**`, `src/dsh/**` and `src/host/**` are byte-identical to the baseline (`git diff --name-only` shows no entry
+under them).
+
+### 1. The host visual contract, read from source rather than sampled from a screenshot
+
+The surface was taken from the official DSH `0.1.7-rc.2` TodoPanel. Only the compiled bundle ships in the local install
+(`packages/client/ui-conversation` has no `src/`), so the CSS was read out of `lib/client.js`, where the module's sheet is
+embedded as a string literal under the `TodoPanel.module.css` plugin-CSS tag. The two relevant rules, verbatim:
+
+```css
+.lXshSW_root{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));max-width:calc(var(--dsh-composer-card-max-width) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset) - var(--dsh-composer-dock-inset));--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);box-shadow:var(--dsw-elevation-panel);border:0;flex:none;margin:0 auto;overflow:hidden}
+.lXshSW_body{flex-direction:column;gap:8px;padding:6px 12px;display:flex}
+```
+
+The component contract beside it was read from the same bundle's `TodoPanel` function: `useState(true)` (collapsed by
+default), `section` root, `div.body`, a single `button` header carrying `aria-expanded={!collapsed}`, and the child order
+`lead / title / progress / chevron`, with `lead` and `chevron` both `aria-hidden`. The bundled React tree also fixes the
+chevron direction, which is the reverse of the conventional pairing and is therefore asserted by a test rather than
+assumed: **collapsed renders `ChevronUp`, expanded renders `ChevronDown`**.
+
+Two consequences follow for this project. First, the plugin now writes no hex, no `rgba()` and no hand-chosen radius on
+the completed surface — those are host tokens, and `test/completed-tree.test.js` forbids their return. Second, the live
+pill is explicitly excluded from that rule, because it is a different row with a different reference; the sheet's own
+test asserts the pill keeps `--dsh-tpm-surface`, its 10 px radius and its hairline, and the browser run below confirms it.
+
+### 2. Where the card's width actually comes from
+
+The completed card was wider than the todo panel because its root took the dock seat's full width and applied its own
+`max-width` to the card instead of the host's dock formula. The fix moves the host's `width`/`max-width`/`margin: 0 auto`
+onto `.dsh-tpm-root[data-kind="completed"]` — the sibling of TodoPanel's own root — and leaves the live root alone. It is
+scoped by `[data-kind="completed"]` rather than by `.dsh-tpm-root`, so there is exactly one width contract per row.
+
+### 3. State model, and why the header does not share an element with the curve
+
+`src/client/completed/view-mode.js` now exposes `defaultCompletedPresentationState()` and
+`nextCompletedPresentation(state, event, { interactive })`, where the state is `{ collapsed, mode }`. `nextViewMode` stays
+exported and unchanged as the mode half, because it is the tested Phase 5 contract and the new reducer is merely its
+caller; keeping both means the curve transitions cannot silently change meaning.
+
+`collapsed` and `mode` are orthogonal, and the transitions that matter are the ones that write both. `toggle` while
+collapsed opens the summary; `toggle` while expanded collapses **and resets the mode**, which is what makes "expand
+always opens the summary" true for a reader who collapsed while looking at the chart. Events that the current state does
+not admit are no-ops rather than resets, so a stray `mouseleave` cannot collapse an open card, and `enter`/`focus` on a
+collapsed card change nothing at all.
+
+The reaction to a new settled view lives in `CompletedMeter.js` as one effect keyed on the view identity, resetting curve
+view and presentation together. Holding both in a single `useState` is deliberate: split across two states, a render
+could exist in which the card is collapsed but still remembers the curve, which is the one state the round forbids.
+
+The curve's handlers and its focus stop moved from `.dsh-tpm-card` to `.dsh-tpm-detail`. That is the structural half of
+"header focus must not reveal the curve": the button owns expand/collapse and nothing else, and the region that owns the
+curve is the region that answers to hover and focus.
+
+### 4. The compact row reads, it never recomputes
+
+`src/client/completed/compact-summary.js` composes the collapsed line from `view.status` and `view.columns[i].display`,
+i.e. from strings `ui-model.js` already formatted. It divides nothing, sums nothing, rounds nothing and decides no
+quality marker. The one formatting rule it adds is that a unit appears only when the reading does — `columns[i].unit` is
+`null` for an absent metric — so an unavailable reading is the bare em dash and never `— tokens`. A test builds the
+expected line out of the same `view.columns` the detail renders, which is what makes "reuse, do not re-derive" fail the
+day the two disagree rather than merely today.
+
+The visible title is a new locale key, `performanceTitle` (`Performance` / `性能`); `completedLabel` stays the accessible
+name of the card and of the button.
+
+### 5. Layout arithmetic
+
+The card shell took the host's `padding: 6px 12px` and `gap: 8px`, so the reference geometry — which is a distance from
+the **card edge** — had to be restated on the element that now owns it. The detail's inline padding is therefore
+`26px − 12px = 14px`, and the footer's inline margin `12px`, preserving the measured 26 px to the first label. The old
+`padding: calc(var(--dsh-tpm-font) * 1.55) 0` was removed from the outer card rather than kept under the new body, which
+is what stops the header and the old padding from adding up. Measured in the browser: the expanded card is 155.67 px
+against a 147.96 px always-expanded pre-Phase-9 shell, i.e. the header costs 7.7 px, and the collapsed row is 36 px.
+
+### 6. Automated gates
+
+`npm run build:client` rebuilt `client.js` and the `lib/client.js` mirror (byte-identical, deterministic).
+`npm run verify` → **747 tests, 747 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo** (baseline 714; the round adds 33),
+with `structure OK (14 required files, 16 core modules, 64 test files, client bundle fresh, lib/client.js mirrored)`.
+`node scripts/verify-sanitization.mjs` → PASS. `git diff --check` → clean.
+
+The new coverage is `test/completed-presentation.test.js` (component-level lifecycle: mounted state, toggle, re-render
+stability, new-turn reset, and a zero-timer assertion) plus new cases in `test/completed-tree.test.js` and
+`test/completed-interaction.test.js` for the collapse structure, the compact row, the CSS contract and the two focus
+rings. One pre-existing test needed a one-line change: `test/curve-peak-priority.test.js` renders the card directly and
+now passes `collapsed: false`, because the detail — and therefore the curve — is not rendered while collapsed.
+
+`completed-presentation.test.js` loads the component through a synchronous `module.registerHooks()` loader that
+substitutes a recording React, so `CompletedMeter.js` itself is the subject rather than a copy of its logic. `useRef`
+there keeps its box across renders, which is load-bearing: a box that reset would make the component's
+`previousView.current === view` guard always true and would mask a missing dependency array.
+
+### 7. Browser evidence (real DSH 0.1.7-rc.2, real tab)
+
+Captured through the Chrome DevTools protocol against the live `dsh web` GUI on `127.0.0.1:50001`, on a session whose
+turn had already settled, so `.dsh-tpm-card` and `[data-testid="todo-panel"]` were on screen simultaneously — the
+comparison §31 asks for, on the real elements rather than on a reconstruction.
+
+Computed styles, light theme:
+
+| property | performance `.dsh-tpm-card` | TodoPanel `[data-testid=todo-panel]` |
+| --- | --- | --- |
+| `borderRadius` | `16px` | `16px` |
+| `backgroundColor` | `rgba(248, 249, 250, 0.58)` | `rgba(248, 249, 250, 0.58)` |
+| `boxShadow` | `rgba(0,0,0,0.04) 0 0 0 0.5px, rgba(0,0,0,0.03) 0 3px 8px 0, rgba(0,0,0,0.02) 0 0 16px 0` | identical |
+| `backdropFilter` | `blur(40px) saturate(1.5)` | `blur(40px) saturate(1.5)` |
+| `borderTopWidth` | `0px` | `0px` |
+
+Dark theme, applied with the host's own `body[data-ds-dark-theme]` switch, agrees on every property again and moves both
+surfaces together: `rgba(67, 69, 74, 0.45)` background, `rgba(255,255,255,0.06)` stroke, `rgb(249, 250, 251)` text. No
+completed-specific light or dark background exists in the sheet, which is why the two cannot drift.
+
+Geometry, in CSS pixels, from the same two elements:
+
+```text
+Todo left   400.6667    meter left   400.6667    delta 0
+Todo right 1524.6563    meter right 1524.6563    delta 0
+Todo width 1123.9896    meter width 1123.9896    delta 0
+```
+
+Behaviour, driven through the real DOM: a settled turn arrives `data-collapsed="true"` / `data-view="summary"` with no
+`.dsh-tpm-detail`, no metric cell, no footer and no SVG chart in the document; the header click yields
+`aria-expanded="true"` / `data-collapsed="false"` with four cells and the footer; a second click returns to
+`aria-expanded="false"` / `data-collapsed="true"` with the height falling 155.67 px → 36 px and the detail, cells, footer
+and SVG all leaving the layout; collapsing from the curve returns `data-view` to `summary`, and re-expanding opens the
+summary rather than the chart. A real pointer entering the detail switches `data-view` to `curve` with exactly one layer
+exposed and the other `aria-hidden`, and leaving returns to `summary`. Keyboard focus on the toggle leaves `data-view` at
+`summary`; focusing the detail raises the curve; blurring back to the inside of the card closes it. The only two tab stops
+are `dsh-tpm-card-header` then `dsh-tpm-detail`. A page reload of the settled session re-renders the same card collapsed.
+The live pill measured beside all of this is untouched: `rgb(245, 246, 247)` background, `10px` radius, `0.666667px`
+solid hairline, no shadow, no backdrop filter.
+
+Screenshots: `dev/screenshots/phase9/completed-collapsed-light.png`, `completed-expanded-light.png`,
+`completed-curve-light.png`, `completed-collapsed-dark.png`. The directory is covered by `.gitignore`, so they are local
+evidence and are not committed, as §33 permits.
+
+### 8. Evidence boundaries
+
+The settled card used for the visual comparison is a real turn from a real session, not a synthetic one, but it is a
+**historical** session in the same GUI rather than a turn that settled while this round was running; the live turn was
+still streaming throughout, and its own card could not be observed here. The browser harness drove that card through the
+DOM (click, real `mouseover`/`mouseout`, `.focus()`), which is the same input path a reader uses, and read
+`getComputedStyle` and `getBoundingClientRect` from it. The dark theme was applied by setting the host's own
+`body[data-ds-dark-theme]` attribute rather than through the settings menu; the token values it resolves are the host's,
+and both surfaces moved together under it. The "old completed-card height" of 147.96 px is the shipped detail measured
+under a shell override that restores the pre-Phase-9 outer padding, radius and header absence in the live page — an
+arithmetic reconstruction of the old outer box, not a checkout of the previous commit; it is reported as such. No second
+machine, no remote host and no CI runner was used.

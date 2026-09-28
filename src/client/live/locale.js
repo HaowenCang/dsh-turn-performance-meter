@@ -24,7 +24,10 @@ export const LOCALE_DICTS = Object.freeze({
     transition: 'processing',
     tool: 'tool',
     tpsUnit: 'tokens/s',
-    // Completed card: four principal column labels, then the footer/status copy.
+    // Completed card. `performanceTitle` is the compact header's visible title:
+    // short enough to sit beside a one-line summary, unlike `completedLabel`,
+    // which stays the accessible name of the card and the button.
+    performanceTitle: 'Performance',
     completedLabel: 'Turn performance summary',
     colReasoningTps: 'Reasoning TPS',
     colOutputTps: 'Output TPS',
@@ -57,6 +60,7 @@ export const LOCALE_DICTS = Object.freeze({
     transition: '处理中',
     tool: '工具',
     tpsUnit: 'tokens/s',
+    performanceTitle: '性能',
     completedLabel: '本轮性能统计',
     colReasoningTps: '思考 TPS',
     colOutputTps: '输出 TPS',

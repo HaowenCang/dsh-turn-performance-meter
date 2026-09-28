@@ -537,6 +537,8 @@ test('the printed peak and the placed marker are the same measurement', () => {
 
   /** And the same claim through the rendered card, which is what a reader actually sees. */
   const card = completedTree(rec, completedViewModel(settled), translate, {
+    /** The card is collapsed by default since Phase 9; the curve lives in the detail. */
+    collapsed: false,
     mode: COMPLETED_VIEW_CURVE,
     curveView: view,
   })
