@@ -9,12 +9,19 @@ Distribution status: published to the public npm registry as `dsh-turn-performan
 
 ## Unreleased
 
-Supported and tested against DSH `0.1.7-rc.2` only. Presentation change only.
+Supported and tested against DSH `0.2.0-rc.2` only (public reference commit
+`639ed015397290b3745d163aafe02ffee4aa3f84`). The `v0.1.1` release remains bounded to `0.1.7-rc.2`; the two are separate
+claims, not one range.
 
-- completed cards now default to a compact collapsed row
-- expanded detail remains available on demand
-- completed-card surface follows DSH TodoPanel host tokens
-- no metric or telemetry semantics changed
+- Live throughput is now a **phase-cumulative average** rather than a trailing one-second window, and the completed
+  curve uses the same estimator family on a 100 ms source grid with a 200-point cap (`docs/METRICS_SPEC.md` §6–§8).
+- The live presentation cadence is 100 ms.
+- Completed cards now default to a compact collapsed row; expanded detail remains available on demand.
+- Completed-card surface follows DSH TodoPanel host tokens.
+- Compatibility baseline moved to DSH `0.2.0-rc.2`: the exact peer is now `@deepseek-ai/dsh = 0.2.0-rc.2`. Every DSH
+  declaration this plugin reads was re-audited against the new runtime and is byte-identical to its `0.1.7-rc.2` form,
+  so no adapter, metric or presentation behaviour changed with the runtime. **No compatibility exemption is required or
+  used.**
 
 ## 0.1.1 — npm distribution
 

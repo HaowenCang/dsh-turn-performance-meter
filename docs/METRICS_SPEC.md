@@ -12,6 +12,14 @@ remain frozen: turn-level aggregation, `reasoningTokens` inclusion, Generated To
 tool wall/work accounting, attempt identity, durable reconstruction and deduplication, the phase-evidence consistency
 guard, the quality axes, the 0.1.7-rc.2 adapter contract, and the completed-card visual design.
 
+**Phase 9.3 note.** The normative DSH runtime moved from `0.1.7-rc.2` to `0.2.0-rc.2` (public reference commit
+`639ed015397290b3745d163aafe02ffee4aa3f84`). **No metric in this file changed.** Every DSH declaration the throughput,
+token, timing and quality families read — the session event types, the LLM `StreamChunk` union, the compact
+`AssistantStreamRecord` runs and the session-controller client contract — is byte-identical between the two reference
+commits, as recorded in `docs/DSH_API_NOTES.md` §14. The "0.1.7-rc.2 adapter contract" named as frozen above is
+therefore also the 0.2.0-rc.2 adapter contract, and the version-named audit references further down this file record
+*when* a rule was established rather than restricting it to that runtime.
+
 ## 1. Statistical scope
 
 A metric card belongs to one DSH `turn`. A turn may contain multiple steps, model attempts, retries, and tool calls.

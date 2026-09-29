@@ -3977,3 +3977,217 @@ Verified against the local `0.1.7-rc.2` install: `dsh-llm/lib/types/types.d.ts:4
 `dsh-api-session-controller/lib/client.js` republishes each frame as an `assistant/live-chunk` row with
 `data.chunk` intact. Usage is therefore not settlement-only, and the live estimator's priority is
 (1) usable in-stream provider counters, (2) generated-delta shape weights.
+
+## Phase 9.3 — DSH 0.2.0-rc.2 compatibility migration (2026-09-29)
+
+### 1. Preflight
+
+`HEAD == origin/main == b59de4854b3619651b81b386e38874b240e2413b`, `git rev-list --left-right --count HEAD...origin/main`
+→ `0 0`, working tree clean. `dsh --version` → `0.2.0-rc.2`; `npm list -g @deepseek-ai/dsh --depth=0` →
+`@deepseek-ai/dsh@0.2.0-rc.2`. The Phase 9.2 commits `291e321` and `b59de48` were therefore the production candidate,
+and the phase's own rule — do not restart Phase 9.2, do not revert those commits — was met by simply not touching the
+semantics they introduced. No reset, rebase or force was performed at any point.
+
+### 2. The audit: 14 declarations, compared by content address
+
+The published DSH package ships compiled `lib/` plus `.d.ts`, not `src/`, so a source comparison could not be made
+against the install. It was made against a local checkout of `deepseek-ai/deepseek-harness`, resolving every declaration
+at both reference commits with `git rev-parse <sha>:<path>` and comparing the resulting blob hashes:
+
+| Upstream path | blob at `477b4f42` / `639ed015` |
+|---|---|
+| `packages/core/session/src/types.ts` | `593c86d5` |
+| `packages/llm/llm/src/types.ts` | `54453607` |
+| `packages/llm/llm/src/assistant-stream.ts` | `7fca34c5` |
+| `packages/api/session-controller/src/client/contract/events.ts` | `bc825f08` |
+| `packages/api/session-controller/src/client/session-wire-event.ts` | `59d6ef5b` |
+| `packages/api/session-controller/src/client/sessions/assistant-stream.ts` | `973fd108` |
+| `packages/api/session-controller/src/client/sessions/session.ts` | `284abc56` |
+| `packages/api/session-controller/src/client/contract/session.ts` | `2c8f16c4` |
+| `packages/api/session-controller/src/client/contract/snapshot.ts` | `161cd858` |
+| `packages/client/ui-conversation/src/client/contract/slots.ts` | `61f7d8ff` |
+| `packages/boot/app-boot/src/plugin-compatibility.ts` | `047fe1f9` |
+| `packages/boot/plugin-manager/src/install-spec.ts` | `3ef46155` |
+| `packages/client/ui-conversation/src/client/skeleton/TodoPanel.tsx` | `bf59a54a` |
+| `packages/client/ui-conversation/src/client/skeleton/TodoPanel.module.css` | `04b537da` |
+
+Fourteen of fourteen identical. Comparing blob identity rather than diffing text is what makes the finding a fact about
+bytes: a reformatted or reordered file would hash differently and be reported as a change even with preserved meaning.
+
+Because the sources were identical, no adapter work was justified. This is the phase's central result and it is worth
+stating as such: **there was no contract to migrate.** The `src/dsh/**` tree therefore moved no code. The single edit in
+it is `src/dsh/index.js`'s header — the module's normative statement of which runtime it targets — and the remaining
+`0.1.7-rc.2` strings under `src/dsh/**` (in `adapter.js`, `client-feed.js`, `raw.js`) were deliberately left alone: each
+names the version on which a specific shape was *audited*, which is recorded evidence rather than a stale target.
+
+### 3. Confirmation against the installed runtime
+
+The declarations the plugin is compiled against were then re-read from the installed `0.2.0-rc.2` tree, so the claim
+rests on the runtime actually present and not only on the upstream repository: the `SessionEvent` envelope
+(`dsh-session/lib/types/types.d.ts:489-512`), `turn/start` and `turn/end` (`:262-276`), `assistant/message` (`:330-338`),
+`assistant/attempt` (`:344-348`), `tool/call` (`:354-360`), `tool/result` (`:374-388`),
+`AssistantStreamRecord` (`dsh-llm/lib/types/assistant-stream.d.ts:16-40`), the `StreamChunk` union
+(`dsh-llm/lib/types/types.d.ts:417-447`), `isTokenDelta` (`assistant-stream.d.ts:72-78`), `AssistantLiveChunkEvent`,
+`SessionEventChange` and `SessionEventWindow`
+(`dsh-api-session-controller/lib/types/client/contract/events.d.ts:6-63`), and `conversation.input.dock`
+(`dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts:213-218`, `kind: 'list'`, `scope: 'session'`). Full
+table in `docs/DSH_API_NOTES.md` §14.3.
+
+Two differences between the two commits exist and were assessed as irrelevant rather than worked around:
+`session-controller` gained an optional `fork(...).onCreated` callback (this plugin never forks), and the CLI gained the
+exact-version exemption operations in §4 below.
+
+### 4. The compatibility gate, measured rather than reasoned about
+
+`evaluatePluginCompatibility` is exported by the installed `dsh-app-boot`, so it was imported and called directly against
+the real manifest instead of the gate being paraphrased. With `"@deepseek-ai/dsh": "0.2.0-rc.2"` it returns `undefined` —
+no incompatibility at all, which is a stronger statement than "exempted". The **control** is the informative half: the
+previous `"0.1.7-rc.2"` peer against the same `0.2.0-rc.2` runtime returns
+
+```json
+{"name":"dsh-turn-performance-meter","version":"0.1.1","runtimeVersion":"0.2.0-rc.2",
+ "peers":{"@deepseek-ai/dsh":"0.1.7-rc.2"},"exempted":false}
+```
+
+which shows both that the check is load-bearing and that the old declaration would have been refused. The gate's
+predicate is `semver.satisfies(runtimeVersion, requirement, { includePrerelease: true })` over peers named
+`@deepseek-ai/dsh` or `@deepseek-ai/dsh-*`; `includePrerelease` is why a prerelease runtime participates in ranges at
+all, leaving only the question of which range to declare. Checked against the bundled `semver` with the runtime fixed at
+`0.2.0-rc.2`: `0.2.0-rc.2` yes, `0.1.7-rc.2` **no**, `^0.2.0-rc.2` yes, `>=0.2.0-rc.2` yes, `0.2.x` yes, `*` yes,
+`0.1.7-rc.2 || 0.2.0-rc.2` yes. The exact pin is the only row satisfied by the intended runtime and unsatisfied by every
+runtime this project has not exercised.
+
+`0.2.0-rc.2` also ships exact-version exemptions (`allow-version`, `revoke-version`, `version-exemptions`, and the
+`exempted` field above). **None is used or required.** An exemption accepts a declared incompatibility; this plugin
+declares a compatible peer, so the gate passes on its own terms.
+
+### 5. Production change surface
+
+Two production edits, both declaration rather than behaviour:
+
+```text
+package.json      "peerDependencies": { "@deepseek-ai/dsh": "0.1.7-rc.2" }  ->  "0.2.0-rc.2"
+src/dsh/index.js  the header's "target runtime is X" paragraph
+```
+
+plus the two generated bundle mirrors (`client.js`, `lib/client.js`) rebuilt from the second. `src/core/**` and
+`src/host/**` are untouched, `package.json` `version` remains `0.1.1`, and the dual range was not introduced: the release
+matrix is two separately bounded claims, `v0.1.1 → 0.1.7-rc.2` and `v0.1.2 → 0.2.0-rc.2`.
+
+### 6. Automated verification
+
+```text
+npm run build:client            client.js rebuilt (522309 bytes, mirrored to lib/client.js)
+npm run verify                  763 tests, 763 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo
+                                structure OK (14 required files, 15 core modules, 64 test files,
+                                client bundle fresh, lib/client.js mirrored)
+verify-sanitization.mjs         PASS — no personal content, all structural evidence preserved
+git diff --check                clean
+```
+
+746 before the phase; the 17 new tests are `test/dsh-020-contract.test.js`, the narrow layer described in
+`docs/TEST_PLAN.md` §10. The historical `test/dsh-017-*.test.js` files were neither renamed nor restamped, and the
+`fixtures/dsh-0.1.7/` corpus still declares `dshVersion: "0.1.7-rc.2"` because that is when it was recorded.
+
+### 7. Package-install evidence in a disposable profile
+
+A profile was initialised from the shipped web template and the plugin installed through the official command:
+
+```powershell
+dsh --profile p93-rc2 --from-default-profile web --dump-config
+dsh plugin --profile p93-rc2 add "link:E:/Projects/DSHarness/dsh-turn-performance-meter"
+```
+
+Exit `0`. The profile's `package.json` then carried `dsh-turn-performance-meter: link:E:/Projects/...` and
+`dsh.profile.bundles: [@deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app, dsh-turn-performance-meter]` — the bundle was
+reconciled automatically, with no hand edit. `node_modules/dsh-turn-performance-meter` is a **SymbolicLink** to the
+checkout, which is the documented `link:` semantics, and the peer the profile sees is `0.2.0-rc.2`.
+
+The decisive negative evidence is what was **absent**: no incompatible-plugin rejection in the install output, and no
+`compatibility.json` in the profile directory at all, so no version exemption had been granted. The profile was then
+cold-started once (`dsh --profile p93-rc2 --port 50011 --no-open`) and served the GUI with the plugin's client CSS
+present and its slot mounted; the only error in that host's session was `API key is invalid`, an environment condition
+of the fresh profile recorded and **not** investigated under this phase's exclusion rule. The profile was deleted
+afterwards.
+
+The real `web` profile was not modified: its `package.json` SHA-256 is
+`4C8B1E2F6B0CFF687BBC6FA17A464E5F9836CEE50D4DD6001DC725CE37E5CD67` before and after the whole probe.
+
+### 8. Runtime smoke and acceptance on DSH `0.2.0-rc.2`
+
+Driven in the running `0.2.0-rc.2` GUI, in a session created for the purpose, with a DOM recorder sampling the meter
+every 25 ms. Four turns were run: turn 1 a pure reasoning/output answer, turns 2–4 exercising tool calls.
+
+**Cadence.** Across the live samples the gap between consecutive DOM changes has median **100 ms**, with the first
+twenty-five gaps almost all exactly `100`. This is the phase's stated target and it is a presentation cadence, unrelated
+to the runtime version — the assertion that it is still 100 is in the contract test.
+
+**Phase transitions and live values.**
+
+```text
+rel 26 ms     completed card for the previous turn (the starting state)
+rel 6698 ms   live  "0.08s 首响应计时"                open turn, no generated token yet — timer, not a rate
+rel 8704 ms   live  "思考 ≈670 tokens/s 2.4s"         reasoning phase, phase-cumulative rate
+rel 10937 ms  live  "pwsh · 0.4s 4.4s"                tool running — name and its own duration, TPS ABSENT
+rel 11089 ms  live  "grep · 0.3s 4.6s"                second tool running
+rel 11197 ms  live  "等待模型 0.27s 4.8s"              inter-attempt wait, still no rate
+rel 12742 ms  live  "思考 0.01s 6.4s"                 next attempt: FRESH phase episode, counter reset
+rel 13730 ms  live  "输出 ≈157 tokens/s 7.4s"          reasoning -> output transition
+rel 36227 ms  completed "思考 ≈207 · 输出 ≈344 · 3,701 tokens · 首响应 2.30 s"
+```
+
+The `0.01s`/`0.08s`/`0.11s` episode counters after each tool wait are the phase-local reset, observed rather than
+assumed. The last live value before settlement was `输出 ≈204 tokens/s` at `34.7s`, and the settled card carried the
+authoritative recomputation.
+
+**The settled card is numerically the durable log.** Each turn's card was compared against the turn's own
+`assistant/message` usage rows:
+
+| turn | durable `outputTokens` per step | sum | card |
+|---|---|---|---|
+| 1 | 6799 | 6799 | 6,799 |
+| 2 | 461 + 306 + 885 | 1,652 | 1,652 |
+| 3 | 342 + 271 + 889 + 915 + 1284 | 3,701 | 3,701 |
+| 4 | 470 + 581 + 883 | 1,934 | 1,934 |
+
+Four of four exact. This is the strongest available evidence that the Phase 9.2 completed-rate arithmetic survived the
+runtime change untouched, because the inputs it divides are the durable settlement's own counters.
+
+**Interactions.** Collapsed by default on every materialisation (`aria-expanded="false"`, no detail, no cells).
+Expanding produced the four-column summary with the phase-episode secondary lines (`思考 TPS ≈211 · 27.8s · ≈5,875` /
+`输出 TPS ≈328 · 2.8s · ≈924`). Hovering the detail switched `data-view` from `summary` to `curve` and rendered the
+two-series chart with peak ≈623 tokens/s; leaving returned to the summary while the card stayed expanded, which is the
+Phase 9 rule that the two decisions are orthogonal. Screenshot retained locally at
+`dev/screenshots/phase93/phase93-curve-hover.png` (gitignored).
+
+**Reload.** After a full page reload the card was reconstructed from durable evidence with values identical to the
+pre-reload card, and collapsed again — the Phase 9 behaviour, since a reload materialises the component afresh. The
+plugin's own diagnostics after the reload read `turnEndLookupHit: 2`, `turnEndLookupMiss: 0`, `settledSnapshotBuilt: 2`,
+no feed issues.
+
+**Isolation.** With two sessions attached simultaneously
+(`["session-c9172ca8-…","session-5f232bba-…"]`), switching between them showed each session's own card and never the
+other's, exactly one meter root at a time, and switching back restored the original values unchanged.
+
+**Diagnostics at the end.** `turnEndLookupMiss: 0`, `turnEndReconstructed: 0`, `unmatchedToolResults: 0`,
+`malformedToolResults: 0`, `lateTurnRows: 0`, `lateTurnEvents: 0`, `ignoredEvents: 0`, `droppedDeltas: 0`,
+`feedIssues: []`, with eleven tool calls matched to eleven results and four settlements built. Of eight bare
+`settle-assistant` calls, **eight** were resolved as retirements and **zero** as abandonments — independent runtime
+confirmation of the §13.4 disambiguation on the 0.2.0 fold, which is the contract most at risk from a client-side change.
+
+**Console.** No plugin error. The two error-class messages present were a framework permissions-policy notice and 404s
+on `/api/pet/pets` and `/api/pet/state`, i.e. the unrelated `dsh-pet` plugin polling endpoints its host does not serve;
+the meter's own bundle request returned `200`.
+
+### 9. One observation recorded and not pursued
+
+In a single sequence — the page had just been reloaded, and a new turn settled while the tab was not in the foreground —
+the completed card continued to show the **previous** turn's values until the page was reloaded again. It did not
+reproduce: the same page later advanced correctly from one turn's card to the next under the same conditions, the
+durable path produced the correct card every time, and all four turns' cards matched the durable log exactly.
+
+It is recorded rather than investigated because it involves no DSH contract, and this phase's subject is compatibility:
+reopening presentation logic on unreproduced evidence would be exactly the kind of scope expansion the phase forbids. It
+is left as a candidate for a future round with its conditions stated — page reloaded, settlement while the tab is
+backgrounded, stale until the next reload — so that a later attempt starts from the conditions rather than from a
+symptom.

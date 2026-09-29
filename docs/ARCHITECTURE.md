@@ -547,6 +547,43 @@ taking a snapshot advances the episode clock the diagnostic was only supposed to
 expired samples from the rolling window). The gate matters for the same reason: a turn that ended with a call whose result was
 never observed closes its presentation while the unresolved call stays on the record as incomplete evidence.
 
+### Phase 9.3 — DSH 0.2.0-rc.2 compatibility
+
+The normative runtime moved from `0.1.7-rc.2` to `0.2.0-rc.2`, and this subsection records what that did and did not
+change. It is short because the answer is "nothing in the data path", and the reason is worth stating precisely rather
+than as an assurance.
+
+Every DSH declaration the plugin reads was re-audited at the public reference commit
+`639ed015397290b3745d163aafe02ffee4aa3f84` and compared against the previous reference
+`477b4f420553e8a52c2fbccc464d7561b239c443` by **blob hash**, not by eye. All fourteen are identical: the session event
+types, the LLM stream and compact-stream types, the whole session-controller client contract, the conversation slot
+contract, the plugin-compatibility gate, and both TodoPanel files. The table and the installed-runtime confirmation are
+in `docs/DSH_API_NOTES.md` §14.
+
+That result has a direct architectural consequence, and it is the point of the phase: **the boundary this project drew
+in Phase 2 held.** `src/dsh/**` is the only layer that knows DSH field names; because the field names did not move,
+neither did any layer above it. No adapter code, no normalization rule, no metric arithmetic and no presentation rule
+changed. In particular the Phase 9.2 phase-cumulative TPS semantics — the live estimator, the 100 ms presentation
+cadence, the phase-local reset, the stall decay, the settlement recomputation, the 100 ms curve grid with its
+200-point cap and nearest-neighbour reduction — were not reopened, and the completed card's visual contract was not
+restyled. A change of *runtime* is not a change of *contract*, and the two are separated here so that a future version
+bump is not mistaken for an occasion to revisit frozen semantics.
+
+What did change is the compatibility declaration. `package.json` now carries an exact
+`"@deepseek-ai/dsh": "0.2.0-rc.2"` peer. The gate that reads it
+(`evaluatePluginCompatibility`, installed at `dsh-app-boot/lib/index.js:286-313`) evaluates
+`semver.satisfies(runtimeVersion, range, { includePrerelease: true })` over peers named `@deepseek-ai/dsh` or
+`@deepseek-ai/dsh-*`, so an exact prerelease pin is both satisfied by the intended runtime and unsatisfied by every
+runtime this project has not exercised. DSH `0.2.0-rc.2` additionally ships exact-version *exemptions*
+(`allow-version`, `revoke-version`, `version-exemptions`); **none is used here**, because an exemption accepts a
+declared incompatibility and this plugin declares none.
+
+The evidence layer for the claim is `test/dsh-020-contract.test.js`. It is deliberately narrow — the eight contract
+groups rather than a re-test of the metric semantics, which are covered by the existing suite and by the
+`test/dsh-017-*.test.js` files that remain stamped with the 0.1.7 evidence they were recorded on. Read together with
+§13 of the API notes, the structure is: the 0.1.7 corpus and its tests are the historical record, §14 and the 0.2.0
+contract test are the current baseline, and the two are kept apart rather than merged into one restamped set.
+
 ## 12. Non-goals
 
 This project is not:

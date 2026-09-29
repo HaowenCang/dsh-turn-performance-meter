@@ -368,3 +368,134 @@ recorded above. This project does **not** claim 0.1.5 support. The 0.1.5-rc.2 ca
 compatibility; they are no longer evidence for the tool/result shape, settle-assistant semantics, the turn completion
 lifecycle or the client event-window contract, all of which are established from the 0.1.7 declarations and the
 recorded 0.1.7 corpus.
+
+**Superseded in Phase 9.3.** §13 remains the record of the 0.1.7-rc.2 baseline and of the audit that established it; it
+is a statement about what was verified *on 0.1.7*, and none of it is retracted. The supported runtime is now
+`0.2.0-rc.2` — see §14, which is the normative baseline from Phase 9.3 onward.
+
+## 14. DSH 0.2.0-rc.2 compatibility baseline
+
+| Item | Value |
+|---|---|
+| Local installed version | `0.2.0-rc.2` |
+| Public reference commit | `639ed015397290b3745d163aafe02ffee4aa3f84` |
+| Superseded reference commit | `477b4f420553e8a52c2fbccc464d7561b239c443` (`0.1.7-rc.2`) |
+| Verified local package path | `C:\Users\20659\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh` (the shipped packages it composes resolve under `...\dsh\node_modules\@deepseek-ai\*`, which is the root the declaration paths below are relative to) |
+| Verified date | 2026-09-29 |
+| Version exemption required | no |
+
+### 14.1 Method
+
+Two independent checks, run because the normative runtime changed rather than because a defect was suspected.
+
+The first is a **content-addressed comparison of the upstream declarations**. Every file in the audit list below was
+resolved at both commits with `git rev-parse <sha>:<path>` in a local checkout of `deepseek-ai/deepseek-harness` and the
+resulting blob hashes were compared. Comparing blob identity rather than diffing text is what makes "unchanged" a fact
+about bytes: a reformatted or reordered file would produce a different hash and would be reported as a difference even
+if its meaning were preserved.
+
+The second is a **read of the installed 0.2.0-rc.2 runtime**. The published package ships compiled JavaScript plus
+`.d.ts` declarations, not the `src/` tree, so the declarations the plugin is compiled against were read from the
+installed `lib/types/**` of each composed package and the runtime symbols were read from the installed `lib/*.js`.
+
+### 14.2 Upstream comparison — 14 files, 14 identical
+
+| Upstream path | Blob at `477b4f42` / `639ed015` | Verdict |
+|---|---|---|
+| `packages/core/session/src/types.ts` | `593c86d5` | identical |
+| `packages/llm/llm/src/types.ts` | `54453607` | identical |
+| `packages/llm/llm/src/assistant-stream.ts` | `7fca34c5` | identical |
+| `packages/api/session-controller/src/client/contract/events.ts` | `bc825f08` | identical |
+| `packages/api/session-controller/src/client/session-wire-event.ts` | `59d6ef5b` | identical |
+| `packages/api/session-controller/src/client/sessions/assistant-stream.ts` | `973fd108` | identical |
+| `packages/api/session-controller/src/client/sessions/session.ts` | `284abc56` | identical |
+| `packages/api/session-controller/src/client/contract/session.ts` | `2c8f16c4` | identical |
+| `packages/api/session-controller/src/client/contract/snapshot.ts` | `161cd858` | identical |
+| `packages/client/ui-conversation/src/client/contract/slots.ts` | `61f7d8ff` | identical |
+| `packages/boot/app-boot/src/plugin-compatibility.ts` | `047fe1f9` | identical |
+| `packages/boot/plugin-manager/src/install-spec.ts` | `3ef46155` | identical |
+| `packages/client/ui-conversation/src/client/skeleton/TodoPanel.tsx` | `bf59a54a` | identical |
+| `packages/client/ui-conversation/src/client/skeleton/TodoPanel.module.css` | `04b537da` | identical |
+
+Every declaration this plugin reads therefore has the same bytes in the new normative runtime as in the old one. That is
+the finding, and it is the reason no adapter change was made: **there is no contract to migrate.** `src/dsh/**` moved no
+code in Phase 9.3, and the Phase 9.2 metric semantics were not reopened.
+
+### 14.3 Installed-runtime confirmation
+
+The declarations the plugin depends on, as read from the installed `0.2.0-rc.2` package tree:
+
+| Contract | Installed declaration | What the plugin reads |
+|---|---|---|
+| `SessionEvent` envelope | `dsh-session/lib/types/types.d.ts:489-512` | `{ type, seq, time, data }`, with `ignorable?` and the surface intent alongside it; `seq` is monotonic within a session, `time` is Unix epoch milliseconds |
+| `turn/start`, `turn/end` | `…/types.d.ts:262-276` | `turn/start { turn }`, `turn/end { turn, reason }` |
+| `assistant/message` | `…/types.d.ts:330-338` | `{ turn, step, message, stream, usage?, interrupted? }` — the settlement that commits a model-visible message |
+| `assistant/attempt` | `…/types.d.ts:344-348` | `{ turn, step, stream }` — a settlement that committed no surface message |
+| `tool/call` | `…/types.d.ts:354-360` | `{ turn, step, callId, name, arguments }`, `arguments` the raw unparsed JSON string |
+| `tool/result` | `…/types.d.ts:374-388` | `{ turn, step, message: ToolResultMessage, error?: { name, code, reason? }, meta? }`; `error` is allowed only on a message with `isError: true` |
+| `AssistantStreamRecord` | `dsh-llm/lib/types/assistant-stream.d.ts:16-40` | `text-chunks` / `reasoning-chunks` / `tool-call-chunks` runs carrying `time0`, `index` and `dt[]`, plus raw `chunk` records — the two shapes the decoder reconstructs exact timestamps from |
+| `StreamChunk` | `dsh-llm/lib/types/types.d.ts:417-447` | `text-delta`, `reasoning-delta`, `tool-call-delta`, `block-start`, `block-end`, `usage`, `finish` |
+| `isTokenDelta` | `dsh-llm/lib/types/assistant-stream.d.ts:72-78` | the first-token predicate TTFT is measured against, unchanged |
+| `AssistantLiveChunkEvent` | `dsh-api-session-controller/lib/types/client/contract/events.d.ts:6-16` | `{ type: 'assistant/live-chunk', seq, time, data: { attemptId, turn, step, chunk } }` |
+| `SessionEventChange` | `…/contract/events.d.ts:41-54` | four arms — `replace`, `prepend`, `append` (each `{ entries }`) and `{ kind: 'settle-assistant', attemptId, entry? }` |
+| `SessionEventWindow` | `…/contract/events.d.ts:56-63` | `{ entries, hasMore, revision, change }` |
+| `conversation.input.dock` | `dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts:213-218` | `{ kind: 'list', scope: 'session', owner: InputZone }` — the seat the meter occupies at `order: -10` |
+| TodoPanel visual contract | `dsh-client-ui-conversation/lib/types/client/skeleton/TodoPanel.d.ts` | the dock geometry and surface tokens the completed card reproduces; the `.module.css` source file is byte-identical between the two commits, so the Phase 9 copy is still the host's own contract |
+
+The three settling findings of §13 — the tool-role result identity, the ambiguous bare `settleAssistant(attemptId)`, and
+the four window-change arms — are unchanged, because the files that declare them are unchanged. §13.3, §13.4 and §13.5
+therefore remain the operative description.
+
+### 14.4 The plugin-compatibility gate
+
+`dsh-app-boot` evaluates the plugin's `peerDependencies` against the running runtime before a profile starts the plugin
+(`evaluatePluginCompatibility`, installed at `dsh-app-boot/lib/index.js:286-313`). Only peers named `@deepseek-ai/dsh`
+or `@deepseek-ai/dsh-*` participate, and the check is
+
+```js
+semver.satisfies(runtimeVersion, requirement, { includePrerelease: true })
+```
+
+`includePrerelease: true` is the detail that matters here: a prerelease runtime does participate in ranges, so the
+question is only which range is declared. Checked directly against the bundled `semver` rather than reasoned about,
+with the runtime fixed at `0.2.0-rc.2`:
+
+| Declared peer | Satisfies `0.2.0-rc.2`? |
+|---|---|
+| `0.2.0-rc.2` (declared) | yes |
+| `0.1.7-rc.2` (previous) | **no** |
+| `^0.2.0-rc.2` | yes |
+| `>=0.2.0-rc.2` | yes |
+| `0.2.x` | yes |
+| `*` | yes |
+| `0.1.7-rc.2 \|\| 0.2.0-rc.2` | yes |
+
+The exact pin is the only row that is both satisfied by the intended runtime and unsatisfied by every runtime this
+project has not exercised. The last row is rejected for a different reason: it would make a single artifact claim two
+runtimes and would erase the evidence boundary between `v0.1.1` and `v0.1.2`.
+
+`0.2.0-rc.2` also ships exact-version compatibility exemptions (`allow-version`, `revoke-version`,
+`version-exemptions`, and the `exempted` field the gate returns). **No exemption is used or required by this plugin.**
+An exemption accepts a declared incompatibility; this plugin declares a compatible peer, so the gate passes on its own
+terms. If an exemption were needed after the peer had been updated, that would be a defect in the declaration rather
+than a configuration task.
+
+### 14.5 Differences between the two references
+
+The audited files are identical, but the two commits are not the same commit, and two differences were found and
+assessed as irrelevant:
+
+- `session-controller` gained an optional `fork(...).onCreated` callback. The plugin never forks a session and never
+  calls `fork`.
+- The CLI and plugin manager gained the exact-version exemption operations named in §14.4. They are an escape hatch for
+  a *declared* incompatibility; this plugin has none.
+
+Neither difference is in the evidence path, and neither was worked around.
+
+### 14.6 Supported version
+
+The only supported and tested DSH for the current working tree is `0.2.0-rc.2`, verified against the locally installed
+package recorded in §14. The `v0.1.1` release remains bounded to `0.1.7-rc.2` and is not retroactively re-scoped. This
+project does **not** claim `0.2.0+`, `0.2.x` or dual-runtime support. The recorded corpora keep the version they were
+captured on — `fixtures/dsh-turns/` is `0.1.5`, `fixtures/dsh-0.1.7/` is `0.1.7-rc.2` — and
+`test/dsh-020-contract.test.js` is the narrow layer that asserts the wire shapes above against the current runtime.

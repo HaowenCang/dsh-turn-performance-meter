@@ -952,3 +952,85 @@ materialization and carries the status plus all four readings without recomputin
 the Phase 5 four-column grid, footer and hover/focus curve unchanged; the curve, the header and the toggle stay on
 separate elements so keyboard focus on the toggle cannot reveal a chart; no metric, curve, adapter, store or retention
 semantics changed; and the version, the tag and the release state are exactly as they were at the baseline.
+
+## Phase 9.3 — DSH 0.2.0-rc.2 compatibility migration (complete)
+
+- [x] **Baseline re-verified before any edit.** `HEAD == origin/main ==
+      b59de4854b3619651b81b386e38874b240e2413b`, divergence `0 0`, working tree clean, `dsh --version` →
+      `0.2.0-rc.2`, `npm list -g @deepseek-ai/dsh --depth=0` → `@deepseek-ai/dsh@0.2.0-rc.2`. The Phase 9.2 commits
+      `291e321` and `b59de48` were treated as the production candidate; neither was reverted and Phase 9.2 was not
+      restarted.
+- [x] **Upstream contract audit by blob hash, not by eye.** All fourteen declarations the plugin reads were resolved at
+      both reference commits (`477b4f420553e8a52c2fbccc464d7561b239c443` and
+      `639ed015397290b3745d163aafe02ffee4aa3f84`) with `git rev-parse <sha>:<path>` in a local checkout of
+      `deepseek-ai/deepseek-harness` and compared. **14 of 14 identical.** Recorded in `docs/DSH_API_NOTES.md` §14.2.
+- [x] **Installed-runtime confirmation, because the published package ships no `src/`.** Each contract was re-read from
+      the installed `0.2.0-rc.2` tree — `dsh-session/lib/types/types.d.ts` (envelope, `turn/*`, `assistant/*`, `tool/*`),
+      `dsh-llm/lib/types/types.d.ts` and `assistant-stream.d.ts` (`StreamChunk`, `AssistantStreamRecord`, `isTokenDelta`),
+      `dsh-api-session-controller/lib/types/client/contract/events.d.ts` (`AssistantLiveChunkEvent`,
+      `SessionEventChange`, `SessionEventWindow`) and `dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts`
+      (`conversation.input.dock`). Declaration sites in §14.3.
+- [x] **The compatibility gate's own semantics measured, not assumed.** `evaluatePluginCompatibility` was imported from
+      the installed `dsh-app-boot` and invoked against the real manifest: with the declared peer it returns `undefined`
+      (no incompatibility at all), while the control — the previous `0.1.7-rc.2` peer — returns an issue with
+      `exempted: false`. The `semver.satisfies(..., { includePrerelease: true })` matrix is recorded in §14.4.
+- [x] **Peer migrated to an exact version.** `peerDependencies` is now `{ "@deepseek-ai/dsh": "0.2.0-rc.2" }` — exact, the
+      only peer, with no `^`, `~`, `>=`, `0.2.x`, `*` and no `0.1.7-rc.2 || 0.2.0-rc.2`. No exemption is used as a
+      substitute and none is required.
+- [x] **Dual-version compatibility deliberately not claimed.** The `v0.1.1 → 0.1.7-rc.2` and `v0.1.2 → 0.2.0-rc.2` matrix
+      is documented as two separately bounded claims rather than one range, so the evidence boundary between the releases
+      survives.
+- [x] **No adapter migration invented.** Because the audited contracts are identical, `src/dsh/**` moved no code. The one
+      edit in that tree is `src/dsh/index.js`'s header, which is the normative "the target runtime is X" statement; the
+      remaining `0.1.7-rc.2` references in `src/dsh/**` are the dates of the audits that established each shape and were
+      deliberately left as historical provenance. `src/core/**` and `src/host/**` are untouched.
+- [x] **Narrow 0.2.0 contract layer added.** `test/dsh-020-contract.test.js` (17 tests) pins the envelope, the turn
+      boundaries, both settlement types, the tool plane, the transient row, compact-stream `time0`+`dt` reconstruction,
+      the five consumed `StreamChunk` variants, in-stream usage and its supersession, all four window-change kinds, the
+      `settle-assistant` retirement/abandonment resolution, one end-to-end turn and the 100 ms cadence. The historical
+      `test/dsh-017-*.test.js` files were **not** renamed or restamped.
+- [x] **Documentation updated without rewriting history.** Current-target statements moved to `0.2.0-rc.2` and the new
+      reference commit in `README.md` (§2.1 compatibility baseline, §3.1 prerequisite matrix), `docs/ARCHITECTURE.md`
+      (Phase 9.3 subsection), `docs/DSH_API_NOTES.md` (§14, with §13 marked superseded-not-retracted),
+      `docs/METRICS_SPEC.md` (no metric changed), `docs/TEST_PLAN.md` (§10), `docs/DIRECTORY_TREE.md` and `CHANGELOG.md`.
+      Phase 7/8/9 records that state they occurred on `0.1.7` remain `0.1.7`.
+- [x] **Automated gates.** `npm run build:client` → `client.js rebuilt (522309 bytes, mirrored to lib/client.js)`;
+      `npm run verify` → **763 tests, 763 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo**, `structure OK (14 required
+      files, 15 core modules, 64 test files, client bundle fresh, lib/client.js mirrored)`;
+      `node scripts/verify-sanitization.mjs` → PASS; `git diff --check` → clean.
+- [x] **Runtime smoke on DSH `0.2.0-rc.2`.** Plugin loads, no compatibility rejection, no exemption; the meter mounts in
+      `conversation.input.dock`; an idle session shows no meter; a live turn shows the meter; the settled card appears
+      collapsed; expanding reveals the four-column summary; the hover/focus curve still renders both series; a reload
+      reconstructs the card from durable evidence; two sessions stay isolated while both are attached; the console shows
+      no plugin error.
+- [x] **TPS acceptance against the phase's own target.** DOM metric cadence median **100 ms**; the reasoning → output
+      phase transition observed; last live values and final settled values recorded for four turns, each matching the
+      durable authoritative token totals exactly (6,799 / 1,652 / 3,701 / 1,934).
+- [x] **Tool-state acceptance.** Tool-running states observed with the tool name and its own duration, TPS absent while a
+      tool executes, and each following model attempt opening a fresh phase episode (counter reset to `0.01s`–`0.11s`).
+      Eleven tool calls matched eleven results with `unmatchedToolResults` 0 and `turnEndLookupMiss` 0; eight bare
+      `settle-assistant` calls were all resolved as retirements with zero abandonments.
+- [x] **Package-install evidence in a disposable 0.2.0 profile.** `dsh --profile p93-rc2 --from-default-profile web`
+      initialised the profile, then `dsh plugin --profile p93-rc2 add
+      "link:E:/Projects/DSHarness/dsh-turn-performance-meter"` exited `0` with no incompatible-plugin rejection,
+      `compatibility.json` **absent** (no exemption), and `dsh.profile.bundles` containing the package automatically. The
+      profile was cold-started once and served the plugin normally, then deleted. The real `web` profile was not modified:
+      its `package.json` SHA-256 is unchanged before and after.
+- [x] **API-error exclusion honoured.** No 422/429/503 investigation, no provider configuration, endpoint or retry-policy
+      repair, and no test added for those failures. The one error turn encountered was inside the disposable profile
+      (missing model credential there) and is recorded as an environment failure rather than diagnosed.
+- [x] **Version and release freeze held.** `package.json` remains `0.1.1`; no `npm version`, no `npm publish`, no
+      `git tag`, no `gh release create`; `v0.1.1` is not moved.
+- [ ] **One non-reproducible presentation observation recorded, not investigated.** In a single sequence — page reloaded,
+      then a new turn settled while the tab was not foreground — the completed card continued to display the previous
+      turn's values until the page was reloaded again. It did not reproduce: the same page later advanced correctly to a
+      new turn's card under the same conditions, and every card's numbers matched the durable log exactly. It involves no
+      DSH contract, so it is recorded as an observation for a future round rather than pursued here.
+- [ ] **`v0.1.2` release.** Deliberately out of scope and not started.
+
+Acceptance gate: the normative runtime is `0.2.0-rc.2` and the exact peer declares it; every DSH declaration the plugin
+consumes was re-audited against both the public reference commit and the installed runtime and found unchanged, so no
+adapter, metric, curve, store or presentation semantics moved and no compatibility exemption is involved; the automated
+suite passes with `fail = 0`; the plugin was observed working end to end on the new runtime with its Phase 9.2 TPS
+semantics intact and its four settled cards numerically equal to the durable log; and the version, the tag and the
+released artifacts are exactly as they were at the baseline.

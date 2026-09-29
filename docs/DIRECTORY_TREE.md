@@ -154,6 +154,9 @@ dsh-turn-performance-meter/
 │   ├── dsh-017-*.test.js              Phase 7D / 7D.1 / 7D.1.2: the rc.2 contract — completion, settlement, tool
 │   │                                  result and concurrency, durable identity, retention, terminal-tail recovery,
 │   │                                  reconstruction materialization, recorded corpus (8 files)
+│   ├── dsh-020-contract.test.js       Phase 9.3: the 0.2.0-rc.2 compatibility layer — envelope, boundaries,
+│   │                                  settlements, tool plane, compact-stream timing, the five stream chunks,
+│   │                                  settle-assistant semantics, the four window-change kinds, the exact peer pin
 │   ├── dsh-client-feed.test.js        SessionEventWindow wire -> normalized events
 │   ├── curve.test.js / curve-axis-endpoint / curve-stream-order /
 │   │   curve-calibration-coverage     Curve primitives: reduced arithmetic, endpoint retention, same-timestamp

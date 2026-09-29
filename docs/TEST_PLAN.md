@@ -605,3 +605,71 @@ not enforce, or an invariant the code implemented that the documentation denied.
 
 Verification for this phase is reported as a **local** result: the repository has no CI runner, so `npm run verify` here
 is a local test result and is not described as CI-verified anywhere.
+
+## 10. Phase 9.3 — DSH 0.2.0-rc.2 compatibility
+
+The normative runtime moved to `0.2.0-rc.2`, and the testing question this phase asks is narrow: does the wire evidence
+the plugin consumes still have the shape the adapter expects? The audit that answers it is in `docs/DSH_API_NOTES.md`
+§14 — fourteen upstream declarations compared by blob hash across the two reference commits, all identical, plus a read
+of the installed runtime's own declarations. This section records the automated layer only.
+
+- `test/dsh-020-contract.test.js` (17 tests, one file). It is deliberately **not** a second copy of the semantic suite:
+  the metric arithmetic, the curve statistics and the Phase 7D lifecycle matrix are already covered, and
+  `test/dsh-017-*.test.js` stays stamped with the 0.1.7 evidence it was recorded on. What this file pins is the contract
+  surface, grouped as eight claims plus a metadata claim.
+  - **the compatibility pin** — `peerDependencies['@deepseek-ai/dsh']` is exactly `0.2.0-rc.2`, it is the only peer, and
+    it contains none of `^ ~ > < * || x X` or a hyphen range, so the declared runtime is the one this project has
+    exercised and no range admits another. `version` is asserted to still be `0.1.1`, because the bump belongs to the
+    release phase. The two reference commits are asserted as literals, so a future edit that changes one without
+    re-running the comparison fails rather than passing silently.
+  - **the envelope** — `seq` and `time` are read from the envelope rather than from `data`, proved by a counter-shape row
+    that also carries a top-level `turn`; a row without `data` still normalizes, and a non-event is ignored.
+  - **the boundaries** — `turn/start` and `turn/end` normalize with the reason read from `data.reason`; an unknown
+    reason kind is reported as `statusKnown: false` and `errored` rather than as a known cause.
+  - **the settlements** — `assistant/message` and `assistant/attempt` are both attempt settlements, distinguished by
+    `settlementKind` and `surfaceCommitted` rather than by shape; a durable non-surface settlement is asserted **not** to
+    be an abandonment; an interrupted message is asserted to keep its delivered prefix and to carry no undispatched
+    tool-call delta.
+  - **the tool plane** — `tool/call` supplies `callId`, `name` and the raw argument string; `tool/result` takes its
+    identity from `message.toolCallId` and its failure flag from `message.isError`, and the structured `data.error` is
+    read only alongside a failed message. A tool-role message with no readable identity is asserted `malformed` and
+    closes nothing — `content[0].toolCallId` is never a fallback for a message that declares its own role.
+  - **the transient row** — `assistant/live-chunk` keeps `time` on the row rather than on `data`, and a row without a
+    string `attemptId` is refused.
+  - **compact-stream timing** — `time0` plus the `dt[]` gaps reconstruct exact per-delta timestamps for all three run
+    kinds, and the tool-call run's `id`/`name`/`args` survive. A run whose `dt` length breaks the
+    `members.length - 1` invariant is reported (`bad-dt`) rather than resynchronized.
+  - **the stream chunks** — a seven-record stream is asserted to still carry `reasoning-delta`, `text-delta`,
+    `tool-call-delta`, `usage` and `finish`, with `block-start`/`block-end` surviving as raw records whose envelope time
+    is preserved. The generated set is the delta set: five of the nine decoded chunks, with `firstTokenTimeMs` from the
+    first reasoning fragment.
+  - **in-stream usage** — a `usage` chunk inside a settlement's compact stream becomes the attempt's usage with source
+    `in-stream-usage-chunk`, a durable `data.usage` supersedes it as `assistant-settlement`, and a stream with no usage
+    at all still decodes and still yields samples — the shape-weight fallback is part of the design, not a compatibility
+    failure.
+  - **the window changes** — all four `SessionEventChange` kinds are routed: `append` is processed, `prepend` is counted
+    and never adopted, `replace` clears the generation state, `settle-assistant` reaches the settlement path, and a stale
+    revision is inert. The feed is asserted to record no issue across the four.
+  - **the settle-assistant ambiguity** — a bare settle after a durable settlement is a retirement that publishes no
+    second attempt outcome, and a bare settle with none is an abandonment; a settle carrying its entry is a direct
+    settlement whose durable `seq` is admitted exactly once even when the same row later arrives by `append`.
+  - **one end-to-end turn** — an idle session with an empty window shows no meter; an open turn with no generated token
+    shows the first-response timer with `tps` absent rather than zero-forged; one and two reasoning deltas stay below the
+    three-sample gate and show the counter; three deltas produce a finite phase-cumulative rate; and the settled card's
+    `generatedTokens` equals the durable usage with `outputTps` **unavailable** rather than zero, because no text was
+    generated. The diagnostics are asserted clean (`turnEndLookupMiss` 0, no feed issues).
+  - **the cadence** — `DEFAULT_PRESENTATION_REFRESH_MS` is asserted to be 100, because the runtime moved and the Phase
+    9.2 presentation contract did not.
+
+Totals for this phase: **763 tests, 763 pass, 0 fail, 0 skipped, 0 todo** (746 before the phase). `npm run verify` runs
+`scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
+(`node scripts/verify-sanitization.mjs`) and reports no personal content with all structural evidence preserved.
+
+The runtime half of the phase is **not** covered by this file and is not claimed to be. It was established by direct
+observation on DSH `0.2.0-rc.2` — a live turn's DOM cadence, phase transitions, last live values and settled values, the
+collapse/expand/curve interactions, a reload reconstruction and a session switch — and recorded in
+`docs/IMPLEMENTATION_LOG.md` (Phase 9.3). A test cannot assert a browser's presentation cadence against a real host, so
+no test pretends to.
+
+Verification for this phase is likewise reported as a **local** result: the repository has no CI runner, so
+`npm run verify` here is a local test result and is not described as CI-verified anywhere.
