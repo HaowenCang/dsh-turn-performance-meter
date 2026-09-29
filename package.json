@@ -38,7 +38,7 @@
     "verify": "node scripts/verify-structure.mjs && node --test test/*.test.js"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": "0.1.7-rc.2"
+    "@deepseek-ai/dsh": "0.2.0-rc.2"
   },
   "publishConfig": {
     "access": "public",
