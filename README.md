@@ -8,14 +8,14 @@ provides two UI modes: a compact live meter during execution and a completed tur
 重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计
 卡片。完成态卡片按整个 turn 聚合。
 
-> **Released as `v0.1.1` on npm and GitHub, for DSH `0.1.7-rc.2`.** Version `0.1.1`, published to the public npm
+> **Released as `v0.1.2` on npm and GitHub, for DSH `0.2.0-rc.2`.** Version `0.1.2`, published to the public npm
 > registry. The primary distribution is the npm package `dsh-turn-performance-meter`; the GitHub Release asset
-> `dsh-turn-performance-meter-0.1.1.tgz` is an offline fallback, and the local checkout is for development. The current
-> development target is DSH `0.2.0-rc.2`; §2.1 holds the release/runtime matrix.
+> `dsh-turn-performance-meter-0.1.2.tgz` is an offline fallback, and the local checkout is for development. §2.1 holds
+> the release/runtime matrix.
 >
-> **已发布 npm 与 GitHub `v0.1.1`，面向 DSH `0.1.7-rc.2`。** 版本 `0.1.1`，已发布到公开 npm registry。主要分发方式为
-> npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.1.tgz` 作为离线回退，本地检出
-> 目录用于开发。当前开发目标为 DSH `0.2.0-rc.2`，发布与运行时对应关系见 §2.1。
+> **已发布 npm 与 GitHub `v0.1.2`，面向 DSH `0.2.0-rc.2`。** 版本 `0.1.2`，已发布到公开 npm registry。主要分发方式为
+> npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.2.tgz` 作为离线回退，本地检出
+> 目录用于开发。发布与运行时对应关系见 §2.1。
 
 ## 1. What it does / 功能
 
@@ -44,9 +44,10 @@ React layer never re-derives a metric.
 ## 2. Support status / 支持状态
 
 ```text
-Version (working tree): 0.1.1
+Version (working tree): 0.1.2
 Development target:     DSH 0.2.0-rc.2 only
-Released:               v0.1.1 -> DSH 0.1.7-rc.2
+Released:               v0.1.2 -> DSH 0.2.0-rc.2
+                        v0.1.1 -> DSH 0.1.7-rc.2
 Primary distribution:   npm
 Fallback distribution:  GitHub Release .tgz
 Development:            link checkout
@@ -72,11 +73,11 @@ The claim is bounded on purpose: it is not `0.2.0+`, not `0.2.x` and not "the la
 been exercised. Local evidence for the claim is the CLI (`dsh --version`), the installed package
 (`npm list -g @deepseek-ai/dsh`) and the composed profile tree, all recorded in `docs/IMPLEMENTATION_LOG.md`.
 
-The working tree keeps `version: 0.1.1` while it carries the `0.2.0-rc.2` peer: the bump to `0.1.2` belongs to the
-release phase, and the published `v0.1.1` artifact is immutable and still declares `0.1.7-rc.2`. The two releases are
-**separately bounded** rather than expressed as one range — each declares exactly one runtime, and the plugin does not
-claim to run on both. Multi-runtime packaging would require explicit two-runtime verification and is not part of this
-release.
+`v0.1.2` is the release in which that target became the shipped one: the working tree carries `version: 0.1.2` with the
+`0.2.0-rc.2` peer, while the published `v0.1.1` artifact is immutable and still declares `0.1.7-rc.2`. The two releases
+are **separately bounded** rather than expressed as one range — each declares exactly one runtime, and the plugin does
+not claim to run on both. Multi-runtime packaging would require explicit two-runtime verification and is not part of
+this release.
 
 **`0.2.0-rc.2` 是当前工作树的规范运行时。** Phase 9.3 将开发目标迁移到该版本，并对照本机 `0.2.0-rc.2` 安装与上述公开
 参考 commit，重新审计了本插件读取的全部 DSH 声明——会话事件信封、LLM 流与紧凑 `AssistantStreamRecord` 形状、
@@ -88,7 +89,7 @@ TodoPanel 视觉契约。全部十四项声明在两个参考 commit 之间**逐
 （`dsh --version`）、已安装包（`npm list -g @deepseek-ai/dsh`）与组合后的 profile 树，均记录在
 `docs/IMPLEMENTATION_LOG.md`。
 
-工作树在携带 `0.2.0-rc.2` peer 的同时保持 `version: 0.1.1`：升级到 `0.1.2` 属于发布阶段，而已发布的 `v0.1.1` 产物不可
+`v0.1.2` 即该目标转为正式发布的那个版本：工作树携带 `version: 0.1.2` 与 `0.2.0-rc.2` peer，而已发布的 `v0.1.1` 产物不可
 变更，仍声明 `0.1.7-rc.2`。两个发布版本是**各自限定**的，而不是写成一个范围——每个版本只声明一个运行时，插件不声称
 可同时运行于两者。多运行时打包需要显式的双运行时验证，不属于本次发布范围。
 
@@ -135,15 +136,16 @@ runtime, so the prerequisite follows §2.1: **install the runtime that matches t
 
 | Installing | Required DSH |
 |---|---|
-| `@0.1.1` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.1.7-rc.2` |
+| `@0.1.2` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.1` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | the development checkout (§3.4) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 
 ```powershell
-# released v0.1.1
-npm install -g @deepseek-ai/dsh@0.1.7-rc.2
-
-# development checkout (working tree: peer 0.2.0-rc.2)
+# released v0.1.2, and the development checkout
 npm install -g @deepseek-ai/dsh@0.2.0-rc.2
+
+# historical v0.1.1 only
+npm install -g @deepseek-ai/dsh@0.1.7-rc.2
 ```
 
 Do not install an arbitrary latest DSH and assume the plugin runs on it: the plugin declares exact runtime
@@ -154,7 +156,8 @@ compatibility only, and no DSH release other than the two named above has been e
 
 | 安装对象 | 所需 DSH |
 |---|---|
-| `@0.1.1`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.1.7-rc.2` |
+| `@0.1.2`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.1`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | 开发检出目录（§3.4） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 
 不要安装任意“最新”DSH 并假定插件可在其上运行：本插件只声明精确的运行时兼容性，且除上述两个版本之外本项目未验证任何
@@ -171,24 +174,24 @@ Pin the version for a reproducible install:
 固定版本以获得可复现的安装：
 
 ```powershell
-dsh plugin --profile web add dsh-turn-performance-meter@0.1.1
+dsh plugin --profile web add dsh-turn-performance-meter@0.1.2
 ```
 
-The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.1` exactly. Both install a frozen
+The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.2` exactly. Both install a frozen
 copy of the published artifact.
 
-无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.1`。两者安装的都是已发布产物的冻结副本。
+无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.2`。两者安装的都是已发布产物的冻结副本。
 
 ### 3.3 GitHub Release tarball (offline fallback) / GitHub Release tarball（离线回退）
 
-Download `dsh-turn-performance-meter-0.1.1.tgz` from the
-[v0.1.1 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.1), then install it:
+Download `dsh-turn-performance-meter-0.1.2.tgz` from the
+[v0.1.2 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.2), then install it:
 
-从 [v0.1.1 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.1) 下载
-`dsh-turn-performance-meter-0.1.1.tgz` 后安装：
+从 [v0.1.2 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.2) 下载
+`dsh-turn-performance-meter-0.1.2.tgz` 后安装：
 
 ```powershell
-dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.1.tgz"
+dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.2.tgz"
 ```
 
 This is the offline and immutable fallback, and the asset is the same tarball the npm registry serves. `file:` on a
@@ -204,8 +207,8 @@ Verify the download before installing:
 安装前校验下载内容：
 
 ```powershell
-Get-FileHash .\dsh-turn-performance-meter-0.1.1.tgz -Algorithm SHA256
-Get-Content .\dsh-turn-performance-meter-0.1.1.tgz.sha256
+Get-FileHash .\dsh-turn-performance-meter-0.1.2.tgz -Algorithm SHA256
+Get-Content .\dsh-turn-performance-meter-0.1.2.tgz.sha256
 ```
 
 ### 3.4 Development checkout / 开发检出
@@ -291,12 +294,19 @@ count. A turn with no tool call hides the tool item entirely.
 卡片底部（而不是第五个栏位）承载工具摘要（`工具 4 · 12.8s`，使用 wall union）与模型调用次数；无工具调用的 turn 直接
 隐藏该项。
 
-The live meter displays the **current trailing 1-second window of the active attempt**, always with `≈`, and never a
-curve. The window resets at a new model invocation after a tool call or at a retry boundary, so unrelated calls are never
-mixed; a measurement window never crosses an attempt boundary.
+The live meter displays the **phase-cumulative TPS of the active attempt's current phase episode**: the episode's
+generated token mass over the wall time since that episode's first sample, published once the episode holds at least
+three samples, always with `≈`, and never a curve. A `reasoning → output` transition resets the episode clock, the
+numerator and the sample count, so the first output rate never contains reasoning-phase elapsed time; a new model
+invocation after a tool call or a retry resets all of it, so unrelated calls are never mixed. No model attempt streaming
+means no value — never a stale rate. A stall decays hyperbolically by elapsed wall time: the numerator stops moving while
+the denominator advances.
 
-实时组件显示**当前活动 attempt 最近 1 秒的滑动窗口**，始终带 `≈`，且不显示曲线。窗口在工具返回后的新模型调用或新的
-尝试边界处重置，禁止混合两个独立模型调用的数据；测量窗口绝不跨 attempt 边界。
+实时组件显示**当前活动 attempt 当前相位片段的累计 TPS**：该片段自首个样本以来生成的 token 量除以片段墙钟时间，且在片段
+累计满 3 个样本后才发布，始终带 `≈`，且不显示曲线。`reasoning → output` 切换会重置片段时钟、分子与样本计数，因此首个
+output 速率绝不包含 reasoning 片段的已用时间；工具返回后的新模型调用或重试会重置全部状态，禁止混合两个独立模型调用的
+数据。没有 model attempt 在流式输出时即无该值，绝不显示过期速率。停滞按已流逝的墙钟时间呈双曲线衰减：分子停止增长而
+分母继续推进。
 
 Model-generated ordinary text and model-generated tool-call arguments count as model output. PowerShell commands, shell
 scripts, write-file payloads and edit patches therefore belong to output accounting. Tool results such as stdout, file
@@ -339,24 +349,27 @@ suppresses the `≈` marker; `unavailable` renders `—` and is never coerced to
 
 ### 5.2 Curve / 曲线
 
-The curve is one **attempt-local trailing-one-second total throughput trace per model attempt**: a vertex at
-attempt-local `t` sums every generated sample of that attempt inside `(t - 1000, t]`, whatever its phase — exactly what
-the live pill measures. The compressed x-axis joins attempts so tools and inter-attempt waits consume **zero width**, but
-the measurement window never crosses an attempt boundary, and a model silence *inside* a call retains full width as a
-decay to zero. Reasoning and output are **colours** of that one measurement — the trace is cut into phase-coloured runs
-whose seams are shared vertices — not two rate definitions. Same-timestamp samples are ordered by `sampleOrder`; no
-synthetic one-second decay tail is appended; an off-grid last real point is retained; the total render budget is 512
-points and the global peak is preserved. The curve's magnitudes are the provider-calibrated per-delta allocation whenever
-authoritative usage exists, so the drawn curve and the printed token total are one magnitude system, and
+The curve is one **attempt-local phase-cumulative throughput trace per model attempt**: a vertex at attempt-local `t`
+reports the cumulative average of the phase episode in force at `t` — that episode's sample mass up to `t` over the wall
+time since its first sample — whatever its phase, which is the same estimator family the live pill publishes. The
+compressed x-axis joins attempts so tools and inter-attempt waits consume **zero width**, but each episode owns its own
+clock and numerator, so the trace steps down at a phase boundary and climbs again on the new phase's own evidence; a
+model silence *inside* a call retains full width as a hyperbolic decay, not as a reset to zero. Reasoning and output are
+**colours** of that one trace. The trace is sampled on a 100 ms grid, and the published series is capped at 200 points by
+evenly spaced nearest-sample reduction with no interpolation. The chart-wide render budget is 512 points allocated across
+phase-coloured runs with the global peak preserved, while `peakTps` is read from the published series *before* any render
+allowance is applied. The curve's magnitudes are the provider-calibrated per-delta allocation whenever authoritative
+usage exists, so the drawn curve and the printed token total are one magnitude system, and
 `attemptBreakdown[].calibration.samples` stays the authoritative magnitude source once a turn has settled.
 
-曲线是**每个 model attempt 各一条 attempt 局部、1 秒滑动窗口的总吞吐轨迹**：局部时刻 `t` 的取值汇总该 attempt 在
-`(t - 1000, t]` 内的全部生成样本（不区分 phase），与实时指示器口径完全一致。压缩横轴把各 attempt 首尾相接，因此工具
-时间与 attempt 间等待占用**零宽度**，但测量窗口绝不跨 attempt 边界；attempt **内部**的模型静默按完整宽度绘出，表现为
-衰减到零。reasoning 与 output 是同一次测量的两种**颜色**（轨迹按 phase 切分为若干子路径，接缝共享同一顶点），而不是
-两套速率定义。同一时间戳的样本按 `sampleOrder` 排序；不追加合成的 1 秒衰减尾；保留网格外的最后一个真实点；总渲染预算
-512 点并保留全局峰值。当存在权威 usage 时，曲线量级采用 provider 校准后的逐 delta 分配，因此曲线与卡片打印的 token
-总数属于同一量级体系；turn settle 之后，`attemptBreakdown[].calibration.samples` 始终是量级的权威来源。
+曲线是**每个 model attempt 各一条 attempt 局部的相位累计吞吐轨迹**：局部时刻 `t` 的取值是 `t` 处生效的那个相位片段的累计
+平均——该片段截至 `t` 的样本量除以自其首个样本以来的墙钟时间——不区分相位，与实时指示器属于同一估计器族。压缩横轴把各
+attempt 首尾相接，因此工具时间与 attempt 间等待占用**零宽度**；但每个片段拥有自己的时钟与分子，轨迹在相位边界处下台阶，
+再依据新相位自身的证据重新爬升；attempt **内部**的模型静默按完整宽度绘出，表现为双曲线衰减，而不是归零。reasoning 与
+output 是同一条轨迹的两种**颜色**。轨迹以 100 ms 网格采样，发布序列按时间等距取最近样本压缩到 200 点上限，不做插值。
+图级渲染预算为 512 点，按相位色段分配并保留全局峰值；`peakTps` 则在应用任何渲染配额**之前**从发布序列读取。当存在权威
+usage 时，曲线量级采用 provider 校准后的逐 delta 分配，因此曲线与卡片打印的 token 总数属于同一量级体系；turn settle
+之后，`attemptBreakdown[].calibration.samples` 始终是量级的权威来源。
 
 The complete contract is `docs/METRICS_SPEC.md` §11, with the durable/transient evidence rules in §13 and the
 architecture in `docs/ARCHITECTURE.md`.
@@ -428,9 +441,9 @@ this repository is a local test result, not CI. The implementation log keeps the
 ```text
 dsh-turn-performance-meter/
 ├─ README.md
-├─ CHANGELOG.md                      Release history (0.1.1)
+├─ CHANGELOG.md                      Release history (0.1.2)
 ├─ LICENSE                           MIT
-├─ package.json                      version 0.1.1, published to npm, scripts: test / build:client / verify
+├─ package.json                      version 0.1.2, published to npm, scripts: test / build:client / verify
 ├─ cordis.patch.yml                  Bundle row insertion; the only DSH composition this plugin adds
 ├─ index.js                          host entry (no-op by design; telemetry is client-side)
 ├─ client.js                         GENERATED browser bundle (npm run build:client)
@@ -438,6 +451,7 @@ dsh-turn-performance-meter/
 ├─ docs/
 │  ├─ ARCHITECTURE.md
 │  ├─ METRICS_SPEC.md
+│  ├─ MIMO_RUNTIME_METRICS.md
 │  ├─ UI_SPEC.md
 │  ├─ DSH_API_NOTES.md
 │  ├─ TASKS.md
@@ -453,14 +467,14 @@ dsh-turn-performance-meter/
 │  ├─ dsh-turns/        eight real recorded turns (0.1.5), durable + transient planes verbatim
 │  └─ derived/          four declared synthetic mutations of those recordings
 ├─ src/
-│  ├─ core/             pure metric engine — zero @deepseek-ai/* imports (16 modules)
+│  ├─ core/             pure metric engine — zero @deepseek-ai/* imports (15 modules)
 │  ├─ dsh/              DSH rc.2 raw evidence -> normalized events (+ client-feed)
 │  ├─ host/             TurnTelemetryStore (session+turn keyed)
 │  └─ client/           main.js entry + presentation
 │     ├─ live/          state machine, presenter, scheduler, controller, MeterRoot,
 │     │                 React pill, locale, CSS
 │     └─ completed/     completed-card view tree + React binding + card CSS
-├─ test/                63 test files + helpers/ (core / dsh / live / completed / bundle)
+├─ test/                65 test files + helpers/ (core / dsh / live / completed / bundle)
 └─ scripts/             verify-structure, bundle-client, build-client,
                         sanitize-fixtures, verify-sanitization
 

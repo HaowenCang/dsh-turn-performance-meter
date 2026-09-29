@@ -110,7 +110,7 @@ function settlementEntry(type, seq, time, options) {
 // Compatibility metadata
 // ---------------------------------------------------------------------------
 
-test('the DSH peer is pinned exactly to 0.2.0-rc.2, and the package version is not bumped by the migration', async () => {
+test('the DSH peer is pinned exactly to 0.2.0-rc.2, and the package version is the release that carries it', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   /**
@@ -129,8 +129,11 @@ test('the DSH peer is pinned exactly to 0.2.0-rc.2, and the package version is n
   }
   assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
 
-  // §10: the version bump to 0.1.2 belongs to the later release phase.
-  assert.equal(manifest.version, '0.1.1', 'Phase 9.3 changes the peer only, never the package version')
+  // §10: the peer migration itself never moved the version; the 0.1.2 bump
+  // belongs to the release round that ships this peer, and the two must stay
+  // paired so the published artifact cannot claim a runtime its version does
+  // not name.
+  assert.equal(manifest.version, '0.1.2', 'the release round carries the version paired with the 0.2.0-rc.2 peer')
 })
 
 // ---------------------------------------------------------------------------

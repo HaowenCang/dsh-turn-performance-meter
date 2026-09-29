@@ -7,21 +7,48 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
-## Unreleased
+## 0.1.2 — 2026-09-29
 
 Supported and tested against DSH `0.2.0-rc.2` only (public reference commit
-`639ed015397290b3745d163aafe02ffee4aa3f84`). The `v0.1.1` release remains bounded to `0.1.7-rc.2`; the two are separate
-claims, not one range.
+`639ed015397290b3745d163aafe02ffee4aa3f84`). **No support claim is made beyond DSH `0.2.0-rc.2`.** The `v0.1.1` release
+remains bounded to `0.1.7-rc.2`; the two are separate claims, not one range.
 
-- Live throughput is now a **phase-cumulative average** rather than a trailing one-second window, and the completed
-  curve uses the same estimator family on a 100 ms source grid with a 200-point cap (`docs/METRICS_SPEC.md` §6–§8).
-- The live presentation cadence is 100 ms.
-- Completed cards now default to a compact collapsed row; expanded detail remains available on demand.
-- Completed-card surface follows DSH TodoPanel host tokens.
+Presentation and estimator release. The live rate, the completed rate and the completed curve are now one estimator
+family, and the completed card became a collapsible surface drawn from the host's own tokens.
+
+- Live throughput is a **MiMo-style phase-cumulative average** rather than a trailing one-second window: the active
+  phase episode's generated token mass over the wall time since that episode began. The last window-based rate path is
+  gone; `docs/METRICS_SPEC.md` §6 records the superseded contract rather than erasing it.
+- **Phase-local reset.** A `reasoning → output` transition (and any later one) resets the episode clock, the numerator
+  and the sample count, so the first output rate is output-local and never contains reasoning-phase elapsed time. A new
+  model attempt after a tool call or a retry resets all of it; two independent calls are never mixed.
+- **Stall-aware cumulative decay.** A stall is now a value rather than a boundary: the numerator stops moving while the
+  denominator advances, so the rate decays hyperbolically and never freezes or drops to zero by rule.
+- **Settlement-time recomputation of the completed rate.** Completed rates are recomputed at settlement from the
+  provider-calibrated allocation, which may raise the evidence quality above what the live pill could observe. A live
+  screen value and its settled counterpart are therefore not required to be numerically equal; the estimator definition
+  is what must agree.
+- **Phase-cumulative completed curve.** The curve uses the same estimator family as the live pill, sampled on a 100 ms
+  grid, with each attempt and each phase episode on its own clock (`docs/METRICS_SPEC.md` §8).
+- **200-point published-series cap.** A longer series is reduced to exactly 200 points evenly spaced in time, each
+  target taking the nearest raw sample with no interpolation; `peakTps` is the maximum of that published series, read
+  before any render allowance is applied.
+- The live presentation **cadence is 100 ms** (10 updates/s).
+- Completed cards default to a **compact collapsed row**; the expanded summary and the throughput curve remain
+  available on demand.
+- The completed-card surface is drawn from **DSH host tokens** (the TodoPanel visual contract), so it follows the host
+  light and dark themes.
+- **Background-settlement regression coverage.** A settlement ingested while the browser tab is backgrounded must
+  advance the completed card on the next projection. Both arrival shapes are covered: a settlement closing an open live
+  record, and one whose opening row is outside the live tail and is therefore reconstructed from durable evidence.
 - Compatibility baseline moved to DSH `0.2.0-rc.2`: the exact peer is now `@deepseek-ai/dsh = 0.2.0-rc.2`. Every DSH
   declaration this plugin reads was re-audited against the new runtime and is byte-identical to its `0.1.7-rc.2` form,
-  so no adapter, metric or presentation behaviour changed with the runtime. **No compatibility exemption is required or
-  used.**
+  so no adapter, metric or presentation behaviour changed with the runtime itself. **No compatibility exemption is
+  required or used.**
+
+Distribution is unchanged from `0.1.1`: public npm registry as the primary form, GitHub Release `.tgz` as the offline
+fallback, and a runtime-only file allowlist. The standard install command resolves this version through the `latest`
+dist-tag; `…@0.1.2` pins it.
 
 ## 0.1.1 — npm distribution
 

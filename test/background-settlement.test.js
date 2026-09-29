@@ -121,7 +121,6 @@ function harness() {
     isTicking: () => scheduler.ticking,
     /** `store.latestSettled` — the durable reference the card must agree with. */
     durableNewest: () => controller.store.latestSettled(SESSION),
-    record: turnNumber => controller.store.turns.get(turnKey(SESSION, turnNumber)) ?? null,
     dispose() { scheduler.dispose(); controller.dispose() },
   }
 }

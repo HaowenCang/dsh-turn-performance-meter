@@ -1074,3 +1074,133 @@ Acceptance gate: the deterministic regression passes and is load-bearing on the 
 of the recorded sequence all advance the completed card to the newest settled turn with no reload; durable, controller
 and DOM newest-turn identities agree in every trial; and no production behaviour changed, so the round is a verification
 result rather than a fix.
+
+## v0.1.2 — DSH 0.2.0 and cumulative TPS (2026-09-29)
+
+**Status: release round — npm publication pending.** This round releases Phase 9, 9.2 and 9.3, which are already in the
+tree; it adds no feature and changes no metric. `git diff -- src client.js lib/client.js index.js cordis.patch.yml` is
+**empty** at release state, so no production byte moved. It discharges the last open item of Phase 9.3.1 ("`v0.1.2`
+release — still deliberately out of scope"). The outcome of the round is reported in the round's own final report rather
+than in a post-publication commit, so that `main` HEAD and `v0.1.2` remain the same commit.
+
+- [x] **Baseline preflight against the frozen `v0.1.1` release, before any modification.** `git fetch origin --tags` →
+      `HEAD == origin/main == 5e697d8577501f16662f385c099eae1f8ca13af3`, divergence `0 0`, working tree clean.
+      `git rev-list -n 1 v0.1.0` → `9bd54431bbbaa5b7701939ebe64f598520700dd9` and `git rev-list -n 1 v0.1.1` →
+      `24f69c2c82901aed133ba3465d59b0f1fb584bf4`: both tags present and unmoved rather than re-created. `git rev-parse
+      v0.1.2` → `unknown revision` (exit `128`), so the tag is absent. `dsh --version` → `0.2.0-rc.2`;
+      `npm list -g @deepseek-ai/dsh --depth=0` → `@deepseek-ai/dsh@0.2.0-rc.2`.
+- [x] **Pre-release test hygiene corrected, without touching behaviour.** The `harness()` object in
+      `test/background-settlement.test.js` carried an unused member
+      `record: turnNumber => controller.store.turns.get(turnKey(SESSION, turnNumber)) ?? null` referencing a `turnKey`
+      that the file never imported. It was dead — the only occurrence of the name in the file was its own definition, and
+      no call site existed — so it was **removed entirely** rather than satisfied with a new import. One line deleted, no
+      production file touched.
+- [x] **Release manifest.** `version` `0.1.1` → `0.1.2`. The peer is unchanged and still exact:
+      `"peerDependencies": { "@deepseek-ai/dsh": "0.2.0-rc.2" }`, the only declared peer, and **not** widened to `^`, `~`,
+      `>=`, `0.2.x` or a dual range. `publishConfig.registry` remains `https://registry.npmjs.org/` with `access: public`,
+      the `files` allowlist remains runtime-only, and no `preinstall` / `install` / `postinstall` / `prepare` script was
+      introduced.
+- [x] **One release-induced test pin updated, and recorded as such rather than folded into the hygiene item.**
+      `test/dsh-020-contract.test.js` asserted `manifest.version === '0.1.1'` with the comment that the bump to `0.1.2`
+      "belongs to the later release phase". This round *is* that phase, so the assertion now reads `0.1.2`; the peer
+      assertions around it — exact pin, single peer, no range syntax, exact-prerelease shape — are untouched. **This is
+      the only test assertion the version bump invalidated**, established by grepping the suite for the old version.
+- [x] **Release-facing documentation updated.** `README.md`: banner, §2 status block, §3.1 prerequisite table, §3.2 pinned
+      install, §3.3 tarball/asset names and §7 repository map all move to `0.1.2`; the release matrix keeps both rows
+      (`v0.1.1 → DSH 0.1.7-rc.2`, `v0.1.2 → DSH 0.2.0-rc.2`) and no historical `0.1.7` evidence was rewritten.
+      `CHANGELOG.md`: `## Unreleased` promoted to `## 0.1.2 — 2026-09-29` with the release highlights, and the explicit
+      statement that **no support claim is made beyond DSH `0.2.0-rc.2`**.
+- [x] **Two stale metric paragraphs corrected in `README.md` §5, as documentation alignment only.** §5 still described
+      the live meter as a "current trailing 1-second window" and §5.2 still described the curve as an "attempt-local
+      trailing-one-second total throughput trace" summing `(t - 1000, t]`. Both were superseded by Phase 9.2 and
+      contradicted `docs/METRICS_SPEC.md` §6/§8 — and `docs/METRICS_SPEC.md` §6 states that no trailing window exists
+      anywhere in the rate path — while the same README §1 already described the phase-cumulative estimator. The two
+      paragraphs now state the phase-cumulative statistic, the phase-local reset, the hyperbolic stall decay, the 100 ms
+      sampling grid, the 200-point published-series cap and the 512-point chart render budget. No code, test or arithmetic
+      changed; the correction makes the shipped README agree with the shipped behaviour it was already claiming in §1.
+- [x] **Gates re-run at release state, reported as LOCAL TEST RESULTS** (this repository still has no CI runner):
+      `npm run build:client` → `client.js rebuilt (522682 bytes, mirrored to lib/client.js)`, **byte-identical** to the
+      committed bundle, so `git status` shows no bundle change; `npm run verify` → **768 tests, 768 pass, 0 fail**, with
+      `structure OK (14 required files, 15 core modules, 65 test files, client bundle fresh, lib/client.js mirrored)`;
+      `node scripts/verify-sanitization.mjs` → PASS; `git diff --check` → clean; and `client.js` and `lib/client.js` both
+      SHA-256 `de920a21219e8d01c77703d18ec0dcd884975595b5fdbc6198f77c87d497138f`.
+- [x] **npm registry reachability confirmed, and an authentication blocker found and reported rather than worked
+      around.** `npm ping --registry=https://registry.npmjs.org/` → `PONG 1396ms`. `npm whoami
+      --registry=https://registry.npmjs.org/` → **E401 Unauthorized** (the same round-1 probe returned exit `0` on
+      `0.1.7-rc.2`). `~/.npmrc` does contain a `//registry.npmjs.org/:_authToken` entry, and an authenticated
+      `npm access list packages` also returns E401, so the stored credential is rejected for authenticated operations
+      while public reads still succeed (`npm owner ls` → `evan-williams <canghw2023@foxmail.com>`, exit `0`). **No token,
+      OTP or credential value was printed, logged, written to any document or recorded in this round.** Publication is
+      therefore blocked on the operator's credential, and no authentication control was bypassed.
+- [x] **Name and version state recorded before publication.** `npm view dsh-turn-performance-meter versions --json` →
+      `["0.1.1"]`; `npm view … dist-tags --json` → `{ "latest": "0.1.1" }`; `npm view
+      dsh-turn-performance-meter@0.1.2 --json` → **E404**. Version `0.1.2` is absent, nothing is overwritten, and the
+      publication precondition holds independently of the credential blocker.
+- [x] **`npm publish` dry-run PASS.** `npm publish --dry-run --access public --tag latest
+      --registry=https://registry.npmjs.org/` reported `dsh-turn-performance-meter@0.1.2`, **8 files**, 320.8 kB packed,
+      1.1 MB unpacked, shasum `44655177439d2125d0f289a796d7108867813be6`. The file list is exactly the runtime allowlist
+      plus the auto-included `package.json`; no `src/`, `test/`, `fixtures/`, `dev/`, `scripts/`, `docs/`,
+      `node_modules/`, credential, log or raw fixture appears.
+- [x] **Canonical tarball built outside the repository and audited.** `npm pack --pack-destination
+      <repo-external temp>` produced `dsh-turn-performance-meter-0.1.2.tgz` (320 830 bytes) whose `tar -tf` listing is
+      `package/LICENSE`, `package/client.js`, `package/lib/client.js`, `package/index.js`, `package/package.json`,
+      `package/CHANGELOG.md`, `package/README.md`, `package/cordis.patch.yml` — 8 entries, no excluded path, nothing
+      written into the working tree. Recorded digests: SHA-256
+      `ade4a3c2e9ebf0ed75761755426a834cff0b3af3f76abdf797e8e93ab0177396`, SHA-1
+      `44655177439d2125d0f289a796d7108867813be6`, SHA-512 integrity
+      `sha512-6hZHHzcVadVGD8/Y5KKeR2MqNKqlK9wmbaJU+ENoOXyilYfKd6Z3uFSGwpGcHVdt/I+A/IVN+4PN453Pt4T+Ew==`. The SHA-1 and
+      the integrity both reproduce the values npm computed for the dry-run artifact.
+- [x] **Packed manifest inspected field by field.** Extracted from the tarball: `version` **`0.1.2`**,
+      `peerDependencies` exactly `{ "@deepseek-ai/dsh": "0.2.0-rc.2" }` as the only peer, `publishConfig.registry`
+      `https://registry.npmjs.org/`, `dsh.bundle.patch` `./cordis.patch.yml` present, **no** `private` field, and **no**
+      lifecycle install script (only `test`, `build:client` and `verify`).
+- [x] **The actual release tarball installed into a disposable web-template profile.** The profile was initialized with
+      `dsh --profile <probe> --from-default-profile web --dump-config` and then given the packed tarball through the
+      documented `file:` form. Install exited `0` with **no** `incompatible-version` rejection and **no** compatibility
+      exemption. `dsh-turn-performance-meter` appears in the profile's `dependencies` and in `dsh.profile.bundles`, and
+      `turn-performance-meter` appears in the composed configuration. The installed manifest reads `version` `0.1.2` and
+      peer `@deepseek-ai/dsh` `0.2.0-rc.2`, has no `private` field and no lifecycle script, ships the same 8 runtime
+      files, and its `client.js` SHA-256 equals the repository's.
+- [x] **Cold start on that disposable profile.** The host started on a free port with a log whose only line is the
+      printed URL, so no plugin startup error and no compatibility error occurred. `GET /` returned `200` with the plugin
+      registered at `plugins/??dsh-turn-performance-meter/client.js&rev=10a2b2980515`; that route returned `200` and its
+      payload contains the repository `client.js` **verbatim at offset 0**, the only difference being an 83-character
+      trailing `//# sourceMappingURL` directive added by the module server. The host was then stopped, the port confirmed
+      free and the disposable profile deleted; the real `web` profile was neither modified nor restarted.
+- [ ] **Release preparation commit pushed before publication.** `git add package.json README.md CHANGELOG.md
+      docs/TASKS.md docs/IMPLEMENTATION_LOG.md test/background-settlement.test.js test/dsh-020-contract.test.js`, one
+      commit, one ordinary fast-forward `git push origin main`, then `HEAD == origin/main` and divergence `0 0` re-checked.
+      No force.
+- [ ] **Gates re-run from the exact pushed release commit, and the tarball re-packed from it.** `npm run build:client`,
+      `npm run verify`, `node scripts/verify-sanitization.mjs` and `git diff --check` are re-run at the pushed commit and
+      the artifact is re-packed there; the prepublish tarball is **not** reused.
+- [ ] **`npm publish` — the irreversible registry action, currently blocked on credentials.** `npm whoami` must first
+      return a valid identity; the version must still be absent. **If npm requires OTP/2FA, it is not bypassed** — the
+      operator completes the publication manually and the round resumes from registry verification. No OTP is written to
+      chat, docs, command history or report. No `npm unpublish` under any circumstance.
+- [ ] **Registry metadata and artifact integrity verified, and the tarball downloaded back.** `dist-tags` must show
+      `latest` → `0.1.2`; the version's peer must read `0.2.0-rc.2`; `dist.tarball`, `dist.integrity` and `dist.shasum`
+      are recorded; and `npm pack` of the published version must reproduce `dist.shasum` and `dist.integrity`. The
+      prepublish and registry tarballs are compared byte-first and, if the archive bytes differ, file-by-file. A content
+      difference blocks the tag and the GitHub Release.
+- [ ] **Exact-version and unversioned registry installs, then a registry-installed cold start.** Two further disposable
+      web-template profiles take `dsh-turn-performance-meter@0.1.2` and then the bare `dsh-turn-performance-meter` — the
+      second being the command a user actually runs. Both must install `0.1.2`, enable the bundle automatically and place
+      `turn-performance-meter` in the composition; the unversioned profile is then cold-started. All disposable profiles
+      and processes are removed afterwards, and the real `web` profile is neither modified nor restarted.
+- [ ] **Annotated tag and GitHub Release, only after registry acceptance.** `git tag -a v0.1.2 <release commit>` and an
+      ordinary `git push origin v0.1.2`, then a Release whose assets are the **registry-downloaded** tarball plus a
+      `.sha256` sidecar, created with `--verify-tag` and `--latest` and without `--draft` or `--prerelease`.
+
+Acceptance gate: baseline `5e697d85…` re-verified and unchanged at preflight with `v0.1.0` and `v0.1.1` still pointing at
+their own commits and `v0.1.2` absent; DSH exactly `0.2.0-rc.2` both installed and declared as the only, exact peer;
+`package.json` at version `0.1.2` with `publishConfig` locked to `https://registry.npmjs.org/`, the runtime-only allowlist
+intact and no lifecycle install script; the production diff empty so no metric semantic moved in the release round; the
+dead `turnKey` helper removed rather than imported; 768/768 tests, sanitization PASS and `git diff --check` clean at
+release state; the tarball built outside the repository, audited entry by entry, manifest-checked and digest-recorded,
+then installed and cold-started in a disposable DSH `0.2.0-rc.2` profile without a compatibility exemption; the release
+commit pushed without force before publication; `npm` publishing `0.1.2` with `latest` → `0.1.2`; the registry artifact
+reproducing the local digest and matching the GitHub asset; the exact-version install, the unversioned standard install
+and a registry-installed cold start all passing; annotated tag `v0.1.2` peeled to the release commit; `HEAD == main ==
+v0.1.2` with divergence `0 0` and a clean working tree at the end; and no force, no re-tag, no movement of `v0.1.0` or
+`v0.1.1`, no widened compatibility claim, no claim beyond DSH `0.2.0-rc.2` and no credential or OTP recorded at any point.

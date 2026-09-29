@@ -4319,3 +4319,114 @@ One documentation defect surfaced and was corrected in `src/client/live/MeterRoo
 `hidden` projection was static, which the function never did and which would have been wrong (the ticker's own lifecycle
 tests `view.kind !== 'hidden'` separately). The comment was aligned with the code; the code was not changed.
 
+## v0.1.2 npm distribution record
+
+**Status: release round — npm publication pending on an operator credential.** This round releases Phase 9, 9.2 and 9.3,
+which are already in the tree. It adds no feature and changes no metric: `git diff -- src client.js lib/client.js
+index.js cordis.patch.yml` is **empty** at release state. The outcome of the round is reported in the round's own final
+report rather than in a post-publication commit, so that `main` HEAD and `v0.1.2` remain the same commit.
+
+### 1. Contract
+
+| Item | Value |
+|---|---|
+| Version | `0.1.2` (`package.json`; `npm version` was not run) |
+| Peer | `@deepseek-ai/dsh` exactly `0.2.0-rc.2`, the only declared peer, unchanged by this round |
+| Publication target | `https://registry.npmjs.org/`, `access: public`, tag `latest`, locked by `publishConfig` |
+| npm artifact | 8 files: `package.json`, `index.js`, `client.js`, `lib/client.js`, `cordis.patch.yml`, `README.md`, `CHANGELOG.md`, `LICENSE` |
+| Baseline entering the round | `5e697d8577501f16662f385c099eae1f8ca13af3`, `HEAD == origin/main`, divergence `0 0` |
+| `v0.1.0` / `v0.1.1` | left at `9bd54431…` and `24f69c2c…`; neither moved, deleted or re-created |
+| Release target | the final release-state commit of this round, which is `main` HEAD at tag time |
+| Tag | `v0.1.2`, annotated, created from that commit **after** registry acceptance |
+| GitHub asset | the **registry-downloaded** tarball plus a `.sha256` sidecar |
+| DSH | `0.2.0-rc.2` only — no wider compatibility claim was added, and none is implied |
+
+### 2. What this round does and does not contain
+
+The tree already carried the Phase 9 presentation work, the Phase 9.2 estimator change and the Phase 9.3 compatibility
+migration; the release round's job is to declare and publish them, not to extend them. The production diff is empty, so
+the artifact that ships is the artifact the previous rounds verified. The three non-documentation changes are all
+release-mechanical and are enumerated here rather than left to the diff:
+
+1. **`package.json` version `0.1.1` → `0.1.2`.** The peer, `publishConfig`, `files`, `exports` and `dsh` blocks are
+   untouched, and no lifecycle install script exists.
+2. **Dead-helper removal in `test/background-settlement.test.js`.** The `harness()` object carried
+   `record: turnNumber => controller.store.turns.get(turnKey(SESSION, turnNumber)) ?? null` while the file never imported
+   `turnKey`. The member was unreachable — the only occurrence of the name in the file was its own definition — so it was
+   removed rather than satisfied with an import. One line deleted.
+3. **One release-induced assertion in `test/dsh-020-contract.test.js`.** It pinned `manifest.version === '0.1.1'` under a
+   comment saying the `0.1.2` bump "belongs to the later release phase". This round is that phase, so the pin now reads
+   `0.1.2`. The peer assertions beside it — exact pin, single peer, no range syntax, exact-prerelease shape — are
+   unchanged. Grepping the suite for the old version confirmed this was the only assertion the bump invalidated.
+
+### 3. Documentation: two stale paragraphs, and why they were not left alone
+
+`README.md` §5 and §5.2 still described the **superseded Phase 7C estimator**: the live meter as a "current trailing
+1-second window", the curve as an "attempt-local trailing-one-second total throughput trace" whose vertex sums
+`(t - 1000, t]`. Phase 9.2 replaced that contract, and `docs/METRICS_SPEC.md` §6 states that no trailing window exists
+anywhere in the rate path. The same README's §1 had already been updated to the phase-cumulative description when the
+spec was, so the file contradicted itself, and the contradiction shipped: `README.md` is in the `files` allowlist.
+
+The two paragraphs were rewritten to the phase-cumulative statistic, the phase-local reset, the hyperbolic stall decay,
+the 100 ms sampling grid, the 200-point published-series cap and the 512-point chart render budget. This is documentation
+alignment with behaviour that was already shipped and already claimed in §1 — not a metric change, and the empty
+production diff is the evidence for that. Two further repository-map counts were corrected against the structure check
+(`16` → `15` core modules, `63` → `65` test files) and the missing `docs/MIMO_RUNTIME_METRICS.md` row was added.
+
+### 4. Verification performed, and its boundaries
+
+Gates at release state: `npm run build:client` rebuilt both bundle copies and left them **byte-identical** to the
+committed bytes, so `git status` lists no bundle file; `npm run verify` → **768 tests, 768 pass, 0 fail**, with
+`structure OK (14 required files, 15 core modules, 65 test files, client bundle fresh, lib/client.js mirrored)`;
+`node scripts/verify-sanitization.mjs` → PASS; `git diff --check` → clean. `client.js` and `lib/client.js` both hash to
+SHA-256 `de920a21219e8d01c77703d18ec0dcd884975595b5fdbc6198f77c87d497138f`.
+
+The `npm pack` listing and the extracted manifest were checked field by field: 8 entries, no `src/`, `test/`, `fixtures/`,
+`dev/`, `scripts/`, `docs/`, `node_modules/`, credential, log or raw fixture; `version` `0.1.2`; `private` absent; exactly
+one peer at `0.2.0-rc.2`; `publishConfig.registry` the official registry; `dsh.bundle.patch` present; and no lifecycle
+install script. Digests for `dsh-turn-performance-meter-0.1.2.tgz` (320 830 bytes): SHA-256
+`ade4a3c2e9ebf0ed75761755426a834cff0b3af3f76abdf797e8e93ab0177396`, SHA-1
+`44655177439d2125d0f289a796d7108867813be6`, SHA-512
+`ea16471f371569d5460fcfd8e4a29e47632a34aaa52bdc266da254f84368397ca29587ca77a677b85486c2919c1d576dfc8f80fc854dfb83cde39dcfb784fe13`.
+The SHA-1 and the base64 integrity reproduce npm's own values for the dry-run artifact
+(`sha512-6hZHHzcVadVGD8/Y5KKeR2MqNKqlK9wmbaJU+ENoOXyilYfKd6Z3uFSGwpGcHVdt/I+A/IVN+4PN453Pt4T+Ew==`), so the packed
+bytes and npm's account of them agree before publication.
+
+The tarball was then installed into a disposable web-template profile and cold-started on a free port. The install
+reported exit `0` with no `incompatible-version` rejection and no compatibility exemption; the bundle was enabled
+automatically in `dsh.profile.bundles`; `turn-performance-meter` appears in the composed configuration; and the installed
+manifest reads `version` `0.1.2` with peer `0.2.0-rc.2`. The installed `client.js` SHA-256 equals the repository's. Cold
+start is evidenced on three surfaces: the host log's only line is the printed URL, so no plugin startup error and no
+compatibility error occurred; `GET /` returned `200`; and the plugin's own module route
+`plugins/??dsh-turn-performance-meter/client.js&rev=10a2b2980515` returned `200` with the repository `client.js` present
+**verbatim at offset 0**, the sole difference being the 83-character trailing `//# sourceMappingURL` directive the module
+server appends. The host was stopped, the port confirmed free and the profile deleted; the real `web` profile was not
+modified or restarted.
+
+Evidence boundaries carried forward. The `npm run verify` result remains a local result rather than CI, because the
+repository still has no CI runner, and no model call was made in this round: the packaging gate is a transport- and
+composition-level result, and runtime functional evidence remains the Phase 9.3 / 9.3.1 browser record. No VPS, remote
+host or second machine was used.
+
+### 5. Authentication blocker, recorded rather than worked around
+
+`npm ping --registry=https://registry.npmjs.org/` succeeded (`PONG 1396ms`), but `npm whoami
+--registry=https://registry.npmjs.org/` returned **E401 Unauthorized**, where the `v0.1.1` round recorded exit `0`.
+`C:\Users\20659\.npmrc` does contain a `//registry.npmjs.org/:_authToken` entry — its presence was confirmed with the
+value redacted — and an authenticated `npm access list packages` also returns E401, so the stored credential is rejected
+for authenticated operations while unauthenticated reads still work (`npm owner ls dsh-turn-performance-meter` →
+`evan-williams <canghw2023@foxmail.com>`, exit `0`). No token, OTP or credential value was printed, logged, written to any
+document in this repository or recorded in this round's report. The registry action is therefore blocked on the
+operator's credential, and no authentication control was bypassed to proceed. Publication is the only irreversible step
+in the round, so the round stops short of it and reports the partial state rather than substituting a different
+credential path.
+
+### 6. Git gate
+
+One ordinary fast-forward push of the single release commit, made **before** the registry action and re-verified after it;
+`HEAD == origin/main`, divergence `0 0`, working tree clean, `git diff --check` clean. No `--amend` after push, no rebase,
+no `--force`, no `--force-with-lease`, no reset of remote `main`, no movement of `v0.1.0` or `v0.1.1`. The `v0.1.2` tag is
+created only after the npm publication, the registry artifact verification and all three registry install gates pass. No
+`npm unpublish` under any circumstance: a published npm version is an immutable artifact, and a failure after publication
+is reported as a partial state rather than undone.
+
