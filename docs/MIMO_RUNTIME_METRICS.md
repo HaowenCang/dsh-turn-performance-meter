@@ -46,7 +46,7 @@ private conversation content is reproduced here.
 
 | # | Shape of run | thinking tokens | output tokens | thinking dur | output dur | total dur | first response | thinking TPS | output TPS | samples |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 1 | trivial ("say hello") | 30 | 4 | 0.031 s | 0.681 s | — | 4.42 s | — | — | — |
+| 1 | trivial ("say hello") | 30 | 4 | — | 0.1 s | — | 4.42 s | — | — | — |
 | 2 | small code answer | 14 | 163 | 0.031 s | 0.681 s | 9.905 s | 9.224 s | 0 | 63 | 6 |
 | 3 | large single-file game | 19 630 | 14 653 | 50.39 s | 71.986 s | 174.492 s | 102.506 s | 387 | 680 | 200 |
 | 4 | medium explanation | 34 | 747 | 0.252 s | 4.836 s | 7.284 s | 2.448 s | 0 | 137 | 48 |
