@@ -3904,3 +3904,76 @@ and both surfaces moved together under it. The "old completed-card height" of 14
 under a shell override that restores the pre-Phase-9 outer padding, radius and header absence in the live page — an
 arithmetic reconstruction of the old outer box, not a checkout of the previous commit; it is reported as such. No second
 machine, no remote host and no CI runner was used.
+
+## Phase 9.2 — MiMo TPS semantics adoption (semantic unfreeze)
+
+**Status of the superseded contract.** This round deliberately reopens the Phase 7C contract that live TPS must be a
+trailing one-second rate and that the completed curve must use that same statistic. The old design is not deleted
+silently: its decisions, their evidence and their reasoning are preserved here and in `docs/METRICS_SPEC.md`'s
+supersession note, and `docs/MIMO_RUNTIME_METRICS.md` §14 records the adoption decision against the evidence in that
+document.
+
+### 1. What was superseded, and what was not
+
+Superseded (unfrozen by explicit authorization):
+
+| Old contract | Old decision | Replaced by |
+|---|---|---|
+| live TPS | trailing 1000 ms window (`SlidingWindowMeter`) | phase-cumulative average over the active phase episode |
+| completed curve | the same trailing statistic, one attempt-local trace | the same phase-cumulative estimator family as the live pill |
+| curve sampling | `DEFAULT_SAMPLE_EVERY_MS` = 250 ms | 100 ms |
+| presentation cadence | 50 ms (Phase 5A winner) | 100 ms (MiMo fidelity) |
+| completed phase denominator | attributed inter-delta generation time, terminal tail excluded | MiMo-style phase-episode wall time, terminal settlement tail included |
+| peak | maximum of the full rolling series, before downsampling | maximum of the published (200-point-capped) cumulative series |
+
+Still frozen, and re-asserted by the regression suites: turn-level aggregation; `reasoningTokens` included in
+`outputTokens`; Generated Tokens semantics; TTFT (`turn/start -> first generated delta`); tool result exclusion; tool
+wall/work accounting; attempt identity handling; durable reconstruction and deduplication; the phase-evidence
+consistency guard; the quality axes; the 0.1.7-rc.2 adapter contract; the completed-card visual design; the
+collapsed/expanded UI.
+
+### 2. Why the old decision was defensible, and why it was still replaced
+
+The Phase 2 measurement behind the old denominator stands: across ten recorded attempts the settlement trails the
+stream's own `finish` chunk by 1–8 ms, the tail is 3 ms – 260 ms, and the longest attempt (33.8 s) had an 18 ms tail.
+That evidence justified "the tail is host commit work, not decode work" for an *attributed inter-delta decode time*.
+The target statistic changed, not the measurement: MiMo's completed output rate is
+`outputTokens / (settlementTime - outputStartTime)`, i.e. wall clock to settlement, and a port that excluded the tail
+would not reproduce it. `test/generation-tail.test.js` keeps the measurements and now asserts the new consequence.
+
+### 3. Implementation summary
+
+- `src/core/live-metrics.js` — the live meter is now a phase-episode estimator: `episodeStartMs`, `episodeTokenMass`,
+  `episodeSampleCount`, a `Math.round`ed quotient, a 3-sample warm-up, a 1000 ms first-output fallback guard, and an
+  in-stream-usage numerator (`counter - episodeStartBaseline`) that falls back to the shape mass whenever the
+  phase-evidence policy refuses the split.
+- `src/core/phase-duration.js` — `attributePhaseDurations(samples, {settledAtMs})` cuts an attempt into contiguous
+  phase episodes and measures each as `episodeEnd - episodeStart`.
+- `src/core/curve.js` — `cumulativePhaseTpsSeries` replaces `totalRollingTpsSeries`; `capSeriesPoints` implements the
+  200-point nearest-neighbour stored-series cap; `DEFAULT_SAMPLE_EVERY_MS` is 100; `DEFAULT_WINDOW_MS` is gone.
+- `src/core/time-axis.js` — an attempt's width is its terminal episode's end, so the settlement tail is drawn and tool
+  waits still own no coordinate.
+- `src/host/telemetry-design.js` — no `windowMs`; usage chunks are forwarded to the live meter; the settled curve is
+  built from the capped series.
+- `src/client/live/cadence.js` — `DEFAULT_PRESENTATION_REFRESH_MS = 100`, candidates `[200, 100, 50, 10]`.
+- `src/client/live/live-presenter.js` / `ui-model.js` / `LiveMeter.js` — a `warming` view (phase label + episode
+  elapsed counter) while the episode is below its warm-up count; the visual element structure is the existing
+  `waiting` structure, so no CSS was touched.
+- `src/core/sliding-window.js` and its test were **deleted**: the module was the trailing-window definition and nothing
+  referenced it after the change.
+
+### 4. Deliberate divergences from MiMo
+
+No 200 TPS lower visibility gate (DSH models legitimately operate below it; the user's observed turn is ≈151/173
+TPS); no 1564 ceiling; no `< 0.2 s` forced-zero rule; tool waits reported as `tps: null` rather than decayed across;
+multi-attempt turns aggregated by ratio-of-sums rather than one whole-turn division; explicit DSH phase chunks instead
+of MiMo's marker inference. The full list is in `docs/MIMO_RUNTIME_METRICS.md` §14.
+
+### 5. Live evidence hierarchy, verified rather than assumed
+
+The brief required the transient path for `StreamChunk { type: 'usage' }` to be verified before implementing.
+Verified against the local `0.1.7-rc.2` install: `dsh-llm/lib/types/types.d.ts:417-447` declares the `usage` variant;
+`dsh-agent-loop/lib/index.js` `AssistantStreamAttempt.push` emits a frame for **every** chunk including `usage`;
+`dsh-api-session-controller/lib/client.js` republishes each frame as an `assistant/live-chunk` row with
+`data.chunk` intact. Usage is therefore not settlement-only, and the live estimator's priority is
+(1) usable in-stream provider counters, (2) generated-delta shape weights.

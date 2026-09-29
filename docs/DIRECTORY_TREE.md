@@ -51,14 +51,13 @@ dsh-turn-performance-meter/
 │   │   ├── metric-quality.js         exact/calibrated/estimated/unavailable + rateQuality
 │   │   ├── quality-model.js          tokenTotal / phaseSplit / temporalShape axes + ceilings
 │   │   ├── delta-accounting.js       Delta classification, strict compact-stream decoder
-│   │   ├── phase-duration.js         Non-overlapping phase-duration attribution policy
+│   │   ├── phase-duration.js         Phase-episode duration attribution (MiMo-style, Phase 9.2)
 │   │   ├── phase-evidence.js         The one authority for provider-counter vs stream-phase contradictions and modes
 │   │   ├── token-allocation.js       Delta shape weighting + usage calibration
-│   │   ├── sliding-window.js         Trailing-1s meter with attempt epochs
-│   │   ├── live-metrics.js           LiveMeter: rolling window, TTFT, tool phase
+│   │   ├── live-metrics.js           LiveMeter: phase-cumulative TPS, TTFT, tool phase
 │   │   ├── tool-timing.js            Sum and union tool durations
 │   │   ├── time-axis.js              Compressed model-attempt chart clock (two clocks per sample)
-│   │   ├── curve.js                  Attempt-local total rolling trace, phase-coloured runs, peak, downsampling
+│   │   ├── curve.js                  Attempt-local phase-cumulative trace, phase-coloured runs, peak, stored-series cap, downsampling
 │   │   ├── curve-source.js           The calibrated curve input: stored attempts joined with their reduction
 │   │   ├── aggregate-turn.js         Turn-level weighted final metrics + quality axes
 │   │   └── turn-state.js             Pure lifecycle state machine + turn/end mapping
@@ -140,16 +139,16 @@ dsh-turn-performance-meter/
 │   ├── curve-quality.test.js          Phase 6: curve quality is the temporal-shape axis
 │   ├── cadence-contract.test.js       Phase 6: source-level core/client timing separation
 │   ├── runtime-robustness.test.js     Phase 6: tools, retries, errors, reload, duplicate frames
-│   ├── curve-reference-window.test.js Phase 7: O(n^2) brute-force reference for the window definition
-│   ├── curve-episode-opening.test.js  Phase 7: the epoch-local clamp counterexample (100, never 200)
+│   ├── curve-reference-cumulative.test.js Phase 9.2: O(n) reference for the phase-cumulative estimator
+│   ├── curve-episode-opening.test.js  Phase 9.2: episode opening, phase reset, seam sharing
 │   ├── curve-render-budget.test.js    Phase 7: the chart-wide budget and its retention properties
 │   ├── mid-turn-reload-recovery.test.js Phase 7: adoption, guards, authoritative upgrade, TTFT paths
 │   ├── curve-peak-priority.test.js    Phase 7A.1: retention priority across every run length (BLOCKER A)
 │   ├── rebaseline-generation.test.js  Phase 7A.1: window generations and session-scoped store reset (BLOCKER B)
 │   ├── curve-calibration.test.js      Phase 7C: the calibrated-magnitude counterexample + the Phase 7B reproduction
 │   ├── curve-source.test.js           Phase 7C: the positional, verified join; Phase 7C.2: the global integral sweep
-│   ├── curve-total-rolling.test.js    Phase 7C: the cross-phase counterexample + the live/completed contract
-│   ├── curve-trace-matrix.test.js     Phase 7C: fourteen named scenarios for the total trace
+│   ├── curve-phase-cumulative.test.js Phase 9.2: the grid, phase reset, stall decay, terminal tail, the 200-point cap
+│   ├── curve-trace-matrix.test.js     Phase 7C: fourteen named scenarios for the attempt trace
 │   ├── curve-long-agent-visual.test.js Phase 7C: the 24-call visual regression and the rejected geometry's cost
 │   ├── phase-evidence.test.js         Phase 7C.2: the contradiction matrix, counterexamples A-D, the anchored integral
 │   ├── dsh-017-*.test.js              Phase 7D / 7D.1 / 7D.1.2: the rc.2 contract — completion, settlement, tool

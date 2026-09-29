@@ -40,7 +40,7 @@ DSH Host/runtime
         TurnTelemetryStore (session + turn keyed)
           ├─ AttemptRecord[]
           ├─ ToolCallRecord[]
-          ├─ live SlidingWindowMeter
+          ├─ live LiveMeter (phase-episode cumulative TPS)
           └─ turn lifecycle
                  │
         ┌────────┴─────────┐
@@ -62,7 +62,7 @@ DSH Host/runtime
 
 The integration layer must use DSH extension points and client services, not DOM scraping. DSH's public architecture explicitly distinguishes durable facts (`session/event`) from transient live model presentation (`agent/assistant-stream`). The plugin should combine them:
 
-- transient assistant frames: live current-window TPS and in-flight sample timestamps;
+- transient assistant frames: live phase-cumulative TPS and in-flight sample timestamps;
 - durable turn/step/tool/assistant settlements: authoritative boundaries, completion status, replay/reload reconstruction, and provider usage;
 - provider usage: exact aggregate output/reasoning token totals when available.
 
@@ -105,7 +105,7 @@ ToolCallRecord = {
 }
 ```
 
-`attemptId` is the live identity for one assistant streaming attempt. A retry/new attempt must create a new live rolling-window epoch.
+`attemptId` is the live identity for one assistant streaming attempt. A retry/new attempt must create a new live phase episode: the episode clock, the numerator and the first-output fallback are all reset, so a later model call never inherits tokens from a preceding call separated by a tool or a retry.
 
 ### Window generation reset (frozen in Phase 7A.1)
 
@@ -155,42 +155,42 @@ idle
 
 A tool may be parallel with another tool. State presentation can still say `tool` while `activeToolIds.size > 0`; timing must retain individual intervals.
 
-### Live rolling-window reset rule
+### Live phase-episode reset rule (Phase 9.2)
 
-Every `AssistantStreamFrame.start` / accepted new attempt resets the 1-second live meter. A later model call must not inherit tokens from a preceding call separated by a tool or retry.
+Every accepted new attempt resets the live estimator, and every phase transition inside one attempt resets the current **phase episode** — its start instant, its token mass and its sample count. The live rate is the episode's cumulative average, `Math.round(mass * 1000 / (now - episodeStartMs))`, and it is published only once the episode holds `MIN_WARMUP_SAMPLES` (3) generated samples; before that the pill shows the episode's elapsed counter. A tool start clears the episode outright (`tps: null`) rather than continuing its decay, and the next attempt begins a fresh clock.
 
-### The same rule applies to the completed curve (frozen in Phase 6, corrected in Phase 7C)
+### The same rule applies to the completed curve (frozen in Phase 6, corrected in Phase 7C, restated for the cumulative estimator in Phase 9.2)
 
-The completed curve uses the compressed clock, which joins attempts end-to-start so tools consume no width. That joining is a **coordinate** operation; it is not a statement about the measurement window. Each attempt's completed trace is therefore computed on its own local clock by `attemptTrace` and only then relabelled to the shared coordinate.
+The completed curve uses the compressed clock, which joins attempts end-to-start so tools consume no width. That joining is a **coordinate** operation; it is not a statement about the episode clock. Each attempt's completed trace is therefore computed on its own local clock by `attemptTrace` and only then relabelled to the shared coordinate.
 
 The two clocks a compressed sample carries are named explicitly for exactly this reason:
 
 | Field | Meaning | Used by |
 |---|---|---|
 | `activeTimeMs` | turn-compressed coordinate, continuous across attempts | the x-axis |
-| `attemptTimeMs` | attempt-local instant, zero at that attempt's first delta | the trailing-window measurement |
+| `attemptTimeMs` | attempt-local instant, zero at that attempt's first delta | the phase-episode measurement |
 
 Publishing only the first of the two is what allowed the rejected revision to roll a turn-global window while believing it was local. Anything that measures a rate reads `attemptTimeMs`; anything that draws a position reads `activeTimeMs`.
 
-One consequence is worth stating separately: an attempt's one-window decay tail is clamped at the coordinate the **following** attempt owns, because past that point the coordinate belongs to a different call. The final attempt keeps its tail. The clamp is published on the segment as `hasSuccessor` + `nextStartMs` — a single nullable number cannot distinguish "the next attempt starts here" from "this attempt ends at the axis end", and the two cases require different behaviour.
+An attempt's width is its terminal episode's end: the attempt's settlement instant when one is known, and its last generated delta otherwise. The terminal generated-delta → settlement tail is therefore drawn (a decaying stretch, because the numerator freezes while the denominator advances), while the tool and inter-attempt waits that follow still own no coordinate — the next attempt starts where this one's clock stopped.
 
-### The trace is total, and phase is a colour (frozen in Phase 7C)
+### One measurement per attempt, one episode clock per phase (frozen in Phase 7C, restated in Phase 9.2)
 
-Within one attempt the trailing window sums **every** generated sample, whatever its phase. That is what `LiveMeter` measures, and the two halves of the project must agree: a live pill and a completed vertex at the same attempt-local instant are one measurement.
+Within one attempt the estimator accumulates **every** generated sample, whatever its phase, into the episode in force at that instant; a phase transition starts a new episode with its own clock and numerator. That is what `LiveMeter` measures, and the two halves of the project must agree: the live pill and the completed curve publish the same estimator family, with the completed curve allowed to improve its evidence quality at settlement.
 
-Phase therefore reaches the chart as a **label** on each vertex — `activePhase`, the phase of the latest generated sample at or before that instant, which is `streamingPhase` restated — and as the segmentation of the trace into phase-coloured runs by `visualRunsOf`. It is not a filter on the measurement:
+Phase reaches the chart as a **label** on each vertex — `activePhase`, the phase of the latest generated sample at or before that instant, which is `streamingPhase` restated — and as the segmentation of the trace into phase-coloured runs by `visualRunsOf`. It is not a filter on the measurement:
 
 ```
 raw samples (all phases)
   -> compressAttempts           attempt-local + compressed clocks
   -> curveSource                calibrated magnitudes from aggregate.attemptBreakdown
-  -> attemptTraces              one total rolling trace per attempt
+  -> attemptTraces              one phase-cumulative trace per attempt, capped at 200 published points
   -> visualRunsOf               phase-coloured cuts that share their seams
   -> allocateRunBudgets         chart-wide 512-vertex bound
   -> downsampleRun              per run, seams reserved
 ```
 
-The rejected revision stopped at `perAttemptSeries(..., phase)`: two independent rolling series, one per phase, neither of which equalled the live reading whenever both phases were inside one window. The episode cut that went with it — one run per phase episode, with blank regions between them — is removed as well: a silence inside a call is a value on that call's own trace, drawn at full width.
+The rejected revision stopped at `perAttemptSeries(..., phase)`: two independent series, one per phase, neither of which equalled the live reading whenever both phases were active inside one measurement span. The episode cut that went with it — one drawn run per phase episode, with blank regions between them — stays removed: a silence inside a call is a value on that call's own trace, drawn at full width, and an episode is a *statistical* unit rather than a drawing unit.
 
 ### Curve magnitude provenance (frozen in Phase 7C)
 
@@ -233,11 +233,11 @@ Used for:
 
 ### Phase generation duration
 
-Used as TPS denominator. Tool waiting is excluded. Reasoning/output duration must be derived from model-generated delta boundaries under one documented policy and tested against edge cases.
+Used as TPS denominator. Tool waiting is excluded. Reasoning/output duration is derived from model-generated delta boundaries under one documented policy — the MiMo-style **phase episode** policy of `docs/METRICS_SPEC.md` §7: a non-terminal episode ends at the next episode's first sample, the terminal episode ends at the attempt's settlement instant, and a duration that is not measurable is `null` rather than `0`.
 
 ### Compressed curve clock
 
-Used only for the completed TPS chart. For each model attempt, preserve the internal time spacing from first generated delta to last generated delta; concatenate attempts with no inter-attempt gap:
+Used only for the completed TPS chart. For each model attempt, preserve the internal time spacing from first generated delta to the attempt's own end; concatenate attempts with no inter-attempt gap:
 
 ```text
 wall clock:
@@ -247,11 +247,11 @@ curve clock:
 A model =====B model ===C model ======
 ```
 
-Thus tool execution and second-call pre-first-token wait consume zero chart width, while a real stall *inside* an active model stream remains visible as a local TPS reduction.
+Thus tool execution and second-call pre-first-token wait consume zero chart width, while a real stall *inside* an active model stream remains visible as a local rate decay.
 
-Formally, the chart is equivalent to an active model-generation coordinate, but implementation is safer as explicit attempt concatenation than subtracting arbitrary wall intervals from one global clock.
+Formally, the chart is equivalent to an active model-attempt coordinate, but implementation is safer as explicit attempt concatenation than subtracting arbitrary wall intervals from one global clock.
 
-The domain boundary is easy to get wrong in one direction only, and the wrong direction is the expensive one: the clock is continuous across an attempt boundary, so it is tempting to treat the rolling series as continuous too. It is not. See "The same rule applies to the completed curve" above for the two clocks and the decay clamp.
+The domain boundary is easy to get wrong in one direction only, and the wrong direction is the expensive one: the clock is continuous across an attempt boundary, so it is tempting to treat the episode clock as continuous too. It is not. See "The same rule applies to the completed curve" above for the two clocks and the terminal-tail rule.
 
 ## 8. Retry, interruption and failure semantics
 
@@ -340,7 +340,8 @@ MeterRoot (slot component) — owns subscription, ticker and the single style ta
 ├─ hidden            no session | inactive machine — renders null
 ├─ LiveMeter pill    while a turn is open
 │  ├─ pending-first-token   running first-response stopwatch (once per turn)
-│  ├─ streaming-reasoning   trailing-1s ≈TPS + turn elapsed
+│  ├─ streaming-reasoning   ≈cumulative phase TPS + turn elapsed
+│  ├─ warming               below the 3-sample warm-up: phase label + episode counter, no rate
 │  ├─ streaming-output      (tool-call arguments included)
 │  ├─ tool-running          episode wall timer + tool label(s), no TPS field
 │  ├─ waiting-model         post-TTFT wait stopwatch, never the TTFT counter
@@ -354,8 +355,10 @@ MeterRoot (slot component) — owns subscription, ticker and the single style ta
 ```
 
 The projected view is stored state: only the presentation ticker — one cadence constant,
-`DEFAULT_PRESENTATION_REFRESH_MS` = 50 ms in `src/client/live/cadence.js` (Phase 5A measured 200 / 50 / 10 ms in the
-browser and selected 50 ms) — and mount/session changes write it, so the slot owner's high-frequency re-renders cannot
+`DEFAULT_PRESENTATION_REFRESH_MS` = 100 ms in `src/client/live/cadence.js` (Phase 9.2 moved the selection from the
+Phase 5A winner of 50 ms to 100 ms as a fidelity decision, matching MiMo's ~100 ms metric and presentation grid;
+200 / 100 / 50 / 10 ms remain reachable through the diagnostic override) — and mount/session changes write it, so the
+slot owner's high-frequency re-renders cannot
 bypass the presentation throttle. Each tick produces exactly one state update: the projection key includes the
 presentation instant, so the tick's view is always a new object and the `useReducer` "force render" that used to
 accompany it was pure duplication and was removed. The ticker exists for **live** views only; once the card is on
@@ -540,8 +543,8 @@ The feed's diagnostics also keep the three tool quantities separate, because a s
 distinction the compact pill needs: `historicalTools` is what the settled turn record holds, `liveRunningTools` is the
 live meter's own running set, and `livePresentedToolCount` is the same set gated on the tool stage owning the view. The
 two live counters are read from the meter's own running set rather than from a snapshot taken at the wall clock, because
-evaluating a snapshot evicts expired samples from the rolling window and would silently change the rate the diagnostic
-was only supposed to observe. The gate matters for the same reason: a turn that ended with a call whose result was
+taking a snapshot advances the episode clock the diagnostic was only supposed to observe (and, before Phase 9.2, evicted
+expired samples from the rolling window). The gate matters for the same reason: a turn that ended with a call whose result was
 never observed closes its presentation while the unresolved call stays on the record as incomplete evidence.
 
 ## 12. Non-goals

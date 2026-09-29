@@ -2,11 +2,22 @@
 
 This file is normative. If code, screenshots, or comments conflict with it, this file wins until deliberately amended.
 
+**Phase 9.2 amendment.** The throughput family is a **MiMo-style phase-cumulative average** (`docs/MIMO_RUNTIME_METRICS.md`,
+adopted by explicit authorization in Phase 9.2). The affected sections are §6 (live TPS), §7 (completed turn TPS and
+the phase-duration policy), §8.1/§8.2 (curve axis, statistic and stored-series cap) and §9 (peak TPS). The superseded
+Phase 7C contract — live TPS as a trailing 1000 ms window, the curve as the same trailing statistic, 250 ms curve
+sampling, and the inter-delta completed denominator — is recorded, with its rationale, in `docs/IMPLEMENTATION_LOG.md`
+and marked superseded there. Everything else in this file is unchanged, including the parts of the old contract that
+remain frozen: turn-level aggregation, `reasoningTokens` inclusion, Generated Tokens semantics, TTFT, tool exclusion,
+tool wall/work accounting, attempt identity, durable reconstruction and deduplication, the phase-evidence consistency
+guard, the quality axes, the 0.1.7-rc.2 adapter contract, and the completed-card visual design.
+
 ## 1. Statistical scope
 
 A metric card belongs to one DSH `turn`. A turn may contain multiple steps, model attempts, retries, and tool calls.
 
-The completed values are ratios of turn-level sums, never arithmetic means of per-step/per-attempt TPS values.
+The completed values are ratios of turn-level sums, never arithmetic means of per-step/per-attempt TPS values. A live
+value is a phase-cumulative average inside one model attempt; it is never aggregated across attempts.
 
 ## 2. Content classes
 
@@ -136,27 +147,71 @@ episode. The live timer is therefore never `Σ(active call durations)` and never
 
 ## 6. Live TPS
 
-Live TPS is a trailing one-second window for the **currently active model attempt**, not a turn average:
+**Phase 9.2 replaced the trailing one-second window with a MiMo-style phase-cumulative average.** The unfrozen
+Phase 7C contract (`live TPS = trailing 1000 ms window`) is superseded; the historical rationale is preserved in
+`docs/IMPLEMENTATION_LOG.md` and marked superseded there.
+
+Live TPS is the **cumulative phase average of the currently active phase episode** of the active model attempt:
 
 \[
-TPS_{live}(t)=\frac{N(t-1000\,ms,t]}{1\,s}
+TPS_{live}(t)=\frac{\text{generated token mass of the current phase episode up to } t}
+                   {t - \text{first generated sample of that episode}}
 \]
+
+rounded with `Math.round`, which is MiMo's observed rule (`docs/MIMO_RUNTIME_METRICS.md` §5.1/§5.2, §8.2).
+
+**Phase episode.** A phase episode is the maximal run of consecutive generated samples carrying one phase
+(`reasoning` or `output`) inside one model attempt. It begins at its first generated sample and ends at the first
+generated sample of another phase, or — for the terminal episode of an attempt — at that attempt's settlement.
 
 Implementation requirements:
 
-- window length: 1000 ms (unchanged; the window is a *definition*, not a refresh rate);
-- UI refresh target: **50 ms** (20 presentation updates/s). Phase 5A measured 200 / 50 / 10 ms in a real browser;
-  50 ms was selected because 10 ms produced 3.4x the React renders for identical frame timing. The cadence has one
-  home, `DEFAULT_PRESENTATION_REFRESH_MS` in `src/client/live/cadence.js`, and it never changes the window above;
-- reset at every new model attempt;
-- while no model attempt is streaming (tool running or waiting for next model), do not keep displaying a stale TPS as if current;
-- live TPS is normally `estimated` unless an exact streaming tokenizer/count is available.
+- **reset at every phase transition.** A `reasoning → output` change resets the episode start, the numerator and the
+  sample count; the first output rate is output-local and never contains reasoning-phase elapsed time. The same rule
+  applies to `output → reasoning` and to any later transition;
+- **reset at every new model attempt.** Episode, numerator, clock and the reasoning-rate fallback are all cleared; two
+  calls separated by a tool or a retry never mix (§5 of the phase brief);
+- **while no model attempt is streaming (tool running or waiting for the next model) the value is `null`**, never a
+  stale or zero rate. A tool wait does **not** continue the cumulative decay: MiMo has no agentic tool equivalent, so
+  DSH keeps its own tool-state semantics and the next attempt starts a fresh clock;
+- **a stall decays hyperbolically and never freezes or jumps to zero.** The numerator stops moving while the
+  denominator advances; the value is never reset to `0` one second after the last delta, because there is no window
+  to leave;
+- **warm-up: at least 3 generated samples in the current episode** (`MIN_WARMUP_SAMPLES`) before any rate is
+  published from shape evidence. Until then the pill keeps the pending/elapsed presentation (an elapsed counter, no
+  number). Authoritative provider counters do not bypass this rule;
+- **first-output guard.** For the first 1000 ms of an output episode that has no valid positive rate of its own yet,
+  the last positive reasoning rate is reused rather than displaying a spurious non-positive value
+  (`FIRST_OUTPUT_GUARD_MS`). It never overwrites a valid positive output estimate, it expires after 1000 ms, and it
+  does not survive a tool wait, an attempt boundary or a turn boundary;
+- **UI refresh target: 100 ms** (10 presentation updates/s). Phase 9.2 selected 100 ms as a *fidelity* decision:
+  MiMo's metric sampling and its visible presentation are both ~100 ms. 200 ms, 50 ms (the Phase 5A winner) and 10 ms
+  remain reachable through the diagnostic override. The cadence has one home,
+  `DEFAULT_PRESENTATION_REFRESH_MS` in `src/client/live/cadence.js`, and it never changes the estimator;
+- **token evidence priority** (§6.1 below);
+- live TPS is normally `estimated` unless an exact streaming tokenizer/count is available; it always renders with `≈`.
 
-**Warm-up contract (frozen with test in Phase 3).** While the active attempt has been observed for less than the full
-window length, the value counts exactly the samples observed since the window opened and still divides by the full
-1000 ms. It therefore ramps up with observed evidence and never extrapolates a full-second rate that has not been
-measured; a new attempt's reset restarts warm-up from an empty window. Asserted by the `warm-up` test in
-`test/sliding-window.test.js`.
+**No trailing window exists anywhere in the rate path.** `DEFAULT_WINDOW_MS` and `SlidingWindowMeter` were removed in
+Phase 9.2; the presentation cadence bounds *presentation* only.
+
+### 6.1 Live token evidence priority
+
+1. **Usable authoritative in-stream provider counters.** DSH 0.1.7-rc.2 carries `StreamChunk { type: 'usage',
+   usage: TokenUsage }` on the transient plane (`dsh-agent-loop`'s `AssistantStreamAttempt.push` emits a frame for
+   every chunk, including `usage`, and the client fold republishes it as `assistant/live-chunk`). When a usage chunk
+   has been observed for the active attempt and its split is usable per the phase-evidence policy of §8.3.1, the
+   episode numerator is the counter **delta since the episode started** (`counter - baseline`), where the baseline is
+   the counter snapshot taken when that episode began. A usage chunk arriving *inside* an episode never retroactively
+   explains it, because the counter value at the episode's start was never observed; that episode keeps its shape
+   magnitude.
+2. **Generated-delta shape weights.** Otherwise the numerator is the episode's accumulated `sample.tokens ??
+   sample.weight` — the same evidence the project has always accepted. No client-side tokenizer is used, and
+   `outputTokens + reasoningTokens` is never computed: `reasoningTokens` is already included in `outputTokens`, so the
+   output numerator is `outputTokens - reasoningTokens` when the split is usable.
+
+When the provider counter contradicts the observed stream phases, the existing phase-evidence consistency policy
+applies (§8.3.1) and the magnitude falls back to the shape estimate: an exact phase split is never claimed over a
+contradicted counter.
 
 **Approximation is mandatory.** Live TPS carries `≈` in every rendering (§11.4/§11.5): no live value may be presented
 without the approximate marker.
@@ -185,6 +240,18 @@ Never compute:
 
 Tool time and between-call waiting time are excluded from both denominators.
 
+**Multi-attempt aggregation is ratio-of-sums across attempts (Phase 9.2).** The MiMo semantics apply *within* one
+model attempt; DSH's agent semantics apply *across* attempts. The turn is never divided from its first attempt to its
+last settlement, because that would charge tool waits and inter-attempt waits to the model:
+
+```
+reasoning TPS = Σ(reasoning token magnitude of each contributing attempt)
+              / Σ(reasoning phase-episode wall durations of those attempts)
+
+output TPS    = Σ(non-reasoning output token magnitude)
+              / Σ(output phase-episode wall durations)
+```
+
 ### Phase-duration policy
 
 DeepSeek must implement and test one deterministic policy for phase duration using timestamped generated deltas. Required properties:
@@ -195,20 +262,46 @@ DeepSeek must implement and test one deterministic policy for phase duration usi
 4. reasoning and output durations must not double-count the same interval;
 5. one-delta and zero-duration edge cases must not produce division by zero or fake infinite TPS.
 
-**Implemented policy.** Within one attempt, sort non-empty generated deltas by timestamp; attribute each inter-delta interval to the phase of the *earlier* delta. The trailing interval — from the last non-empty model-producing delta to the attempt's durable settlement — is **not** charged to any phase.
+**Implemented policy (Phase 9.2, superseding the Phase 2 inter-delta policy).** Within one attempt, cut the ordered
+generated deltas into contiguous **phase episodes** and measure each as `episodeEnd - episodeStart`, where
 
-**Frozen on measured evidence (Phase 2).** The trailing-interval branch was decided by measuring ten real attempts across `fixtures/dsh-turns/`:
+```
+episodeStart = the episode's first generated sample
+episodeEnd   = the first generated sample of the next episode
+             | the attempt's settlement instant, for the terminal episode
+```
 
-| Observation | Measurement |
-|---|---|
-| tail (settlement − last model-producing delta) | 3 ms – 260 ms, mean 37.9 ms |
-| gap from the stream's own `finish` chunk to the settlement | 1 ms – 8 ms |
-| longest attempt (33 849 ms of generation) | 18 ms tail |
-| interrupted attempt (no `finish` chunk) | 260 ms tail |
+Three consequences are normative:
 
-Every normally completed attempt ends its recorded stream with the model's own `finish` chunk, and the settlement lands 1–8 ms after that chunk. The settlement therefore trails the *stream*, not the decode loop, and the remaining interval is host commit and prefix-finalization work. That is also why the tail does not scale with generation length: a 33.8 s attempt has an 18 ms tail, while an interrupted 3.8 s attempt has a 260 ms tail because it must finalize a delivered prefix with no `finish` chunk to bound it.
+- **a stall inside an episode is charged to it** (the gap between two samples of one phase is model delivery time);
+- **the terminal generated-delta → attempt-settlement tail is charged to the terminal episode.** This is the
+  deliberate Phase 9.2 change. MiMo's completed rate is `outputTokens / (settlementTime - outputStartTime)`
+  (`docs/MIMO_RUNTIME_METRICS.md` §5.4), so the tail is model-attempt elapsed time under the definition the port
+  adopts; the old contract excluded it as host commit work;
+- **a duration that is not measurable is `null`, never `0`.** The terminal episode ends at the attempt's settlement
+  instant and **never before its own last generated sample**: a settlement stamped earlier than a delta that followed it
+  is clock skew, and shrinking a measured episode below the evidence it contains would let the summary rate exceed the
+  chart's own peak for the same attempt (`compressAttempts` refuses the same skew). When the resulting end is not later
+  than the episode's start — an un-settled attempt, or a single sample whose settlement coincides with it — the duration
+  is `null`, and a phase whose episodes are only partly measurable reports the measurable sum together with
+  `reasoningMeasuredEpisodes`/`reasoningEpisodeCount` so the quality axis can state that the denominator is short.
+  `null` plus non-zero tokens renders `—`, never a fabricated rate.
 
-Charging the tail would mix host overhead into the decode denominator for every attempt, and would matter most exactly where the numbers are least stable (short attempts: the tail is 17 % of an 18 ms span). Omitting it slightly under-counts generation time for very short final tails; that error is bounded by the measured tail and is the smaller of the two distortions. Reproduce with `node dev/measure-generation-tail.mjs`; assert with `test/generation-tail.test.js`.
+TTFT is excluded because an episode begins at its first generated sample. Tool time and inter-attempt time are
+excluded because this policy only ever sees one attempt's own samples and that attempt's own settlement instant.
+
+**Superseded evidence (Phase 2, preserved in `docs/IMPLEMENTATION_LOG.md`).** The old policy charged every inter-delta
+interval to the *earlier* delta's phase and excluded the trailing interval, on the measured grounds that the
+settlement trails the stream's own `finish` chunk by 1–8 ms and is therefore host commit work rather than decode work
+(tail range 3 ms – 260 ms across ten recorded attempts; the interrupted attempt's 260 ms tail is prefix
+finalization). The measurements remain true and are still asserted by `test/generation-tail.test.js`; what Phase 9.2
+changed is the decision about what the denominator means. Charging the tail is now deliberate, because the target
+statistic is MiMo's phase-episode wall time rather than an attributed inter-delta decode time.
+
+**Very short phases are not zeroed.** MiMo forces a final reasoning TPS of `0` when `thinkingDurationSec < 0.2`; that
+rule is coupled to MiMo's plausibility UI gate and is **not** ported. DSH publishes a rate whenever there is positive
+token evidence and a positive measurable episode duration, with its evidence quality attached; when the duration is
+genuinely unavailable it renders `—`.
 
 ## 8. Completed curve
 
@@ -216,83 +309,155 @@ The curve is mandatory but visible only in the completed card's hover/focus alte
 
 ### 8.1 X-axis
 
-Use compressed model-generation time. For every attempt with generated deltas:
+Use compressed model-attempt time. For every attempt with generated deltas:
 
 - attempt-local x=0 at first non-empty generated delta;
 - preserve wall-time distances between deltas inside the attempt;
-- attempt-local x=end at the **last** generated delta: nothing is allocated after it;
-- append the next attempt immediately after the previous attempt's last generated delta;
+- attempt-local x=end at the **terminal phase episode's end**: the attempt's settlement instant when one is known,
+  and its last generated delta otherwise;
+- append the next attempt immediately after the previous attempt's end;
 - allocate no x-axis width to tools, inter-attempt waits, or next-call TTFT.
 
-The third rule applies to the final attempt exactly as it applies to every other one. `curve.durationMs` is the sum of the attempts' own spans, so a vertex carrying a coordinate above it would be clamped onto `x = 100 %` by the view model's `xOf(timeMs, durationMs)` — several distinct instants collapsing onto one drawn x, which the SVG renders as a vertical stroke at the chart's right edge. An earlier revision gave the final attempt one extra window of sampled decay for exactly that reason; it was removed in Phase 7C.1 (§8.2, `test/curve-axis-endpoint.test.js`).
+The third rule applies to the final attempt exactly as it applies to every other one. `curve.durationMs` is the sum of
+the attempts' own widths, so a vertex carrying a coordinate above it would be clamped onto `x = 100 %` by the view
+model's `xOf(timeMs, durationMs)` — several distinct instants collapsing onto one drawn x, which the SVG renders as a
+vertical stroke at the chart's right edge.
 
-**The attempt's real endpoint is always a vertex.** The sampled instants of an attempt are the **union** of two sets: its own `sampleEveryMs` cadence ladder from local zero, and its last model-producing instant. Deduplicated and ascending, this is what makes an off-grid final delta visible — a call whose last delta arrives at 510 ms is sampled at `0, 250, 500, 510` — while leaving an on-cadence endpoint un-duplicated. No further cadence step is invented merely to place the anchor.
+**The attempt's own settlement tail is part of the attempt's width (Phase 9.2).** The terminal episode runs from its
+last generated delta to the attempt's settlement, so the tail is drawn as a decaying stretch — the numerator freezes
+while the denominator advances. A tool wait after the settlement still owns no width: the next attempt begins at the
+coordinate where the previous attempt's clock stopped, and only an *intra-attempt* silence has width.
+
+**The attempt's real endpoint is always a vertex.** The sampled instants of an attempt are the **union** of two sets:
+its own `sampleEveryMs` cadence ladder from local zero, and its end instant. Deduplicated and ascending, this is what
+makes an off-grid end visible — a call settling at 510 ms is sampled at `0, 100, 200, …, 500, 510` — while leaving an
+on-cadence endpoint un-duplicated. No further cadence step is invented merely to place the anchor.
 
 The curve is therefore a model-throughput diagnostic, not an end-to-end turn timeline.
 
-### 8.2 Y-axis and window
+### 8.2 Y-axis and statistic
 
-The curve is **one attempt-local trailing-one-second total throughput trace per model attempt**, sampled for rendering every 250 ms.
+The curve is **one attempt-local phase-cumulative throughput trace per model attempt**, sampled every
+`DEFAULT_SAMPLE_EVERY_MS` = **100 ms**.
 
-A vertex at attempt-local `t` therefore reports:
+A vertex at attempt-local `t` therefore reports the same estimator family the live pill publishes:
 
 \[
-\text{tps}(t) = \frac{1000}{1000}\sum_{s \in A,\; t-1000 < s.t \le t} s.\text{tokens}
+\text{tps}(t) = \left\lfloor \frac{\text{mass of the episode in force at } t \cdot 1000}{t - \text{first sample of that episode}} \right\rceil
 \]
 
-where the sum runs over **every generated sample of that attempt, whatever its phase** — reasoning deltas, text deltas and tool-call argument deltas alike. That is exactly what `LiveMeter` measures: it holds one `SlidingWindowMeter` per active attempt and feeds it every generated sample, using `streamingPhase` only to *label* the newest one. A completed curve vertex and a live pill reading at the same attempt-local instant are the same measurement (frozen in Phase 7C).
-
-The window is half-open on the left, `(t - 1000, t]`: a sample exactly one window old has left the measurement and a sample exactly at `t` is in it.
-
-**The window is measured per attempt, and the compressed axis is a coordinate only (frozen in Phase 6).** Concatenating attempts onto one x-axis removes the width of tools, inter-attempt waits and next-call TTFT. It does **not** concatenate the measurement window: each attempt's trace is computed on that attempt's own local clock and only then relabelled to the shared coordinate by its segment's `startMs`.
-
-Two attempts that share a compressed coordinate therefore share no window. The rejected revision rolled one window across the concatenated sample list, so the opening vertices of each attempt counted the previous attempt's trailing tokens: with attempt A measuring 100 tokens/s at its end and a tool then separating it from attempt B measuring 10, B's opening vertex read 110 and the turn peak was inflated by tokens that belonged to a finished call. `test/curve-attempt-boundary.test.js` reproduces the rejected pipeline verbatim and fails it.
-
-**Phase is a colour, not a rate (frozen in Phase 7C).** An earlier revision built one rolling series **per phase**, so at a reasoning-to-output transition the live pill showed `reasoning + output` while the reasoning line showed `reasoning` and the output line showed `output`; neither drawn line equalled the live measurement, and `peakTps` took the larger of two partial rates. Each vertex now carries `activePhase` — the phase of the latest generated sample at or before that instant, which is `LiveMeter.streamingPhase` restated — and the trace is cut into phase-coloured subruns. The rate is never partitioned. `test/curve-total-rolling.test.js` carries the cross-phase counterexample.
+where "the episode in force at `t`" is the maximal run of consecutive same-phase samples of that attempt containing
+the newest sample at or before `t`, and the mass is the calibrated/estimated magnitude of that episode's samples at or
+before `t`. Every generated sample counts toward the episode in force — reasoning deltas, text deltas and tool-call
+argument deltas alike — which is what `LiveMeter` measures. There is no trailing window and no smoothing beyond
+`Math.round`.
 
 Three consequences are normative:
 
-1. **Compressed coordinate ≠ statistical window.** The axis is continuous across an attempt boundary; the window is not.
-2. **The opening vertex is measured by the ordinary window.** An attempt's local zero *is* its first delta, so `(0 - 1000, 0]` contains it and no clamp is needed. Phase 6 briefly carried one and Phase 7 removed it: it fired at the opening of every *episode*, not only at an attempt's first, and readmitted samples the trailing definition had already evicted.
-3. **Every attempt draws only the coordinates it owns, and they end on its own last delta.** A tool wait, an inter-attempt wait and the next call's TTFT own no coordinate. Neither does the attempt's own post-generation decay: the final attempt is not a special case, and no attempt receives synthetic width merely for being last. This is why the completed trace is narrower than one window past a short call's last delta, and why a live pill reading taken after the model stopped has no vertex to match it — the live pill measures wall time, the axis measures generation.
+1. **A phase transition resets the magnitude.** Each episode owns its own clock and numerator, so the trace steps down
+   at the boundary and climbs again on the new phase's own evidence. This *replaces* the old Phase 7C rule that a
+   phase was "merely a colour on one cross-phase rate": the phase is still encoded by colour, and it now also owns the
+   clock.
+2. **A stall decays hyperbolically and never reaches exactly zero by rule.** The numerator freezes, the denominator
+   advances, and the value recovers only as new tokens dilute the frozen stretch. MiMo's measured stall signature
+   (`docs/MIMO_RUNTIME_METRICS.md` §9) is reproduced deliberately. (The published series is `Math.round`ed, so a
+   sub-0.5 tokens/s quotient — a tiny episode mass over a long silence — publishes `0`; that is the rounding rule of
+   §3/§26, not a window reaching zero.)
+3. **The terminal episode is drawn to the attempt's settlement instant.** The tail is model-attempt elapsed time
+   under the MiMo definition; tool waits and inter-attempt waits still own no coordinate.
 
-**Phase ordering inside one instant follows the authoritative stream order.** `activePhase` is read from the newest sample at or before a vertex, and when a reasoning delta and a text delta share an instant, "newest" is decided by the order the model's stream delivered them in — DSH's transient frame index and its durable compact stream member order, which `compressAttempts` publishes per sample as `sampleOrder`. The order is evidence, and it is what `LiveMeter.streamingPhase` reports, because that is the phase of the last accepted sample. An earlier revision broke the tie with a fixed phase hierarchy instead (`reasoning` before `output`), which made the completed label disagree with the live pill for a stream delivered text-then-reasoning. Order changes **no magnitude** — a window holds every sample at an instant however they are sequenced — so only the label moves (`test/curve-stream-order.test.js`).
+**The published series is capped at 200 points** (`MAX_SERIES_POINTS`). A series of 200 points or fewer is published
+unchanged; a longer one is resampled to exactly 200 points evenly spaced in time across the full span, each target
+taking the nearest raw sample, with no interpolation — MiMo's externally measured rule
+(`docs/MIMO_RUNTIME_METRICS.md` §7). The cap is a stored-series fidelity decision: `peakTps` is the maximum of this
+published series, exactly as MiMo's `peakTps` is the maximum of its published series.
 
-**Summary rates are a different metric.** Reasoning TPS (§7) and output TPS (§7) are phase **averages**: a phase's token total over that phase's measured active generation time. The curve is an attempt-local trailing one-second throughput trace, colour-coded by active phase. They are not two renderings of one number, and neither is derivable from the other.
+**The statistic is measured per attempt, and the compressed axis is a coordinate only.** Concatenating attempts onto
+one x-axis removes the width of tools, inter-attempt waits and next-call TTFT. It does **not** concatenate the episode
+clocks: each attempt's trace is computed on that attempt's own local clock and only then relabelled to the shared
+coordinate by its segment's `startMs`.
 
-### 8.2.1 An attempt is one trace, and a stall is a value on it (frozen in Phase 7C)
+Two attempts that share a compressed coordinate therefore share no episode clock. A concatenated estimator would let
+the opening vertices of each attempt inherit the previous attempt's trailing tokens: with attempt A measuring 100
+tokens/s at its end and a tool then separating it from attempt B measuring 10, B's opening vertex would read 110 and
+the turn peak would be inflated by tokens that belonged to a finished call.
+`test/curve-attempt-boundary.test.js` reproduces the rejected pipeline verbatim and fails it.
 
-A model call is drawn as **one** continuous trace. A silence inside it — the model delivered nothing for longer than the window — is a stretch of that trace on which the trailing rate reads zero, and it is drawn at full width: an intra-attempt stall is a throughput fact the chart exists to show.
+**Live pill and completed curve are the same estimator family, with different evidence.** The live pill publishes the
+episode rate from whatever evidence is currently available (in-stream counter or shape weight, subject to the warm-up
+and guard rules of §6); the completed curve is recomputed at settlement from the calibrated allocation, which may
+raise the evidence quality. Exact numeric equality between a historical live screen value and a post-settlement
+reconstructed curve vertex is therefore **not** required. What must be equal is the estimator definition: cumulative
+phase average, phase-local clocks, `Math.round`, attempt-local.
 
-The earlier revision instead partitioned each phase's samples into **episodes** by the rule "a gap longer than one window separates them", gave every episode its own run with its own one-window tail, and drew a blank region between them. That rule answers where a *phase* has evidence, and it was being applied to the *drawing*, with three consequences:
+**Phase ordering inside one instant follows the authoritative stream order.** `activePhase` is read from the newest
+sample at or before a vertex, and when a reasoning delta and a text delta share an instant, "newest" is decided by the
+order the model's stream delivered them in — DSH's transient frame index and its durable compact stream member order,
+which `compressAttempts` publishes per sample as `sampleOrder`. The order is evidence, and it is what
+`LiveMeter.streamingPhase` reports, because that is the phase of the last accepted sample. Order decides which
+episode a simultaneous pair belongs to — and therefore its label and its clock — never a magnitude the evidence does
+not contain (`test/curve-stream-order.test.js`).
+
+**Summary rates are a different metric.** Reasoning TPS (§7) and output TPS (§7) are turn-level ratios of sums over
+phase-episode wall durations. The curve is an attempt-local phase-cumulative trace, colour-coded by active phase. They
+are not two renderings of one number, and neither is derivable from the other.
+
+### 8.2.1 An attempt is one trace, and a stall is a value on it
+
+A model call is drawn as **one** continuous trace. A silence inside it is a stretch of that trace on which the
+cumulative rate decays, and it is drawn at full width: an intra-attempt stall is a throughput fact the chart exists to
+show.
+
+The earlier revision partitioned each phase's samples into **episodes** by the rule "a gap longer than one window
+separates them", gave every episode its own run with its own one-window tail, and drew a blank region between them.
+That rule answers where a *phase* has evidence, and it was being applied to the *drawing*, with three consequences:
 
 - a single model call could appear as several disconnected traces;
-- the stall was drawn as a hole rather than as a decay, so a reader saw "no data" where the data says "zero";
+- the stall was drawn as a hole rather than as a decay, so a reader saw "no data" where the data says "decaying";
 - each run was measured over its own phase, which is the cross-phase defect of §8.2.
 
-**Tool waits and inter-attempt waits are different, and remain different.** They own no coordinate at all: the axis stops at the attempt's own bound and the next attempt begins at that same coordinate. Only a silence *inside* an attempt has width.
+Phase 9.2 reintroduces episodes — as the *statistical* unit, not as a drawing unit. An episode is a stretch of one
+label inside one attempt, the trace remains continuous across it, and the run structure stays what it was: a
+phase-coloured slice of the same trace whose vertices are shared at the seam.
 
-A phase that produced nothing has no run. That is an absence of evidence, and it is never drawn as a flat zero line: "never reasoned here" and "reasoning throughput fell to zero" are different facts.
+**Tool waits and inter-attempt waits are different, and remain different.** They own no coordinate at all: the axis
+stops at the attempt's own end and the next attempt begins at that same coordinate. Only a silence *inside* an
+attempt has width.
 
-### 8.2.2 Where a phase boundary is drawn (frozen in Phase 7C, restated in Phase 7C.1)
+A phase that produced nothing has no run. That is an absence of evidence, and it is never drawn as a flat zero line:
+"never reasoned here" and "reasoning throughput fell to zero" are different facts.
 
-`activePhase` persists until new phase evidence arrives, so **every** vertex of a trace carries a phase. The maximal stretches of one label are therefore contiguous — `next.first === stretch.last + 1` — and a tone change has no silence in it to divide.
+### 8.2.2 Where a phase boundary is drawn
 
-The cut is the outgoing stretch's **own last labelled vertex**. The incoming coloured path opens on that same vertex, and the next vertex carries the new phase, so:
+`activePhase` persists until new phase evidence arrives, so **every** vertex of a trace carries a phase. The maximal
+stretches of one label are therefore contiguous — `next.first === stretch.last + 1` — and a tone change has no silence
+in it to divide.
 
-- no horizontal gap is introduced at a tone change: the two subpaths meet at one instant, one measured rate, one object;
-- no run claims coordinates its own phase did not produce, because a silence inside one phase is a stretch of zero-valued vertices that all carry that phase and are drawn in its tone at full width.
+The cut is the outgoing stretch's **own last labelled vertex**. The incoming coloured path opens on that same vertex,
+and the next vertex carries the new phase, so:
 
-The invariants, asserted in `test/curve.test.js`, `test/curve-trace-matrix.test.js` and `test/curve-axis-endpoint.test.js`:
+- no horizontal gap is introduced at a tone change: the two subpaths meet at one instant, one measurement, one object;
+- no run claims coordinates its own phase did not produce, because a silence inside one phase is a stretch of decaying
+  vertices that all carry that phase and are drawn in its tone at full width.
+
+The invariants, asserted in `test/curve.test.js`, `test/curve-trace-matrix.test.js` and
+`test/curve-axis-endpoint.test.js`:
 
 ```
 runs[i].endIndex === runs[i + 1].startIndex
 sum(runs[i].pointCount) === points.length + (runs.length - 1)
 ```
 
-An earlier revision described this cut as "the midpoint of the label change, rounded down", and computed it as `Math.floor((stretch.last + next.first) / 2)`. For a trace whose every vertex is labelled, `next.first` **is** `stretch.last + 1`, so that expression always evaluated to `stretch.last` — the same index. The formula was correct and its description was not: no real trace could produce the non-adjacent phase stretches the "midpoint of a long silence" wording presupposed. Phase 7C.1 removed the formula and states the rule directly. The seam itself is unchanged.
+An earlier revision described this cut as "the midpoint of the label change, rounded down", and computed it as
+`Math.floor((stretch.last + next.first) / 2)`. For a trace whose every vertex is labelled, `next.first` **is**
+`stretch.last + 1`, so that expression always evaluated to `stretch.last` — the same index. The formula was correct
+and its description was not: no real trace could produce the non-adjacent phase stretches the "midpoint of a long
+silence" wording presupposed. Phase 7C.1 removed the formula and states the rule directly. The seam itself is
+unchanged.
 
-The shared vertex is one measurement, not two: the rate had no phase partition to reset. It is charged to both subpaths by the render budget of §8.5, because both do emit it.
+The shared vertex is one measurement, not two, and it is charged to both subpaths by the render budget of §8.5,
+because both do emit it. It is also the vertex at which the statistic resets: the outgoing run's last value belongs to
+the outgoing episode, the incoming run's first value is the new episode's opening `0`.
 
 ### 8.3 Calibration
 
@@ -374,7 +539,7 @@ An **absent** `reasoningTokens` is deliberately not in that table. It is `split 
 
 `aggregate.temporalAllocationMode` is the weakest mode among the contributing attempts, and each attempt carries its own. If an impossible provider split is observed, the attempt is `total-anchored` as long as `outputTokens` itself is valid.
 
-**What the fallback may and may not do.** On a contradicted split the attempt falls back to one common factor over every observed sample, which is the same mathematics already used when `reasoningTokens` is absent. It preserves the authoritative total, the observed temporal shape, the observed phase labels, tool-call argument samples and the Phase 7C total rolling window. It must not invent a sample for the missing phase, must not drop the missing phase's tokens, and must not assign zero tokens to a phase the stream really recorded.
+**What the fallback may and may not do.** On a contradicted split the attempt falls back to one common factor over every observed sample, which is the same mathematics already used when `reasoningTokens` is absent. It preserves the authoritative total, the observed temporal shape, the observed phase labels, tool-call argument samples and the attempt-local phase-episode structure of §8.2. It must not invent a sample for the missing phase, must not drop the missing phase's tokens, and must not assign zero tokens to a phase the stream really recorded.
 
 **The two claims stay separately available.** A provider that reports `outputTokens = 100, reasoningTokens = 70` over a stream of output deltas only is still a provider that *said* reasoning was 70 and non-reasoning 30. That summary statement is retained in `attemptBreakdown[].phaseTokens` and in `.phaseEvidence.contradictions[].provider`; what is refused is publishing it as the curve's phase allocation, because the curve cannot place 70 reasoning tokens at timestamps that do not exist. Where the derived non-reasoning count would be negative — the impossible split — neither phase is published, and `null` (rendered `—`) is preferred to a negative number or a clamped zero.
 
@@ -396,7 +561,7 @@ The token and split axes are not discarded — they govern the numbers printed b
 
 ### 8.5 Chart-wide render budget and peak retention (frozen in Phase 7A.1)
 
-The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_TOTAL` = 512, divided by `allocateRunBudgets` across every phase-coloured run of every attempt. `DEFAULT_MAX_POINTS` (512) bounds one run; a chart is not one run, and a long agent turn of dozens of calls with phase alternations would otherwise emit dozens of series of up to 512 vertices each. Downsampling is a drawing operation and never moves a reported statistic: `peakTps` is measured on the **full** trace before any allowance is applied, and the axis is scaled by that value.
+The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_TOTAL` = 512, divided by `allocateRunBudgets` across every phase-coloured run of every attempt. `DEFAULT_MAX_POINTS` (512) bounds one run; a chart is not one run, and a long agent turn of dozens of calls with phase alternations would otherwise emit dozens of series of up to 512 vertices each. Downsampling is a drawing operation and never moves a reported statistic: `peakTps` is read from the **published** (200-point-capped, §8.2) series before any render allowance is applied, and the axis is scaled by that value.
 
 **A visual run is a slice of its attempt's trace, and the slice's endpoints are its seams.** `downsampleRun` reserves both ends, so thinning a run can never drop the vertex it shares with its neighbour — which would reopen, as a blank horizontal gap, a tone change that is not a stall. `downsampleSeries` takes an optional `required` index set for the same purpose.
 
@@ -410,19 +575,34 @@ The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_
 
 **Two marker levels, because a chart of beads is not a chart of peaks.** An ordinary one-vertex run — a genuine one-measurement attempt — is drawn as a small, subdued dot (`0.24 × font`, opacity `0.75`). Only a singleton that **is** the published peak keeps the stronger marker (`0.42 × font`, opacity `1`), which is also the size of the peak dot itself, so the two coincide exactly rather than leaving a ring. `data-peak` carries the distinction to the stylesheet, and both tones resolve through DSH aliases so light and dark themes follow the host.
 
-**The printed peak and the placed peak dot are one measurement.** `curveViewModel.peak.value` is the full-series maximum, but `peak.x`/`peak.y` are taken only from a vertex that survived onto the chart *and* carries that same rate; when the peak-bearing run is not drawable they are `null`. The rejected behaviour took the position from whichever series led the *drawn* points, which after a starved peak printed `≈9,999` and placed the dot on a 400 tokens/s vertex — two different measurements one pixel apart. A missing dot is visibly missing; a dot on a weaker vertex is a false claim about where the chart's maximum was.
+**The printed peak and the placed peak dot are one measurement.** `curveViewModel.peak.value` is the published-series maximum, but `peak.x`/`peak.y` are taken only from a vertex that survived onto the chart *and* carries that same rate; when the peak-bearing run is not drawable they are `null`. The rejected behaviour took the position from whichever series led the *drawn* points, which after a starved peak printed `≈9,999` and placed the dot on a 400 tokens/s vertex — two different measurements one pixel apart. A missing dot is visibly missing; a dot on a weaker vertex is a false claim about where the chart's maximum was.
 
 ## 9. Peak TPS
 
-`peakTps` is the maximum value of the **full** attempt-local total rolling trace across every attempt, computed before any downsampling. It is the maximum over those traces, never their sum and never their average: the turn's peak rate is the fastest any single call ran, not a quantity assembled from two calls. It is never the maximum of a per-phase line, because no per-phase line exists (§8.2).
+`peakTps` is the maximum value of the **published** attempt-local phase-cumulative series across every attempt. It is
+the maximum over those series, never their sum and never their average: the turn's peak rate is the fastest any single
+call ran, not a quantity assembled from two calls. It is never the maximum of a per-phase line, because no per-phase
+line exists (§8.2).
+
+**"Published" is load-bearing (Phase 9.2).** The peak is taken after `capSeriesPoints`, which is MiMo's own
+definition: MiMo's `peakTps` is the maximum of its published series, not of the raw one
+(`docs/MIMO_RUNTIME_METRICS.md` §7). A value the 200-point resampling skips is a value the card does not report. The
+**render budget** is a different matter and still may not move the number: `allocateRunBudgets`/`downsampleRun` thin
+the drawing after the peak is read.
+
+**There is no 1564 clamp.** MiMo's display ceiling is a MiMo-Ultra product decision; the DSH plugin must remain
+capable of measuring faster future models, so values above 1564 survive into the published series and into the peak.
 
 Label it as the peak of the shape-estimated series, not as a provider-certified instantaneous maximum. Per-delta allocation is reconstructed and, where usage exists, calibrated to an aggregate; a calibrated vertex is not a provider-exact local count. The peak therefore inherits `temporalShapeQuality` and never exceeds `reconstructed`, and it renders with `≈` at every quality level.
 
-The independent check is a test-only brute force (`test/curve-reference-window.test.js`): for every instant on every attempt's reference grid, sum the calibrated sample tokens strictly inside `(t - 1000, t]` across **all** phases, reset at every attempt, and take the maximum. `curve.peakTps` must equal it. The production sampler is not used on either side of that comparison.
+The independent check is a test-only reference (`test/curve-reference-cumulative.test.js`): for every instant on every
+attempt's reference grid, recompute the episode in force and its cumulative average from the calibrated samples,
+reset at every phase transition and every attempt, and take the maximum of the capped series. `curve.peakTps` must
+equal it. The production sampler is not used on either side of that comparison.
 
-**`peak >= mean` is not an invariant.** An earlier phase's report used `generatedTokens / curveSpan` as a mean and argued the peak must exceed it. It must not be frozen as a test: a one-second rolling rate is normalised to a fixed window, a phase average uses a different active-duration denominator, a very short attempt can have a phase average above its own one-second-window rate, and combined token totals and phase-specific denominators are not interchangeable. The calibrated-sample reference above is the right check; the mean is at most a sanity observation on one turn.
+**`peak >= mean` is not an invariant.** An earlier phase's report used `generatedTokens / curveSpan` as a mean and argued the peak must exceed it. It must not be frozen as a test: a cumulative phase average uses an episode-local denominator, a very short episode can have an average above the attempt's own overall rate, and combined token totals and phase-specific denominators are not interchangeable. The calibrated-sample reference above is the right check; the mean is at most a sanity observation on one turn.
 
-The peak is a **number** and, when the chart is drawn, a **position**. The number is fixed by the trace alone and no rendering decision may change it; the position exists only if the run carrying that number survived the chart-wide budget of §8.5, and it is then that very measurement rather than the strongest one that happened to be drawn. `peakRetained` and a `null` position are the two ways the chart says the maximum is not on it.
+The peak is a **number** and, when the chart is drawn, a **position**. The number is fixed by the published trace alone and no rendering decision may change it; the position exists only if the run carrying that number survived the chart-wide budget of §8.5, and it is then that very measurement rather than the strongest one that happened to be drawn. `peakRetained` and a `null` position are the two ways the chart says the maximum is not on it.
 
 ## 10. Total elapsed time
 
@@ -500,7 +680,14 @@ snapshot.quality = {
 
 ### 11.5 Live values
 
-Live TPS is `estimated` unconditionally: it is a shape weight inside a one-second window, anchored to nothing until the attempt settles. A future model-aware exact tokenizer would change that, and would have to be verified for the active provider/model route first (see §6).
+Live TPS is `estimated` unconditionally: it is a phase-cumulative average over shape weights (or, when an in-stream
+provider counter is usable, over a counter delta whose per-episode baseline is itself an observation), anchored to
+nothing authoritative until the attempt settles. A future model-aware exact tokenizer would change that, and would
+have to be verified for the active provider/model route first (see §6).
+
+While the current episode holds fewer than `MIN_WARMUP_SAMPLES` generated samples the value is `unavailable` — no rate
+is published at all — and the pill shows the episode's elapsed counter. The first-output guard of §6 republishes the
+last positive reasoning rate for at most 1000 ms; that value is still `estimated`.
 
 ### 11.6 Provider/stream consistency guard
 
@@ -531,7 +718,9 @@ When any conflict fires:
    resolved by discarding the stream evidence, never resolved by inventing a sample for the missing phase.
 
 A conflict never removes the attempt's authoritative total from the curve, never changes the observed per-delta
-positions or phase labels, and never lifts `peakTps` above `≈` — which was already its ceiling at every mode.
+positions or phase labels, and never lifts `peakTps` above `≈` — which was already its ceiling at every mode. On the
+live path the same policy decides whether an in-stream usage counter may supply the episode numerator (§6.1): a
+contradicted split falls back to the shape magnitude rather than claiming an exact phase split.
 
 A `reasoningTokens === 0` report **without** reasoning stream evidence (tool-argument-only attempts, e.g. `t4` step 2)
 is consistent and keeps an `exact` split. So is an **absent** `reasoningTokens`, which is `split unavailable` rather
@@ -614,7 +803,7 @@ The card a reload produces must equal the card the live session produced. This i
 
 The client window publishes four change kinds, and `replace` means the **complete contiguous window was swapped** — initial snapshot, reload, reconnect. It is a new *generation*: the rows it publishes are that session's authoritative evidence, and whatever the superseded window contributed is not evidence about the same generation. `SessionEventFeed` therefore drops its dedupe sets, its open-turn and open-attempt state and its turn-ordering watermarks, and replays the replacement window from scratch.
 
-The metric state must observe the same boundary, because the evidence lives there and not in the feed: `TurnTelemetryStore` holds the attempts, samples, usage and tool intervals (`turns`), and the rolling window, frozen TTFT stage, turn start and running tool set (`liveBySession`). Replaying a window into a store that still owns the previous generation re-enters attempts that already exist — `beginTurn` is idempotent by design, so a re-observed durable `turn/start` does not discard samples, and `beginAttempt` returns the existing attempt for a known `attemptId` — and each replayed delta is appended rather than replacing it. The turn then reports one sample per republication of the window: tokens, curve, TTFT-adjacent evidence and the completed card all follow.
+The metric state must observe the same boundary, because the evidence lives there and not in the feed: `TurnTelemetryStore` holds the attempts, samples, usage and tool intervals (`turns`), and the live episode, frozen TTFT stage, turn start and running tool set (`liveBySession`). Replaying a window into a store that still owns the previous generation re-enters attempts that already exist — `beginTurn` is idempotent by design, so a re-observed durable `turn/start` does not discard samples, and `beginAttempt` returns the existing attempt for a known `attemptId` — and each replayed delta is appended rather than replacing it. The turn then reports one sample per republication of the window: tokens, curve, TTFT-adjacent evidence and the completed card all follow.
 
 `TurnTelemetryStore.rebaselineSession(sessionId)` is that boundary. It removes one session's turn records and its `LiveMeter`, and it is called **before** the presenter reset:
 

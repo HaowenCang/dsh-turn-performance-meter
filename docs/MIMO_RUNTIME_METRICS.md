@@ -493,3 +493,61 @@ The DSH column is not obviously worse on any row: it is finer in presentation, i
 information in the low-rate regime, and its completed rates are anchored to measured active
 generation time rather than to wall clock. That is the honest basis for the recommendation in the
 final report.
+
+---
+
+## 14. Phase 9.2 implementation decision (supersedes §13's STOP)
+
+Phase 9.2 is an explicitly authorized **semantic unfreeze**: the Phase 7C contract that live TPS must be a trailing-one-second rate and that the completed curve must use the same statistic was reopened, and the MiMo semantics in this document were adopted. §13's STOP is therefore closed, and option (1) of its two was taken — the completed curve's statistic was changed to match a phase-cumulative live pill — extended with the DSH-specific generalizations recorded below.
+
+### ADOPTED
+
+- **100 ms metric/presentation cadence.** `DEFAULT_PRESENTATION_REFRESH_MS` moved from 50 ms to 100 ms, and the
+  completed curve's raw sampling (`DEFAULT_SAMPLE_EVERY_MS`) from 250 ms to 100 ms, so DSH's readout and stored
+  series sit on the same grid as MiMo's (§3.2/§3.3). Data ingestion is unchanged: every model delta still enters
+  telemetry immediately.
+- **Cumulative phase-average live estimator.** `TPS(t) = generated token mass since the phase episode started /
+  elapsed wall time since that start`, `Math.round`ed (§5.1/§5.2).
+- **Phase-local reset.** Every phase transition restarts the episode's clock and numerator; the old phase's
+  denominator is never carried into the new one. DSH generalizes MiMo's fixed `reasoning -> output` order into
+  **phase episodes**, so `R R O O R R` produces three episodes and three clocks.
+- **Stall decay.** A silence freezes the numerator while the denominator advances, so the readout decays
+  hyperbolically and never reaches exactly zero by rule (§9).
+- **Settlement recomputation.** Completed rates are recomputed at attempt settlement from the authoritative
+  settlement token totals and the MiMo-style episode wall durations; the last live value is never reused, so
+  `last live value != final settled value` is expected and reproduced (§10).
+- **Cumulative phase-average curve family.** The completed curve uses the same estimator family as the live pill —
+  attempt-local, phase-episode clocks, `Math.round`, terminal episode drawn to settlement — with the published series
+  capped at 200 points by nearest-neighbour resampling (§7).
+
+### DELIBERATE DSH DIVERGENCES
+
+- **No 200 TPS lower visibility gate.** MiMo hides a rate below 200 tokens/s (§8.1). DSH models legitimately operate
+  below that — the user's observed turn is approximately 151/173 TPS — so adopting the gate would hide valid
+  measurements. The structurally useful half of the rule is kept instead: no rate is published before the episode
+  holds three generated samples.
+- **No 1564 ceiling.** MiMo clamps every published sample to 1564 (§7). That is a MiMo-Ultra product decision; the DSH
+  plugin must remain capable of measuring faster future models, so no clamp is applied and `peakTps` is the maximum of
+  the unclamped published series.
+- **No `< 0.2 s` forced-zero rule.** MiMo forces a final reasoning TPS of 0 when the reasoning duration is below
+  0.2 s (§5.3). That is coupled to MiMo's plausibility UI gate. DSH publishes a rate whenever there is positive token
+  evidence and a positive measurable episode duration, with its evidence quality attached; when the duration is
+  genuinely unavailable it renders `—` and never fabricates a zero.
+- **Tool waits hidden/excluded.** MiMo has no agentic tool wait. During actual tool execution DSH reports `tps: null`
+  as before and does **not** continue the cumulative decay across it; the next attempt starts a fresh clock.
+- **Multiple attempts aggregated by ratio-of-sums.** MiMo has one message per request; DSH turns contain several model
+  attempts separated by tools and retries. The turn's completed rates are `Σ tokens / Σ phase-episode wall durations`
+  across contributing attempts — MiMo semantics within an attempt, DSH agent semantics across them. A whole-turn
+  division from first attempt to last settlement is explicitly rejected because it would charge tool and inter-attempt
+  waits to the model.
+- **DSH explicit phase chunks replace MiMo marker inference.** MiMo infers the reasoning/answer boundary from start
+  and end markers inside one content stream (§2). DSH separates phases structurally (`reasoning-delta` vs
+  `text-delta`/`tool-call-delta`), so no marker parsing exists and the phase boundary is authoritative.
+
+### Evidence note
+
+The live token-evidence priority was verified against the local 0.1.7-rc.2 install rather than assumed: every
+`StreamChunk` — `usage` included — is published as a transient frame by `dsh-agent-loop`'s
+`AssistantStreamAttempt.push` and republished by the client fold as an `assistant/live-chunk` row. In-stream usage is
+therefore **not** settlement-only, and the live estimator prefers a usable provider counter over the shape weight for
+episodes that begin after the counter is known.

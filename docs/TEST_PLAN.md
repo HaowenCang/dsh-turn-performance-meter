@@ -207,27 +207,33 @@ Phase 7C additions (all in `npm run verify`). The two defect files were written 
   any of them degrades the **whole** join to the raw shape and reports every symptom rather than the first; the raw
   evidence is asserted unmutated by identity and by value; an empty attempt is carried through so the source's attempt
   list matches the turn's; and the source re-derives exactly the numbers `aggregateTurn` published;
-- `test/curve-total-rolling.test.js` — the cross-phase counterexample: one reasoning delta at 0 and one output delta at
-  500 against a 1000-token provider total. The rejected per-phase pipeline peaks at 500; the corrected total window
-  reads **1000** at that instant and so does the published peak. It then asserts the completed trace vertex for vertex
-  against `SlidingWindowMeter`'s rule restated independently, the `activePhase` label rule, and the shared seam;
+- `test/curve-phase-cumulative.test.js` (Phase 9.2) — the statistic itself: the 100 ms vertex ladder plus the appended
+  off-ladder end instant; the reasoning→output episode reset (the seam vertex reads `0` and the next vertex is the new
+  episode's own average); a stall's hyperbolic decay (frozen numerator, advancing denominator, strictly decreasing);
+  the attempt reset (a trace equals the same attempt measured alone); the terminal settlement tail; the 200-point
+  stored-series cap with nearest-neighbour selection, no interpolation and `peak == max(published series)`; and the
+  unclamped rates above 1564;
 - `test/curve-trace-matrix.test.js` — the fourteen-scenario acceptance matrix: reasoning-only, output-only,
-  reasoning→output within and beyond one window, reasoning→output→reasoning, a long internal stall decaying to zero and
-  resuming, a tool gap at zero width, a next attempt and a retry each resetting the window as a subpath break, a phase
-  boundary as a colour change rather than a statistical reset or an x gap, the global peak as the maximum over every
-  attempt-local total vertex, and the published provenance shape;
+  reasoning→output, reasoning→output→reasoning, a long internal stall decaying hyperbolically and resuming, a tool gap
+  at zero width, a next attempt and a retry each resetting the episode as a subpath break, a phase boundary as a colour
+  change *and* an episode reset, the global peak as the maximum over every attempt's published series, and the
+  published provenance shape;
 - `test/curve-long-agent-visual.test.js` — the visual regression, on a 24-call turn with 23 tools and a four-second
   stall inside every fourth call. It asserts two subpaths per call (`reasoning` then tool-call arguments) sharing their
   seam, a stall adding no subpath, zero singleton markers on the corrected chart, the chart staying inside
   `MAX_RENDER_POINTS_TOTAL`, the peak surviving on a drawn run, and — computed from the same fixture — the rejected
   episode-based rule needing strictly more subpaths and producing 18 markers for the same evidence;
-- `test/curve-reference-window.test.js` — rewritten around the total window. The reference is now the literal
-  definition over **all** phases, with the body ladder plus the one-step-shifted tail ladder and no episode partition;
-  the comparison is vertex by vertex in both directions (nothing invented, nothing missing), plus the structural
-  claims, plus the independent brute-force peak over every attempt;
-- `test/curve.test.js` — the pure sampler and reducer: the total window, the label-not-filter rule, a deterministic
-  tie-break when a reasoning and a text delta share an instant, the seam invariants of `visualRunsOf` (including a
-  gapped transition), `downsampleRun`'s seam protection at every budget, and `attemptTrace`'s two clocks;
+- `test/curve-reference-cumulative.test.js` (Phase 9.2, replacing the deleted `curve-reference-window.test.js`) — an
+  independent second algorithm that shares no code with `src/`: it walks left from the newest sample to the maximal
+  same-phase run and re-derives `Math.round(mass * 1000 / elapsed)` vertex by vertex, over a generated matrix of single
+  and paired attempts (steady, bursty, stalls, phase alternations, single-sample episodes, simultaneous timestamps,
+  zero-width attempts, settlements earlier/later than the last delta, estimated and calibrated magnitudes). It compares
+  the settled `curve.attempts[].points`, the pure `attemptTrace(...).points` and a direct
+  `cumulativePhaseTpsSeries` call, and asserts the compressed coordinates and each attempt's published integral;
+- `test/curve.test.js` — the pure sampler and reducer: the phase-cumulative statistic, the label-not-filter rule, a
+  deterministic tie-break when a reasoning and a text delta share an instant (the ordinal decides the episode as well as
+  the label), the seam invariants of `visualRunsOf`, `downsampleRun`'s seam protection at every budget, and
+  `attemptTrace`'s two clocks;
 - `test/curve-regression-matrix.test.js`, `test/curve-attempt-boundary.test.js`, `test/curve-episode-opening.test.js`,
   `test/curve-render-budget.test.js`, `test/curve-peak-priority.test.js`, `test/telemetry-store.test.js`,
   `test/runtime-robustness.test.js`, `test/completed-tree.test.js` — the existing suites, corrected where they encoded

@@ -18,15 +18,18 @@ provides two UI modes: a compact live meter during execution and a completed tur
 
 ## 1. What it does / 功能
 
-The statistical boundary is the whole **turn**, not a single model step. During generation the meter shows the current
-attempt's trailing one-second TPS with an `≈` marker; when no model decode is running it shows the stopwatch of
+The statistical boundary is the whole **turn**, not a single model step. During generation the meter shows the active
+attempt's **phase-cumulative TPS** — the current phase episode's generated token mass over the wall time since that
+episode began — with an `≈` marker, once the episode holds at least three samples; before that it shows the episode's
+elapsed counter rather than an unstable rate. When no model decode is running it shows the stopwatch of
 whatever is running instead (tool execution, inter-step wait, retry backoff) and never a stale rate. When the turn
 settles, the same seat switches to a static completed card carrying turn-level Reasoning TPS, Output TPS, Generated
 Tokens, TTFT, a tool summary and the model-call count; hovering the card or focusing it with the keyboard replaces the
 two TPS columns with the throughput curve.
 
-统计边界是整个 **turn**，而不是单个模型 step。生成期间实时组件显示当前活动 attempt 最近 1 秒的 TPS，并始终带 `≈`
-近似标记；非模型解码阶段（工具执行、步骤间隙、重试退避）显示正在进行的那个阶段各自的计时器，绝不显示过期的速率。
+统计边界是整个 **turn**，而不是单个模型 step。生成期间实时组件显示当前活动 attempt 的**相位累计 TPS**（当前相位片段自起点以来
+生成的 token 量除以该片段的墙钟时间），并始终带 `≈` 近似标记；该片段累计满 3 个样本之前，组件显示该片段的计时器而不是不稳定的速率。
+非模型解码阶段（工具执行、步骤间隙、重试退避）显示正在进行的那个阶段各自的计时器，绝不显示过期的速率。
 turn 结束后，同一位置切换为静态完成态卡片，承载 turn 级的思考 TPS、输出 TPS、生成 Tokens、首响应、工具摘要与模型调用
 次数；鼠标悬停或用键盘聚焦时，前两个 TPS 栏位被吞吐曲线替换。
 

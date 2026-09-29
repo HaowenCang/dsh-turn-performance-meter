@@ -40,8 +40,8 @@ The live component is driven by an explicit eight-state UI machine
 `transition` · `settled`. Every rendering decision comes from that machine plus
 the `LiveMeter` snapshot; the component never infers state from missing fields.
 Verified live in the running DSH client (Phase 3), with the presentation
-throttled to a single 50 ms ticker (Phase 5A; the constant lives in
-`src/client/live/cadence.js`).
+throttled to a single 100 ms ticker (Phase 9.2 moved the Phase 5A selection of 50 ms to 100 ms for MiMo fidelity; the
+constant lives in `src/client/live/cadence.js`).
 
 **Adopted turn boundary (`recovered`).** When the page attaches mid-turn — a reload, or a reconnect that produces a `replace` window — the open turn's
 `turn/start` row is normally outside the published tail. The boundary is then *derived* from the transient rows' own `turn` field and marked
@@ -77,7 +77,7 @@ Render a compact pill:
 ```
 
 - label = current phase of the active attempt (`思考` reasoning / `输出` output; tool-call arguments are output);
-- large/accent number = trailing 1-second current TPS for the active model attempt;
+- large/accent number = **phase-cumulative** TPS of the active attempt's current phase episode — the episode's token mass over the wall time since that episode began, rounded with `Math.round`. It is published only once the episode holds at least 3 generated samples; before that the pill shows the phase label and the episode's elapsed counter instead of a rate;
 - the approximate marker `≈` is **mandatory** — live TPS quality is `estimated` unconditionally;
 - right number = turn wall elapsed time from `turn/start` to now;
 - right-side numbers use tabular digits; `tokens/s` renders at a smaller unit size.
@@ -86,8 +86,9 @@ No chart appears during live streaming.
 
 ### 3.3 Tool execution
 
-When at least one tool is running, clear/freeze the live TPS: never a stale rate and never a forced `0 tokens/s`
-(tool execution is not model decode). The pill becomes the tool timer:
+When at least one tool is running, clear the live TPS: never a stale rate, never a forced `0 tokens/s`, and never a
+continuation of the cumulative decay across the tool wait (tool execution is not model decode). The pill becomes the
+tool timer:
 
 ```text
 pwsh · 2.31 s  |  17.9 s
@@ -124,8 +125,8 @@ neither.
 ## 3A. Presentation throttling
 
 Event ingestion is per-delta; rendering is a single presentation ticker per mounted meter at
-`DEFAULT_PRESENTATION_REFRESH_MS` = 50 ms (Phase 5A; 200 / 50 / 10 ms were measured in a browser and 50 ms was
-selected — see `IMPLEMENTATION_LOG.md`). The projected view is *state*: parent re-renders reuse the stored view, so
+`DEFAULT_PRESENTATION_REFRESH_MS` = 100 ms (Phase 9.2; the Phase 5A selection was 50 ms, and 200 / 100 / 50 / 10 ms
+remain reachable through the diagnostic override — see `IMPLEMENTATION_LOG.md`). The projected view is *state*: parent re-renders reuse the stored view, so
 the ticker — not the chat's update cadence — is the only writer of visible numbers. Each tick produces **exactly one**
 state update: the projection key includes the presentation instant, so the tick's view is always a new object and a
 second "force render" dispatch would be pure duplication. Ticks are destroyed on hide, unmount and HMR; a hidden meter
@@ -134,7 +135,7 @@ uses one coalesced zero-delay render per event burst. Deltas are never dropped t
 The ticker is a **live-view** resource. A completed card is static, so the ticker is stopped the moment the card
 appears and is never restarted for it: the card is projected once per incoming event and the projection is memoized by
 turn, so an unchanged settled turn returns the identical view object and React renders nothing. A settled session
-therefore holds no interval, no leading timer and no rolling value.
+therefore holds no interval, no leading timer and no live rate.
 
 ## 4. Completed default view
 
@@ -271,9 +272,12 @@ which is what `LiveMeter.streamingPhase` reports for the same stream.
 
 ### 6.2 What the curve is not
 
-The four summary metrics are unchanged by any of this. Reasoning TPS and output TPS are **phase averages** — a phase's
-token total over that phase's measured active generation time — and the curve is an attempt-local trailing one-second
-throughput trace. They are different diagnostics and are documented as such in `docs/METRICS_SPEC.md` §7 and §8.2.
+The four summary metrics are unchanged by any of this. Reasoning TPS and output TPS are **phase-episode ratios of sums** —
+a phase's token magnitude over that phase's measured episode wall time, summed across attempts — and the curve is an
+attempt-local phase-cumulative trace. They share one estimator family (phase-local clocks, `Math.round`, attempt-local)
+and remain different diagnostics: the summary is a turn-level ratio of sums, the curve is the per-instant trace, and the
+completed curve may improve its evidence quality at settlement. They are documented as such in `docs/METRICS_SPEC.md`
+§7 and §8.2.
 
 ## 7. Responsive behavior
 
