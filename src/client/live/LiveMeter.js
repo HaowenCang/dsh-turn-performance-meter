@@ -51,6 +51,8 @@ function stateLabelKey(view) {
   switch (view.kind) {
     case 'ttft': return 'ttft'
     case 'streaming': return view.phase === 'reasoning' ? 'thinking' : 'output'
+    /** The same phase label while the episode is still below its warm-up count. */
+    case 'warming': return view.phase === 'reasoning' ? 'thinking' : 'output'
     case 'tool': return 'tool'
     case 'waiting': return 'waiting'
     case 'transition': return 'transition'
@@ -102,6 +104,21 @@ function pillContent(view, label) {
         metric(formatApproxTps(view.tps, view.approximate), 'tokens/s', { tone: 'accent' }),
         ...elapsedRun(view),
       ]
+
+    /**
+     * The episode's warm-up: no rate is published until it has enough samples, so
+     * the pill shows the phase label and the episode's own elapsed counter. The
+     * element structure is the same as the `waiting` branch — label, stopwatch,
+     * turn elapsed — so the presentation stays inside the frozen visual design.
+     */
+    case 'warming': {
+      const parts = stopwatchParts(view.counterMs ?? 0)
+      return [
+        h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
+        metric(parts.value, parts.unit),
+        ...elapsedRun(view),
+      ]
+    }
 
     case 'tool':
       return [

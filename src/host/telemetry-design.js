@@ -21,8 +21,8 @@ import { compressAttempts } from '../core/time-axis.js'
 import { curveSource } from '../core/curve-source.js'
 import {
   DEFAULT_SAMPLE_EVERY_MS as CURVE_SAMPLE_EVERY_MS,
-  DEFAULT_WINDOW_MS as CURVE_WINDOW_MS,
   MAX_RENDER_POINTS_TOTAL,
+  MAX_SERIES_POINTS,
   MIN_MAX_POINTS,
   allocateRunBudgets,
   attemptTraces,
@@ -71,19 +71,18 @@ export function curveQuality(aggregate) {
 
 export class TurnTelemetryStore {
   /**
-   * @param {{estimateTokens?:Function, historyLimit?:number, windowMs?:number}} [options]
+   * @param {{estimateTokens?:Function, historyLimit?:number}} [options]
    */
   constructor(options = {}) {
     this.estimateTokens = options.estimateTokens ?? heuristicTokenWeight
     this.historyLimit = options.historyLimit ?? DEFAULT_HISTORY_LIMIT
     /**
-     * The trailing window a rate is measured over. It is a *metric* contract, not
-     * a refresh rate: nothing in `src/core` or `src/host` schedules presentation,
-     * and the only presentation cadence in the project lives in
-     * `src/client/live/cadence.js`. A `refreshMs` option was removed here in
-     * Phase 6 because it implied otherwise while driving no timer at all.
+     * A `windowMs` option and its field were removed in Phase 9.2 with the trailing
+     * window itself: the live rate is a phase-cumulative average and the completed
+     * curve is sampled at `CURVE_SAMPLE_EVERY_MS`. The only presentation cadence in
+     * the project still lives in `src/client/live/cadence.js`, and nothing here
+     * schedules anything.
      */
-    this.windowMs = options.windowMs ?? CURVE_WINDOW_MS
     /** @type {Map<string, object>} keyed by `sessionId::turn` */
     this.turns = new Map()
     /** @type {Map<string, LiveMeter>} one live meter per session, so sessions cannot share a window. */
@@ -97,7 +96,7 @@ export class TurnTelemetryStore {
   live(sessionId) {
     let meter = this.liveBySession.get(sessionId)
     if (meter === undefined) {
-      meter = new LiveMeter({ windowMs: this.windowMs })
+      meter = new LiveMeter()
       this.liveBySession.set(sessionId, meter)
     }
     return meter
@@ -197,17 +196,24 @@ export class TurnTelemetryStore {
    * attempt's authoritative usage without becoming a sample.
    *
    * The sample is stamped with the attempt it belongs to **before** it reaches the
-   * live meter. The meter's window is bound to one attempt and rejects a sample
+   * live meter. The meter's episode is bound to one attempt and rejects a sample
    * naming another one, and that guard is only reachable if the identity travels
    * with the sample: a late frame for an attempt the turn has already moved past
-   * therefore cannot enter the newer attempt's rolling rate, even though the closed
-   * attempt still keeps it for the completed curve.
+   * therefore cannot enter the newer attempt's cumulative rate, even though the
+   * closed attempt still keeps it for the completed curve.
    *
    * @returns {object|null} the accepted sample, or `null`
    */
   acceptChunk(record, attempt, { timeMs, chunk }) {
     if (chunk && chunk.type === 'usage' && chunk.usage) {
       attempt.usage = chunk.usage
+      /**
+       * An in-stream `usage` chunk is not a generated sample, but it is evidence
+       * the live estimator may use: the phase-cumulative numerator prefers an
+       * authoritative provider counter over the shape weight for the episodes
+       * that begin after the counter is known (`docs/METRICS_SPEC.md` §6).
+       */
+      this.live(record.sessionId).observeUsage({ attemptId: attempt.attemptId ?? null, usage: chunk.usage })
       return null
     }
     const sample = sampleFromChunk(timeMs, chunk, this.estimateTokens)
@@ -355,29 +361,27 @@ export class TurnTelemetryStore {
     const compressed = compressAttempts(source.attempts)
 
     /**
-     * The rolling series is one **attempt-local total trace** per model attempt.
-     * This ordering is the specification.
+     * The published series is one **attempt-local phase-cumulative trace** per model
+     * attempt. This ordering is the specification.
      *
      * The compressed clock concatenates attempts so a tool gap has no width, but a
-     * trailing one-second window is a property of one model call. Rolling one window
-     * across the concatenated list made the opening vertices of attempt B count
-     * attempt A's trailing tokens — the two numbers are drawn a single pixel apart
-     * and describe different calls, which is precisely the case a reader cannot
-     * detect by looking at the chart. `attemptTraces` measures each attempt on its
-     * own clock; `test/curve-attempt-boundary.test.js` carries the counterexample
-     * that the previous implementation fails.
+     * phase episode's clock is a property of one model call. Measuring across the
+     * concatenated list would credit the opening vertices of attempt B with attempt
+     * A's tokens — the two numbers are drawn a single pixel apart and describe
+     * different calls, which is precisely the case a reader cannot detect by looking
+     * at the chart. `attemptTraces` measures each attempt on its own clock;
+     * `test/curve-attempt-boundary.test.js` carries the counterexample that the
+     * previous implementation fails.
      *
-     * Within one attempt the trace is **total**: every generated sample counts,
-     * whatever its phase, which is what `LiveMeter` measures. Reasoning and output
-     * are visual phases of that one measurement, carried on each vertex as
-     * `activePhase`; they are not two rate definitions. The previous revision built
-     * a separate per-phase series for each, so at a reasoning-to-output transition
-     * the live pill showed the sum of both contributions while neither drawn line
-     * did, and `peakTps` took the larger of two partial rates.
+     * Within one attempt the trace is **one measurement per phase episode**: every
+     * generated sample counts toward the episode in force, whatever its phase, which
+     * is what `LiveMeter` measures. Reasoning and output own their own episode clocks
+     * and are carried on each vertex as `activePhase`; a phase transition therefore
+     * resets the magnitude rather than producing two partial rates of one window.
      */
     const traces = attemptTraces(compressed.segments, compressed.samples, {
-      windowMs: CURVE_WINDOW_MS,
       sampleEveryMs: CURVE_SAMPLE_EVERY_MS,
+      maxPoints: MAX_SERIES_POINTS,
       calibratedAttemptIds: calibratedIds,
     })
 
@@ -418,9 +422,11 @@ export class TurnTelemetryStore {
      * across a stretch where the model produced nothing is exactly the defect the
      * per-attempt structure exists to prevent.
      *
-     * `peakTps` below still reads the **full** series, and `downsampleRun`
+     * `peakTps` below still reads the **published** series — the attempt traces after
+     * the MiMo-style 200-point cap, not after this budget — and `downsampleRun`
      * independently guarantees the maximum survives into whatever budget it is
-     * given, so the budget can thin the drawing but never move a reported number.
+     * given, so the render budget can thin the drawing but never move a reported
+     * number.
      */
     const allocation = allocateRunBudgets(drawables, MAX_RENDER_POINTS_TOTAL)
     let cursor = 0
@@ -493,15 +499,15 @@ export class TurnTelemetryStore {
         calibratedTokens: trace.calibratedTokens,
         calibrated: trace.calibrated,
         /**
-         * The **unbudgeted** total trace, so a test or a diagnostic can read the
-         * series the peak was measured on. The renderer must use `runs`.
+         * The **unbudgeted** published trace — the capped MiMo-style series the peak
+         * is measured on. The renderer must use `runs`.
          */
         points: trace.points,
         /**
          * The attempt's own curve-source samples, on its attempt-local clock, exactly
-         * as the rolling window read them. They are the bridge between a printed token
-         * total and a drawn vertex, which is why they are published rather than left
-         * to be reassembled from the runs.
+         * as the phase-cumulative estimator read them. They are the bridge between a
+         * printed token total and a drawn vertex, which is why they are published
+         * rather than left to be reassembled from the runs.
          */
         samples: trace.samples,
         /** The attempt's budgeted phase-coloured subruns, in ascending time order. */
@@ -686,7 +692,12 @@ export class TurnTelemetryStore {
           temporalShapeQuality: aggregate.quality.temporalShapeQuality,
         },
         sampleEveryMs: CURVE_SAMPLE_EVERY_MS,
-        windowMs: CURVE_WINDOW_MS,
+        /**
+         * The stored-series cap the published points obey. There is no statistical
+         * window to publish beside it: the estimator is a phase-cumulative average,
+         * so `sampleEveryMs` is a sampling decision and the cap is a fidelity one.
+         */
+        maxSeriesPoints: MAX_SERIES_POINTS,
       },
     }
   }

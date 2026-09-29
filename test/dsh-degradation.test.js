@@ -17,7 +17,9 @@ import { accumulateLive, LiveTurnAccumulator, FRAME_ISSUE } from '../src/dsh/liv
 import { normalizeLiveChunk } from '../src/dsh/adapter.js'
 import { decodeStreamRecords } from '../src/dsh/stream-decoder.js'
 import { isTokenDelta } from '../src/core/delta-accounting.js'
+import { attributePhaseDurations } from '../src/core/phase-duration.js'
 import { curveSource } from '../src/core/curve-source.js'
+import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import { loadDerived, loadFixture } from './helpers/fixtures.js'
 import { durableSettledView, liveSettledView, metricTuple, runLivePath } from './helpers/equivalence.js'
 
@@ -367,7 +369,7 @@ test('an assistant/attempt settlement is kept as evidence and never claimed as a
   assert.equal(live[1].attemptOutcome, 'unknown')
 })
 
-test('a retried attempt sequence keeps both attempts and their separate windows', () => {
+test('a retried attempt sequence keeps both attempts and their separate episode clocks', () => {
   const fixture = loadFixture('t1-reasoning-tool-reasoning')
   const frames = fixture.transient.map(row => row.frame)
   const attemptIds = [...new Set(frames.map(frame => frame.attemptId))]
@@ -381,11 +383,11 @@ test('a retried attempt sequence keeps both attempts and their separate windows'
   const attempts = accumulator.attemptList()
   assert.deepEqual(attempts.map(a => a.attemptId), attemptIds, 'attempts keep their own identity and order')
   assert.equal(attempts.length, 2)
-  // Each attempt's samples stay inside that attempt: no window bridging.
+  // Each attempt's samples stay inside that attempt: no clock bridging.
   for (const attempt of attempts) {
     assert.ok(attempt.samples.every(sample => sample.attemptId === attempt.attemptId))
     const times = attempt.samples.map(sample => sample.timeMs)
-    assert.ok(Math.max(...times) - Math.min(...times) < 2000, 'an attempt window must not span the tool gap')
+    assert.ok(Math.max(...times) - Math.min(...times) < 2000, 'an attempt\'s samples must not span the tool gap')
   }
 })
 
@@ -501,7 +503,7 @@ test('a phase with tokens but no measurable interval yields a rate or nothing, n
   }
 })
 
-test('an attempt with one generated delta yields no duration rather than an infinite rate', () => {
+test('an attempt with one generated delta measures its settlement tail, and no settlement yields no rate', () => {
   const view = durableSettledView(withPatchedEvent(
     loadFixture('t1-reasoning-tool-reasoning'),
     event => event.type === 'assistant/message' && event.data.step === 2,
@@ -515,14 +517,50 @@ test('an attempt with one generated delta yields no duration rather than an infi
   ))
   const attempt = view.settled.attemptBreakdown.find(item => item.step === 2)
   assert.equal(attempt.sampleCount, 1)
-  assert.equal(attempt.outputMs, null, 'one sample has no inter-delta interval')
   assert.equal(attempt.outputTokens, 16, 'the provider total is still known')
-  // One attempt with no measurable interval makes the turn rate optimistic, so
-  // it is at best `estimated`, and the published value is finite — never NaN and
-  // never `Infinity` from a zero-length denominator.
-  assert.ok(['estimated', 'unavailable'].includes(view.settled.outputTpsQuality))
-  assert.equal(view.settled.outputTps === null || Number.isFinite(view.settled.outputTps), true)
-  assert.ok(Number.isNaN(view.settled.outputTps) === false)
+
+  /**
+   * Phase 9.2: the terminal episode runs from its first generated sample to the
+   * attempt's settlement, so a one-delta attempt **does** have a measurable
+   * duration — its settlement tail — and the rate stays finite instead of being
+   * fabricated from a zero-length interval. The expected duration is re-derived
+   * from the raw decoded evidence (settlement instant minus the delta's own
+   * timestamp), not read back from the engine.
+   */
+  const reconstructed = view.reconstructed.attempts.find(item => item.step === 2)
+  const generated = reconstructed.chunks.filter(entry => isTokenDelta(entry.chunk))
+  assert.equal(generated.length, 1)
+  const expectedOutputMs = reconstructed.settledAtMs - generated[0].timeMs
+  assert.ok(expectedOutputMs > 0, 'the settlement follows the single delta')
+  assert.equal(attempt.outputMs, expectedOutputMs,
+    'the terminal episode is the settlement minus the first sample of that episode')
+  assert.equal(attempt.outputEpisodeCount, 1)
+  assert.equal(attempt.outputMeasuredEpisodes, 1, 'and the only episode is measurable')
+  assert.equal(view.settled.outputTpsQuality, 'calibrated',
+    'a complete denominator no longer reads as optimistic')
+  assert.equal(Number.isFinite(view.settled.outputTps), true,
+    'a finite rate, never Infinity from a zero-length denominator')
+  assert.equal(Number.isNaN(view.settled.outputTps), false)
+
+  /**
+   * The degenerate form that remains: a terminal episode whose settlement was
+   * never observed is `null`, never `0` — "no evidence" and "measured zero
+   * duration" are different facts.
+   */
+  const episodes = attributePhaseDurations([{ timeMs: generated[0].timeMs, phase: 'output' }]).episodes
+  assert.equal(episodes.at(-1).durationMs, null, 'no settlement instant: unmeasurable')
+  assert.notEqual(episodes.at(-1).durationMs, 0)
+  assert.equal(episodes.at(-1).endMs, null)
+
+  const store = new TurnTelemetryStore()
+  const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
+  const stored = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
+  store.acceptChunk(record, stored, { timeMs: 100, chunk: { type: 'text-delta', index: 0, text: 'x' } })
+  const settled = store.endTurn(record, { timeMs: 200, status: 'interrupted' })
+  const entry = settled.attemptBreakdown[0]
+  assert.equal(entry.outputMs, null, 'an attempt that never settled reports no duration')
+  assert.notEqual(entry.outputMs, 0, 'null is "not measurable", never a measured zero')
+  assert.equal(settled.outputTps, null, 'and no rate is fabricated from it')
 })
 
 test('concurrent tools keep both individual durations and a non-double-counted union', () => {

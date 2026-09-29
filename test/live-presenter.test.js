@@ -106,7 +106,7 @@ test('pending-first-token projects the running TTFT stopwatch, never a rate', ()
   assert.equal('tps' in view, false, 'no rate exists before the first token')
 })
 
-test('streaming projects the trailing TPS with mandatory approximation', () => {
+test('streaming projects the cumulative TPS with mandatory approximation', () => {
   const presenter = startedPresenter([
     { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'reasoning', timeMs: 1300 },
   ])
@@ -118,7 +118,44 @@ test('streaming projects the trailing TPS with mandatory approximation', () => {
   assert.equal(view.quality, MetricQuality.ESTIMATED)
   assert.equal(view.approximate, true, 'live TPS is estimated unconditionally -> always ≈')
   assert.equal(view.elapsedMs, 14_300)
+  assert.equal(view.fallback, false, 'a rate the phase episode owns is not a fallback')
   assert.equal('curve' in view, false, 'live mode has no curve')
+
+  const guarded = presenter.project(streamingSnapshot({ activePhase: 'reasoning', fallback: true }), 14_300)
+  assert.equal(guarded.kind, 'streaming')
+  assert.equal(guarded.fallback, true, 'the first-output guard is carried through for diagnostics')
+})
+
+test('a streaming episode below its warm-up sample count projects warming, never a rate', () => {
+  const cases = [
+    { deltaPhase: 'reasoning', state: LiveUiState.STREAMING_REASONING, phase: 'reasoning' },
+    { deltaPhase: 'output', state: LiveUiState.STREAMING_OUTPUT, phase: 'output' },
+  ]
+  for (const { deltaPhase, state, phase } of cases) {
+    const presenter = startedPresenter([
+      { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: deltaPhase, timeMs: 1300 },
+    ])
+    const view = presenter.project({
+      turn: 4,
+      phase: 'streaming',
+      tps: null,
+      tpsQuality: MetricQuality.UNAVAILABLE,
+      activePhase: deltaPhase,
+      episodeElapsedMs: 450,
+      episodeSampleCount: 2,
+      warmupSamples: 3,
+      turnElapsedMs: 5200,
+    }, 5200)
+    assert.equal(view.kind, 'warming', `${deltaPhase}: below the warm-up count there is no rate`)
+    assert.equal(view.state, state)
+    assert.equal(view.turn, 4)
+    assert.equal(view.phase, phase)
+    assert.equal(view.counterMs, 450, 'the stopwatch reads the episode clock, not the turn clock')
+    assert.equal(view.samples, 2)
+    assert.equal(view.required, 3)
+    assert.equal(view.elapsedMs, 5200)
+    assert.equal('tps' in view, false, 'a warming view must not carry a rate key at all')
+  }
 })
 
 test('a streaming state without streaming meter evidence degrades to transition (no stale TPS)', () => {

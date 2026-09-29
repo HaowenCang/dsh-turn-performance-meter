@@ -1,37 +1,58 @@
 /**
- * Completed-turn TPS curve: one attempt-local trailing-one-second **total**
- * throughput trace per model attempt, segmented into visual phases.
+ * Completed-turn TPS curve: one attempt-local **phase-cumulative** throughput
+ * trace per model attempt, segmented into visual phases.
  *
- * The window and cadence are the same the live meter uses
- * (docs/METRICS_SPEC.md §8.2): a curve vertex at attempt-local `t` reports
+ * ## The statistic (Phase 9.2)
  *
- *     sum of every generated sample of that attempt with timestamp in (t - 1000 ms, t]
+ * A curve vertex at attempt-local `t` reports the same estimator family the live
+ * pill publishes (docs/METRICS_SPEC.md §8.2): the generated token mass of the
+ * **current phase episode** divided by the wall time elapsed since that episode
+ * began —
+ *
+ *     tps(t) = mass(samples of the episode at or before t)
+ *              / (t - first sample of that episode)
  *
  * across **all** phases — reasoning deltas, text deltas and tool-call argument
- * deltas alike. That is exactly what `LiveMeter` measures: it holds one
- * `SlidingWindowMeter` per active attempt and feeds it every generated sample,
- * using `streamingPhase` only to *label* the newest one. Reasoning and output are
- * therefore visual phases of one measurement, never two rate definitions.
+ * deltas alike — with the episode reset at every phase transition and every
+ * attempt boundary. It is rounded with `Math.round`, MiMo's observed rule. There
+ * is no trailing window anywhere in the rate path, and `DEFAULT_SAMPLE_EVERY_MS`
+ * is a sampling decision rather than a statistical one.
  *
- * Two different milliseconds live in this module and must not be conflated:
+ * Two consequences the old trailing statistic did not have, and both are
+ * deliberate:
  *
- *   - `DEFAULT_WINDOW_MS` (1000 ms) is the interval a rate is *measured* over.
- *     It is a definition, not a refresh rate;
- *   - `DEFAULT_SAMPLE_EVERY_MS` (250 ms) is how often that measurement is
- *     *recorded* for the completed chart. It is independent of the live
- *     presentation cadence in `src/client/live/cadence.js`: streaming a screen
- *     at 20 Hz does not make a one-second window any shorter, and a finer curve
- *     grid is a separate, separately-argued decision.
+ *   - **a stall decays hyperbolically.** The numerator freezes while the
+ *     denominator advances, so a silence inside one phase is visible as a
+ *     continuous decay that never reaches exactly zero (§8.2.1);
+ *   - **a phase transition resets the magnitude.** Each episode owns its own
+ *     clock, so the trace steps down at the boundary and climbs again from the
+ *     new phase's own evidence. The phase remains encoded by colour as well.
+ *
+ * The terminal episode may extend from its last generated delta to the attempt's
+ * settlement instant: that tail is model-attempt elapsed time under the MiMo
+ * definition (`docs/MIMO_RUNTIME_METRICS.md` §5.4). Tool waits and inter-attempt
+ * waits still own no coordinate at all on the compressed axis.
  *
  * Curve magnitudes are `estimated` before provider usage arrives and `calibrated`
- * afterwards; they are never `exact`. `peakTps` is the maximum of the **full**
- * rolling series — computed before any downsampling — and it must still be
- * labelled as an estimate, because a series sample is not a provider-certified
+ * afterwards; they are never `exact`. `peakTps` is the maximum of the
+ * **published** series — the series after `capSeriesPoints` — and it must still
+ * be labelled as an estimate, because a series sample is not a provider-certified
  * maximum (docs/METRICS_SPEC.md §9).
  */
 
-export const DEFAULT_WINDOW_MS = 1000
-export const DEFAULT_SAMPLE_EVERY_MS = 250
+export const DEFAULT_SAMPLE_EVERY_MS = 100
+
+/**
+ * Largest number of points one attempt's MiMo-style throughput series may store.
+ *
+ * MiMo resamples any longer raw series to exactly 200 evenly spaced points, each
+ * taken as the nearest raw sample and with no interpolation
+ * (`docs/MIMO_RUNTIME_METRICS.md` §7). The cap is a *stored-series* fidelity
+ * decision: the published peak is the maximum of this series, exactly as MiMo's
+ * `peakTps` is the maximum of its published series, so a value the resampling
+ * skips is a value the card does not report.
+ */
+export const MAX_SERIES_POINTS = 200
 
 /** Largest rendered series the SVG layer is allowed to receive. */
 export const DEFAULT_MAX_POINTS = 512
@@ -69,7 +90,7 @@ function assertPositive(value, label) {
  *
  * A sample that already carries the ordinal keeps it. One that does not takes its position
  * in the list it arrived in, which is the same fact stated by the array itself and is what
- * keeps a direct caller of `totalRollingTpsSeries` well defined.
+ * keeps a direct caller of `cumulativePhaseTpsSeries` well defined.
  */
 function ordinalOf(sample, index) {
   return Number.isFinite(sample?.sampleOrder) ? sample.sampleOrder : index
@@ -91,59 +112,56 @@ function ordinalOf(sample, index) {
  * Ordering by the ordinal reproduces the live semantics exactly, because the ordinal *is*
  * the live order. It does not weaken reproducibility: the ordinal is derived from the
  * stored evidence, not from which array the transport happened to hand the curve. And it
- * changes no number — a window holds every sample at an instant whatever their order — so
- * only the label moves (`test/curve-stream-order.test.js`).
+ * decides only which of two simultaneous samples is the newer one — the episode a vertex
+ * belongs to, and therefore its label — never a value the evidence does not contain
+ * (`test/curve-stream-order.test.js`).
  */
 
 /**
- * Rolling TPS trace of one attempt, over **every** generated sample of that attempt.
+ * Phase-cumulative TPS trace of one attempt, over **every** generated sample of that attempt.
  *
- * The window is half-open, `(t - windowMs, t]`: a sample exactly one window old has
- * left the measurement and a sample exactly at `t` is in it
- * (`docs/METRICS_SPEC.md` §8.1/§8.2). That is the convention `SlidingWindowMeter`
- * implements for the live pill, which is what makes a curve vertex and a live
- * reading comparable at the same attempt-local instant.
+ * Each vertex reports the cumulative phase average of the episode in force at that
+ * instant: the mass of the current phase episode at or before the vertex, divided
+ * by the wall time since that episode's first sample. The episode is the maximal
+ * run of consecutive samples carrying one phase, so it restarts at every phase
+ * transition — the number therefore steps down at a boundary and climbs again on
+ * the new phase's own evidence, and it decays hyperbolically (never to zero by
+ * rule) across a silence, because the numerator freezes while the denominator
+ * advances.
  *
- * **Every vertex uses one bound, including an opening vertex.** An attempt's local
- * zero *is* its first delta, so a reader may expect an opening vertex to need
- * rescuing from an empty window. It does not: at `localMs = 0` the ordinary bound
- * is `-windowMs`, and a sample at zero lies inside `(-windowMs, 0]`. The opening
- * delta is therefore included by the arithmetic rather than by a special case.
- * Phase 6 briefly carried a special case —
- * `localMs <= fromMs ? -Infinity : localMs - windowMs` — and Phase 7 removed it:
- * `fromMs` is an *episode* bound, the clamp fired at every episode opening, and it
- * readmitted samples the trailing definition had already evicted.
- *
- * **A phase is never filtered out.** The `phase` option the previous revision took
- * was the cross-phase defect: filtering by phase produced two partial rates where
- * the live meter produced one total. What a phase contributes here is the
- * `activePhase` **label** on each vertex — the phase of the latest generated sample
- * at or before that instant, which is `LiveMeter.streamingPhase` restated. The
- * label changes where the tone changes; it never changes the number.
- *
- * **The grid ends where the evidence ends.** Vertices run from `fromMs` on the
- * `sampleEveryMs` ladder to the last sample at or before `toMs`, and the attempt's own
- * final instant is appended when it does not fall on the ladder. Nothing is sampled
- * after it: a vertex past the last delta measures a window the model has stopped
- * feeding, and on the completed chart it would carry a coordinate larger than
- * `curve.durationMs` and be clamped onto `x = 100` — a vertical stroke at the right
- * edge that the evidence does not contain
+ * **The vertex grid.** Vertices run from `fromMs` on the `sampleEveryMs` ladder to
+ * `sampleEndMs` — the attempt's own end instant, which for the terminal phase is
+ * the attempt's settlement time — and that end instant is appended when it does not
+ * fall on the ladder. Nothing is sampled after it: a vertex past the attempt's end
+ * measures elapsed time the model never had, and on the completed chart it would
+ * carry a coordinate larger than `curve.durationMs` and be clamped onto `x = 100`
  * (`test/curve-axis-endpoint.test.js`).
  *
- * **One clock, one window.** This function has no notion of an attempt, so calling
+ * **The opening vertex carries no rate.** At the attempt's local zero the episode
+ * has just begun, so `elapsed == 0` and the vertex publishes `0` rather than a
+ * division. MiMo's own series never samples that instant — its first tick is 100 ms
+ * after the first content character — so this is the DSH anchor for an axis that
+ * must start where the attempt started, not a value MiMo publishes.
+ *
+ * **A phase is never filtered out.** What a phase contributes here is the
+ * `activePhase` **label** on each vertex — the phase of the latest generated sample
+ * at or before that instant, which is `LiveMeter.streamingPhase` restated — and its
+ * own episode clock. There is no per-phase filter that could produce two partial
+ * rates of one stream.
+ *
+ * **One clock, one attempt.** This function has no notion of an attempt, so calling
  * it across an attempt boundary bridges two model calls — the exact defect Phase 6
  * removed. Completed curves go through `attemptTraces`, which calls it once per
  * attempt; the concatenating overload here exists for callers that genuinely hold a
  * single uninterrupted stream.
  *
  * `fromMs`/`toMs`/`offsetMs` express "sample a bounded stretch of one attempt's
- * local clock" without weakening the above: the window is always measured on the
- * same coordinate the samples carry, and `offsetMs` only relabels the emitted
+ * local clock" without weakening the above: the episode structure is always measured
+ * on the same coordinate the samples carry, and `offsetMs` only relabels the emitted
  * `timeMs`. A bounded call therefore never reaches outside `[fromMs, toMs]`.
  *
  * @param {readonly object[]} samples samples carrying `activeTimeMs`, `phase` and `tokens`/`weight`
  * @param {{
- *   windowMs?:number,
  *   sampleEveryMs?:number,
  *   durationMs?:number,
  *   fromMs?:number,
@@ -156,10 +174,8 @@ function ordinalOf(sample, index) {
  *   activePhase:string|null, attemptId:string|null,
  * }[]}
  */
-export function totalRollingTpsSeries(samples, options = {}) {
-  const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS
+export function cumulativePhaseTpsSeries(samples, options = {}) {
   const sampleEveryMs = options.sampleEveryMs ?? DEFAULT_SAMPLE_EVERY_MS
-  assertPositive(windowMs, 'windowMs')
   assertPositive(sampleEveryMs, 'sampleEveryMs')
 
   const filtered = (Array.isArray(samples) ? samples : [])
@@ -185,35 +201,28 @@ export function totalRollingTpsSeries(samples, options = {}) {
     : (Number.isFinite(options.durationMs) ? Math.max(0, options.durationMs) : sampleEnd)
   const fromMs = Number.isFinite(options.fromMs) ? Math.max(0, options.fromMs) : 0
   /**
-   * `sampleEndMs` is where the attempt stops producing, and it is also the last instant the
-   * trace is sampled at. `toMs` bounds it from above so a bounded call still never reaches
-   * outside `[fromMs, toMs]`; the emitted endpoint is the last sample itself, so an off-grid
-   * final delta remains a vertex rather than being rounded to the cadence.
+   * `sampleEndMs` is where the attempt stops producing *or settles* — the terminal
+   * episode's own end instant — and it is also the last instant the trace is sampled
+   * at. `toMs` bounds it from above so a bounded call still never reaches outside
+   * `[fromMs, toMs]`.
    */
   const sampleEndMs = Number.isFinite(options.sampleEndMs)
     ? Math.max(0, options.sampleEndMs)
     : Math.max(0, Math.min(sampleEnd, toMs))
 
   const result = []
-  let left = 0
-  let right = 0
-  let total = 0
   /**
    * Vertex instants, built explicitly rather than by accumulating `+= every`:
    * floating-point error over a ten-minute turn would otherwise put the last vertex
    * off the grid it claims to be on.
    *
    * The set is the **union of the cadence ladder and the attempt's own end instant**.
-   * The ladder alone would drop a final delta that does not fall on the cadence — a
-   * delta at 510 ms would be sampled at 500 and the instant the model stopped
-   * producing would never be drawn. The end instant alone would drop the shape
-   * samples in between. Their union, deduplicated and ascending, is what makes the
-   * attempt's real endpoint an unconditional vertex while leaving the cadence intact
+   * The ladder alone would drop an end that does not fall on the cadence — an attempt
+   * settling at 510 ms would be sampled at 500 and the instant its clock stopped would
+   * never be drawn. The end instant alone would drop the shape samples in between.
+   * Their union, deduplicated and ascending, is what makes the attempt's real endpoint
+   * an unconditional vertex while leaving the cadence intact
    * (`test/curve-axis-endpoint.test.js`).
-   *
-   * The ladder starts at `fromMs`, so a run's opening vertex is drawn even when it
-   * produced a single delta. There is no second ladder: a vertex past `bodyEndMs`
-   * would be post-generation time and would be clamped onto the chart's right edge.
    */
   const instants = []
   const bodyEndMs = Math.max(fromMs, Math.min(sampleEndMs, toMs))
@@ -224,98 +233,162 @@ export function totalRollingTpsSeries(samples, options = {}) {
   }
   if (bodyEndMs > instants[instants.length - 1] + 1e-9) instants.push(bodyEndMs)
 
-  /** Index into `filtered` of the newest sample at or before `localMs`, or `-1`. */
+  /**
+   * The episode cursors. `newest` is the index of the newest sample at or before the
+   * current instant; the pair (`episodeStartIndex`, `episodePhase`) describes the
+   * maximal same-phase run that contains it, and `episodeMass` is that run's token
+   * mass so far. Both advance monotonically with `newest`, so the trace is linear in
+   * the sample count.
+   */
   let newest = -1
+  let episodeStartIndex = -1
+  let episodePhase = null
+  let episodeMass = 0
 
   for (const localMs of instants) {
-    while (right < filtered.length && filtered[right].activeTimeMs <= localMs) {
-      total += filtered[right].tokens ?? filtered[right].weight ?? 0
-      newest = right
-      right += 1
-    }
-    /**
-     * The lower bound is the trailing-window definition itself, uniformly:
-     * `(localMs - windowMs, localMs]`. There is no opening-vertex special case, and
-     * Phase 7 removed the one that existed.
-     *
-     * The removed clamp read `localMs <= fromMs ? -Infinity : localMs - windowMs`.
-     * It was written to keep an attempt's *first* vertex from reporting `0 tokens/s`
-     * on the delta the call opened with, on the reasoning that local zero is the
-     * attempt's opening delta and `(-windowMs, 0]` contains nothing. That reasoning is
-     * sound about the attempt and wrong about the coordinate: `localMs == fromMs` is
-     * true at **every** episode's first vertex, because `fromMs` is the episode bound.
-     * An attempt that fell silent for longer than one window produced a second
-     * episode, and at that episode's opening instant the bound collapsed to negative
-     * infinity and readmitted samples the trailing window had already evicted
-     * (docs/METRICS_SPEC.md §8.2). The clamp was also unnecessary for the case it was
-     * written for: at an attempt's local zero, `localMs - windowMs` is `-windowMs`, and
-     * a sample at zero lies inside `(-windowMs, 0]`.
-     *
-     * Both bounds are expressed on the **same** clock the samples carry: `offsetMs`
-     * relabels the emitted `timeMs` and must not enter this comparison, because
-     * folding it into the bound while the cursors stayed local is what once left a
-     * claim of 100 tokens/s on an instant whose only sample had already been evicted.
-     */
-    const lowerExclusive = localMs - windowMs
-    while (left < right && filtered[left].activeTimeMs <= lowerExclusive) {
-      total -= filtered[left].tokens ?? filtered[left].weight ?? 0
-      left += 1
+    while (newest + 1 < filtered.length && filtered[newest + 1].activeTimeMs <= localMs) {
+      newest += 1
+      const sample = filtered[newest]
+      const weight = sample.tokens ?? sample.weight ?? 0
+      const phase = sample.phase ?? null
+      /**
+       * A sample whose phase differs from the episode in force **opens** a new
+       * episode at its own instant: the previous phase's elapsed time and mass are
+       * not carried into it.
+       */
+      if (episodeStartIndex === -1 || phase !== episodePhase) {
+        episodeStartIndex = newest
+        episodePhase = phase
+        episodeMass = weight
+      } else {
+        episodeMass += weight
+      }
     }
     /**
      * The label comes from the newest sample at or before this instant, which is the
-     * same rule `LiveMeter.streamingPhase` applies. It is never evicted by the left
-     * cursor: a sample at or before `localMs` is strictly newer than
-     * `localMs - windowMs`, so it is inside the window whenever it exists.
+     * same rule `LiveMeter.streamingPhase` applies.
      */
+    if (newest < 0) {
+      result.push({
+        timeMs: offsetMs + localMs,
+        localMs,
+        tps: 0,
+        activePhase: null,
+        attemptId: null,
+      })
+      continue
+    }
+    const startMs = filtered[episodeStartIndex].activeTimeMs
+    const elapsed = localMs - startMs
     result.push({
       timeMs: offsetMs + localMs,
       localMs,
-      tps: Math.max(0, total) * 1000 / windowMs,
-      activePhase: newest >= 0 ? (filtered[newest].phase ?? null) : null,
-      attemptId: newest >= 0 ? (filtered[newest].attemptId ?? null) : null,
+      /**
+       * `Math.round` is MiMo's observed rule for every published rate. The opening
+       * vertex of an episode has no elapsed time yet and therefore no rate; `0` is
+       * the anchor the chart draws from, not a measured zero.
+       */
+      tps: elapsed > 0 ? Math.round(episodeMass * 1000 / elapsed) : 0,
+      activePhase: filtered[newest].phase ?? null,
+      attemptId: filtered[newest].attemptId ?? null,
     })
   }
   return result
 }
 
 /**
- * One attempt's total throughput trace, measured on its own clock and relabelled.
+ * Resample one published series to at most `maxPoints`, nearest-neighbour, no interpolation.
+ *
+ * This is the stored-series cap MiMo applies to its own throughput series
+ * (`docs/MIMO_RUNTIME_METRICS.md` §7): a series longer than the cap is reduced to
+ * **exactly** `maxPoints` points evenly spaced in time across the full span, each
+ * target taking the raw sample nearest to it. The selected entries are the source
+ * objects themselves — nothing is averaged, smoothed or invented, and a source
+ * sample may be selected twice when two targets fall closest to it.
+ *
+ * A series at or below the cap is returned unchanged (a copy of the array, same
+ * objects), so the cap never perturbs evidence that already fits.
+ *
+ * @param {readonly {timeMs:number}[]} series ascending in `timeMs`
+ * @param {number} [maxPoints] the stored-series cap
+ * @returns {object[]} at most `maxPoints` points, ascending, drawn from the input
+ */
+export function capSeriesPoints(series, maxPoints = MAX_SERIES_POINTS) {
+  const points = Array.isArray(series) ? series : []
+  if (!(Number.isFinite(maxPoints) && maxPoints >= 2)) {
+    throw new TypeError('maxPoints must be a finite number >= 2')
+  }
+  if (points.length <= maxPoints) return points.slice()
+
+  const first = Number.isFinite(points[0]?.timeMs) ? points[0].timeMs : 0
+  const last = Number.isFinite(points[points.length - 1]?.timeMs) ? points[points.length - 1].timeMs : first
+  const span = last - first
+  const selected = []
+  /**
+   * One monotone cursor serves every target: the targets ascend, so the nearest
+   * sample's index can never move backwards, and a tie resolves to the earlier
+   * sample. That makes the result a pure function of the input.
+   */
+  let cursor = 0
+  for (let index = 0; index < maxPoints; index += 1) {
+    const target = first + (span * index) / (maxPoints - 1)
+    while (cursor + 1 < points.length
+      && Math.abs(points[cursor + 1].timeMs - target) < Math.abs(points[cursor].timeMs - target)) {
+      cursor += 1
+    }
+    selected.push(points[cursor])
+  }
+  return selected
+}
+
+/**
+ * One attempt's phase-cumulative throughput trace, measured on its own clock and relabelled.
  *
  * Each attempt is measured on its **own** local clock and only then relabelled to
  * the turn's compressed coordinate by `attemptTimeMs + segment.startMs`. Two
- * attempts that share the compressed coordinate `x` therefore share no window: the
- * last vertex of A and the first vertex of B are computed from disjoint sample sets,
- * whatever the x distance between them happens to be.
+ * attempts that share the compressed coordinate `x` therefore share no episode
+ * clock: the last vertex of A and the first vertex of B are computed from disjoint
+ * sample sets, whatever the x distance between them happens to be.
  *
- * **A trace is sampled from the attempt's first delta to its last one, and no
- * further.** The sampled instants are the union of two sets:
+ * **A trace is sampled from the attempt's first delta to the attempt's own end
+ * instant.** The sampled instants are the union of two sets:
  *
  *   - the attempt's own cadence ladder, `0, sampleEveryMs, 2 * sampleEveryMs, …`, up
- *     to its last model-producing delta;
- *   - that last model-producing instant itself.
+ *     to that end instant;
+ *   - the end instant itself.
+ *
+ * The attempt's end instant is the one `compressAttempts` computed for it — the
+ * attempt's terminal episode end, i.e. its settlement instant when one is known and
+ * its last generated delta otherwise — so the terminal phase is drawn across the
+ * final generated-delta → settlement tail, which is model-attempt elapsed time under
+ * the MiMo-style definition. The trace and the compressed axis therefore cannot
+ * disagree about where the attempt ended.
  *
  * The union is what makes the attempt's **real** endpoint a vertex even when it does
- * not fall on the cadence: a call whose final delta arrives at 510 ms is sampled at
- * `0, 250, 500, 510`, not at `0, 250, 500`, so the instant the model stopped
- * producing is always drawn. Deduplication is what keeps an on-cadence endpoint from
- * being emitted twice.
+ * not fall on the cadence: a call settling at 510 ms is sampled at
+ * `0, 100, 200, 300, 400, 500, 510`, so the instant its clock stopped is always
+ * drawn. Deduplication keeps an on-cadence endpoint from being emitted twice.
  *
  * Every attempt obeys this identically, so the final attempt is not a special case
  * and no attempt receives synthetic width merely for being last. Tool waits,
  * inter-attempt waits and next-call TTFT still own no coordinate at all: they lie
- * between one attempt's last delta and the next one's first, where this trace has no
- * vertex and the next trace's local zero is the same compressed coordinate.
+ * between one attempt's settlement and the next one's first delta, where this trace
+ * has no vertex and the next trace's local zero is the same compressed coordinate.
  *
- * A real stall **inside** the attempt is preserved in full, because it lies between
- * two deltas rather than after the last one: the grid runs across it and the trailing
- * rate decays to zero. That is the fact the chart exists to show, and it is different
- * in kind from a decay drawn past the point where the model stopped.
+ * A real stall **inside** the attempt is preserved in full, and so is the terminal
+ * tail: the numerator freezes while the denominator advances, so both are drawn as a
+ * continuous hyperbolic decay rather than as a window reaching zero.
+ *
+ * The published `points` are the capped MiMo-style series (`capSeriesPoints`), so a
+ * series longer than `MAX_SERIES_POINTS` is resampled to exactly that many
+ * nearest-neighbour samples. The render budget thins the *drawing* afterwards and
+ * never moves the published peak, which is read from these points.
  *
  * @param {{attemptId?:string|null, step?:number|null, startMs:number, endMs?:number,
  *   localEndMs?:number}} segment
  * @param {readonly object[]} samples compressed samples carrying `attemptId` and `activeTimeMs`
  * @param {{
- *   windowMs?:number, sampleEveryMs?:number, attemptId?:string|null, calibrated?:boolean,
+ *   sampleEveryMs?:number, attemptId?:string|null, calibrated?:boolean, maxPoints?:number,
  * }} [options]
  * @returns {{
  *   attemptId:string|null, startMs:number, endMs:number, localEndMs:number,
@@ -324,16 +397,16 @@ export function totalRollingTpsSeries(samples, options = {}) {
  * }}
  */
 export function attemptTrace(segment, samples, options = {}) {
-  const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS
   const sampleEveryMs = options.sampleEveryMs ?? DEFAULT_SAMPLE_EVERY_MS
+  const maxPoints = options.maxPoints ?? MAX_SERIES_POINTS
   const attemptId = options.attemptId ?? segment?.attemptId ?? null
   const startMs = Number.isFinite(segment?.startMs) ? segment.startMs : 0
   const endMs = Number.isFinite(segment?.endMs) ? segment.endMs : startMs
 
   /**
-   * Every sample of the attempt is retained, whatever its phase: a window opened
-   * before a phase's first sample can legitimately reach back into the other phase,
-   * and excluding those samples would measure a window against a truncated history.
+   * Every sample of the attempt is retained, whatever its phase: an episode that
+   * begins inside one phase must be cut out of the attempt's own stream, and
+   * excluding samples would measure the episode against a truncated history.
    */
   const perAttempt = (Array.isArray(samples) ? samples : [])
     .filter(sample => (
@@ -350,7 +423,7 @@ export function attemptTrace(segment, samples, options = {}) {
       sampleOrder: ordinalOf(sample, index),
     }))
     /**
-     * The same tie-break `totalRollingTpsSeries` applies — instant, then authoritative
+     * The same tie-break `cumulativePhaseTpsSeries` applies — instant, then authoritative
      * ordinal — so the two agree on which simultaneous sample supplied a vertex's label.
      */
     .sort((a, b) => a.activeTimeMs - b.activeTimeMs || a.sampleOrder - b.sampleOrder)
@@ -383,35 +456,33 @@ export function attemptTrace(segment, samples, options = {}) {
   const lastSampleMs = perAttempt[perAttempt.length - 1].activeTimeMs
   const boundedEndMs = Math.max(0, endMs - startMs)
   /**
-   * **The trace stops where the attempt stopped producing.** `bodyEndMs` is the attempt's
-   * own last model-producing instant — the coordinate `curve.durationMs` already accounts
-   * for — and it is the only bound, for every attempt including the last.
+   * **The trace runs to the attempt's own end instant.** `bodyEndMs` is that instant
+   * — the segment's width, which is the last generated delta for an attempt whose
+   * settlement is unknown and the settlement instant otherwise — and it is the only
+   * bound, for every attempt including the last.
    *
-   * The previous revision gave the final attempt `bodyEndMs + windowMs` and sampled a
-   * one-window decay past it. Those vertices are post-generation time: the axis is model
-   * generation (`docs/METRICS_SPEC.md` §8.1), the host settlement tail is excluded from
-   * generation duration (§7), and a vertex carrying a coordinate larger than the chart's
-   * own duration is clamped onto `x = 100` by `xOf(timeMs, durationMs)`. Several distinct
-   * instants therefore landed on one x coordinate and the SVG closed with a vertical stroke
-   * the evidence does not contain (`test/curve-axis-endpoint.test.js`).
+   * A vertex past it would be time the attempt does not own: the chart's own
+   * `durationMs` is the sum of these widths, and a vertex carrying a coordinate
+   * larger than it is clamped onto `x = 100` by `xOf(timeMs, durationMs)`. Several
+   * distinct instants would then land on one x coordinate and the SVG would close
+   * with a vertical stroke the evidence does not contain
+   * (`test/curve-axis-endpoint.test.js`).
    *
-   * What this does **not** remove: a silence between two deltas *inside* the attempt. That
-   * straddles real model-generation time, the grid runs across it, and the trailing rate
-   * decays to zero and climbs again — the stall stays visible at full width (§8.2.1).
-   * The distinction is "between deltas" versus "after the last one", not "short" versus
-   * "long".
+   * What this does **not** remove: a silence between two deltas *inside* the attempt
+   * (the grid runs across it and the cumulative rate decays hyperbolically), and the
+   * terminal generated-delta → settlement tail, which is model-attempt elapsed time
+   * and therefore part of the attempt's own width.
    */
-  const bodyEndMs = Math.max(0, Math.min(lastSampleMs, boundedEndMs))
+  const bodyEndMs = Math.max(lastSampleMs, boundedEndMs)
   const toMs = bodyEndMs
 
-  const points = totalRollingTpsSeries(perAttempt, {
-    windowMs,
+  const points = capSeriesPoints(cumulativePhaseTpsSeries(perAttempt, {
     sampleEveryMs,
     offsetMs: startMs,
     fromMs: 0,
     toMs,
     sampleEndMs: bodyEndMs,
-  })
+  }), maxPoints)
 
   return {
     attemptId,
@@ -509,7 +580,7 @@ export function visualRunsOf(points) {
  *
  * @param {readonly object[]} segments `compressAttempts` segments, in turn order
  * @param {readonly object[]} samples `compressAttempts` samples
- * @param {{windowMs?:number, sampleEveryMs?:number,
+ * @param {{sampleEveryMs?:number, maxPoints?:number,
  *   calibratedAttemptIds?:ReadonlySet<string|null>}} [options]
  * @returns {object[]} one trace per segment that produced evidence
  */
@@ -521,8 +592,8 @@ export function attemptTraces(segments, samples, options = {}) {
   const traces = []
   for (const segment of ordered) {
     const trace = attemptTrace(segment, samples, {
-      windowMs: options.windowMs,
       sampleEveryMs: options.sampleEveryMs,
+      maxPoints: options.maxPoints,
       calibrated: calibrated instanceof Set ? calibrated.has(segment.attemptId ?? null) : false,
     })
     if (trace.points.length === 0) continue
@@ -532,13 +603,15 @@ export function attemptTraces(segments, samples, options = {}) {
 }
 
 /**
- * Peak across any number of **full** series.
+ * Peak across any number of **published** series.
  *
- * The name says `Tps` and not `RenderedTps` on purpose: this is a statistic over
- * the rolling series as computed, and it must be evaluated before
- * `downsampleSeries` runs. Taking the maximum of the *drawn* points instead
- * would make a chart setting — how many points the SVG is allowed — silently
- * change a number the card reports.
+ * The peak is a statistic over the series the card publishes — the capped
+ * MiMo-style series — which is exactly MiMo's own definition: its `peakTps` is the
+ * maximum of the *published* series, not of the raw one
+ * (`docs/MIMO_RUNTIME_METRICS.md` §7). The render budget thins the *drawing*
+ * afterwards and must not be read here: taking the maximum of the drawn points
+ * would make a chart setting silently change a number the card reports, which is
+ * the one direction this statistic still refuses.
  */
 export function peakTps(...seriesList) {
   let peak = 0

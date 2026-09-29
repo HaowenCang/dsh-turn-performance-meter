@@ -44,6 +44,23 @@ export function liveViewModel(snapshot) {
   }
 
   if (snapshot.phase === 'streaming') {
+    /**
+     * No rate is published until the current phase episode holds enough samples:
+     * a one-sample cumulative average is not a measurement. Until then the view
+     * is the episode's elapsed counter, exactly as the pending state shows one
+     * (`docs/METRICS_SPEC.md` §12).
+     */
+    if (snapshot.tps === null || snapshot.tps === undefined) {
+      return {
+        kind: 'warming',
+        turn: snapshot.turn,
+        activePhase: snapshot.activePhase ?? null,
+        episodeElapsedMs: value(snapshot.episodeElapsedMs ?? null, MetricQuality.EXACT),
+        samples: snapshot.episodeSampleCount ?? 0,
+        required: snapshot.warmupSamples ?? 0,
+        turnElapsed: value(snapshot.turnElapsedMs ?? null, MetricQuality.EXACT),
+      }
+    }
     return {
       kind: 'streaming',
       turn: snapshot.turn,

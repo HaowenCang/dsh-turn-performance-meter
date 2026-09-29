@@ -24,7 +24,9 @@ import assert from 'node:assert/strict'
 import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import {
   DEFAULT_MAX_POINTS,
+  DEFAULT_SAMPLE_EVERY_MS,
   MAX_RENDER_POINTS_TOTAL,
+  MAX_SERIES_POINTS,
   MIN_MAX_POINTS,
   allocateRunBudgets,
   downsampleSeries,
@@ -33,7 +35,6 @@ import {
 import { curveViewModel } from '../src/client/completed/curve-view-model.js'
 import { heuristicTokenWeight } from '../src/core/token-allocation.js'
 
-const WINDOW_MS = 1000
 const STEP_MS = 250
 /** 400 characters is 100 estimated tokens; asserted in `chunkOf`. */
 const DELTA_TOKENS = 100
@@ -57,7 +58,7 @@ function chunkOf(kind = 'output') {
  *
  * `stretches` is the number of model attempts; each spans `spanMs` of deltas on the 250 ms
  * grid and is separated from the next by `gapMs`, which costs no axis width but does reset
- * the window.
+ * the episode clock.
  */
 function driveAlternating({ stretches, spanMs = 2000, gapMs = 2000, kind = 'output', endPaddingMs = 2000 }) {
   const store = new TurnTelemetryStore()
@@ -133,24 +134,24 @@ test('a chart with many runs never exceeds the total budget', () => {
 
 test('the budget is unchanged from the per-run cap when the chart is small', () => {
   /**
-   * The bound must not be a global reduction of ordinary turns. A single episode draws exactly
-   * what it always drew: the budget only ever binds when the run count makes it necessary.
+   * The bound must not be a global reduction of ordinary turns. A single attempt draws exactly
+   * what its own trace contains: the budget only ever binds when the run count makes it
+   * necessary.
    *
-   * The attempt spans 1750 ms (eight deltas on the 250 ms grid), so its own series is 1750 /
-   * 250 + 1 = 8 vertices. Eight is what it now keeps: the four further vertices the previous
-   * expectation carried were a one-window decay past the attempt's last delta, which the axis
-   * of `docs/METRICS_SPEC.md` §8.1 does not own. `MAX_RENDER_POINTS_TOTAL` is 512 and this turn
-   * uses eight.
+   * The attempt spans 1750 ms — eight deltas on the 250 ms grid — and settles 1 ms after its
+   * last one, so its trace is the 100 ms ladder `0, 100, …, 1700` with the attempt's own end
+   * instant `1751` appended because it is off the ladder: 19 vertices. `MAX_RENDER_POINTS_TOTAL`
+   * is 512, so all 19 are kept.
    */
   const curve = driveAlternating({ stretches: 1, spanMs: 2000 })
   const runs = runsOf(curve)
   assert.equal(runs.length, 1)
   assert.deepEqual(runs[0].points.map(p => p.timeMs),
-    [0, 250, 500, 750, 1000, 1250, 1500, 1750])
+    [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1751])
   assert.equal(runs[0].fullResolution, true, 'a small chart is drawn at full resolution')
   assert.equal(runs[0].degraded, false)
   assert.equal(curve.renderBudget.degradedRuns, 0)
-  assert.equal(curve.drawnPoints, 8, 'the full series is under the budget, so nothing is thinned')
+  assert.equal(curve.drawnPoints, 19, 'the full series is under the budget, so nothing is thinned')
 })
 
 /* ------------------------------------------------------- retention under pressure */
@@ -206,11 +207,11 @@ test('a peak confined to one run among many is retained', () => {
       attemptOutcome: 'committed',
       settlementSeq: call + 1,
     })
-    /** A tool between calls: no axis width, but a hard window reset. */
+    /** A tool between calls: no axis width, but a hard episode-clock reset. */
     at.value += 3000
   }
   const spike = store.beginAttempt(record, { attemptId: 'spike', step: 61, startedAtMs: at.value })
-  /** The spike: five heavy deltas inside one window. */
+  /** The spike: five heavy deltas inside one call. */
   emit(spike, 'output', 4000, 5)
   store.settleAttempt(spike, {
     settledAtMs: at.value,
@@ -223,16 +224,27 @@ test('a peak confined to one run among many is retained', () => {
   const curve = store.endTurn(record, { timeMs: last + 2000, status: 'completed' }).curve
   const runs = runsOf(curve)
 
-  /** Four thousand characters weigh 1000 tokens, four times the ordinary delta. */
-  assert.ok(curve.peakTps >= 1000,
+  /**
+   * Four thousand characters weigh 1000 tokens, ten times the ordinary delta, so the
+   * spike's own first step is `1000 * 1000 / 100 = 10 000` tokens/s while every ordinary
+   * call's strongest vertex is its own first step, `100 * 1000 / 100 = 1000`.
+   */
+  assert.equal(curve.peakTps, 10_000,
     `the spike must dominate the peak; measured ${curve.peakTps}`)
   assert.ok(runs.length > 20, `expected many runs, found ${runs.length}`)
   assert.ok(curve.drawnPoints <= MAX_RENDER_POINTS_TOTAL)
   const owner = runs.find(run => run.points.some(point => Math.abs(point.tps - curve.peakTps) < 1e-9))
   assert.ok(owner !== undefined, 'the run holding the spike is still drawn, at the peak')
-  assert.equal(owner.fullResolution, true,
-    'and it keeps full resolution: the budget is taken from the ordinary runs instead')
+  assert.equal(owner.degraded, false, 'and it is seated rather than refused')
   assert.equal(owner.attemptId, 'spike', 'and the drawn peak sits on the call that produced it')
+  /**
+   * The 100 ms ladder made every run longer than the old 250 ms one — an ordinary call's
+   * series is nine vertices and the spike's fourteen — so the shared 512-vertex budget thins
+   * every run a little instead of leaving the spike at full resolution. What the peak band
+   * must preserve is the maximum itself, and the drawn chart still carries it.
+   */
+  assert.equal(peakTps(...runs.map(run => run.points)), curve.peakTps,
+    'the budget thins the drawing without moving the reported peak')
 })
 
 test('run order and run boundaries survive total budgeting', () => {
@@ -255,11 +267,11 @@ test('run order and run boundaries survive total budgeting', () => {
    * interval — two attempts can share a compressed coordinate, and only the attempt
    * identity can tell them apart.
    *
-   * The coordinates an attempt owns end on its own last delta. The expectation before Phase
-   * 7C.1 was "its own body plus one window of tail, cut where the next call begins": the
-   * final attempt was allowed to reach `endMs + windowMs` and every earlier one was cut at
-   * its successor's start. Both halves of that rule are gone, and the bound is now the
-   * segment's own `endMs` for every attempt.
+   * The coordinates an attempt owns are its own segment `[startMs, endMs]`: from its first
+   * delta to its terminal episode's end, which is its settlement instant when one was
+   * observed and its last delta otherwise. No earlier revision's per-successor cut or
+   * one-window tail survives; the bound is the segment's own `endMs` for every attempt,
+   * the final one included.
    */
   const ownsOf = (trace) => {
     const segment = curve.segments.find(candidate => candidate.attemptId === trace.attemptId)
@@ -495,9 +507,11 @@ test('the view model receives no more vertices than the snapshot budgeted', () =
 
 test('the total budget covers an ordinary long turn without thinning it', () => {
   /**
-   * A realistic long turn: one attempt, one episode, 200 deltas. Its series is far under the
-   * budget, so the bound must be invisible — a regression that capped every chart at a few
-   * dozen points would show up here rather than only in a screenshot.
+   * A realistic long turn: one attempt, one episode, 200 deltas at 100 ms spacing. Its raw
+   * trace is the 202 ladder instants `0 … 20 100`, which the stored-series cap resamples to
+   * exactly `MAX_SERIES_POINTS` = 200 published points — far under the 512-vertex chart
+   * budget, so the render bound must be invisible here: a regression that capped every chart
+   * at a few dozen points would show up in this test rather than only in a screenshot.
    */
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
@@ -515,9 +529,11 @@ test('the total budget covers an ordinary long turn without thinning it', () => 
   const [run] = runsOf(curve)
   assert.equal(run.fullResolution, true)
   assert.equal(run.degraded, false)
-  /** One episode of 20 s is 80 grid instants plus the tail; all of them are kept. */
-  assert.ok(run.points.length > 50, `expected the full series, found ${run.points.length}`)
+  assert.equal(run.points.length, MAX_SERIES_POINTS,
+    'the raw grid is capped to exactly 200 points, and every one of them is kept')
   assert.equal(curve.drawnPoints, run.points.length)
   assert.ok(curve.drawnPoints <= MAX_RENDER_POINTS_TOTAL)
-  assert.equal(WINDOW_MS, 1000)
+  /** The published sampling decision and the stored-series cap travel with the snapshot. */
+  assert.equal(curve.sampleEveryMs, DEFAULT_SAMPLE_EVERY_MS)
+  assert.equal(curve.maxSeriesPoints, MAX_SERIES_POINTS)
 })

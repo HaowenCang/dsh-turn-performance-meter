@@ -1,7 +1,7 @@
 /**
  * Live presenter: machine state + LiveMeter snapshot -> render view model.
  *
- * Layering rule enforced here: statistics (trailing TPS, TTFT, tool-episode
+ * Layering rule enforced here: statistics (phase-cumulative TPS, TTFT, tool-episode
  * wall time, turn elapsed) come from the `LiveMeter` snapshot untouched; the
  * state machine decides *what kind* of view this is; the presenter combines the
  * two and applies the defensive guards. The React layer receives a finished
@@ -14,6 +14,8 @@
  *   - streaming state without a live streaming snapshot -> transition
  *     (a settlement or tool event the machine has not folded yet must not leak
  *     the previous TPS)
+ *   - streaming state whose episode has not reached its warm-up sample count
+ *     -> warming (the elapsed counter, never a one-sample rate)
  *   - pending state with an already-frozen TTFT        -> waiting
  *   - tool stage resolved from the machine OR the meter -> tool view, values
  *     strictly from the meter snapshot
@@ -119,6 +121,31 @@ export class LivePresenter {
             quality,
             /** Live TPS is estimated unconditionally; `≈` is mandatory. */
             approximate: requiresApproximateMarker(quality),
+            elapsedMs,
+            /**
+             * Whether the number is the first-output fallback rather than this
+             * phase's own estimate. The renderer prints the same `≈` either way —
+             * both are estimates — but a diagnostic can tell them apart.
+             */
+            fallback: snapshot.fallback === true,
+          }
+        }
+        if (snapshot.phase === 'streaming') {
+          /**
+           * The episode exists but has not yet produced `MIN_WARMUP_SAMPLES`
+           * samples, so no rate may be published: a one-sample rate is not a
+           * measurement. The pill keeps the phase label and the episode's elapsed
+           * counter instead of a number (`docs/METRICS_SPEC.md` §12), which is the
+           * pending/elapsed presentation the pre-warm-up state already used.
+           */
+          return {
+            kind: 'warming',
+            state: machine.state,
+            turn,
+            phase,
+            counterMs: Number.isFinite(snapshot.episodeElapsedMs) ? snapshot.episodeElapsedMs : 0,
+            samples: snapshot.episodeSampleCount ?? 0,
+            required: snapshot.warmupSamples ?? 0,
             elapsedMs,
           }
         }

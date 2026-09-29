@@ -75,15 +75,19 @@ test('a full multi-call turn aggregates turn-level sums rather than per-call ave
   assert.notEqual(settled.reasoningTps, (40 + 120) / 2)
 
   // Non-reasoning output: (100-40) + (900-360) + (500-0) = 60 + 540 + 500 = 1100
-  // tokens over A 1000 + B 3000 + C 4000 = 8000 ms of model output time.
+  // tokens over A 1500 + B 3500 + C 4500 = 9500 ms of model output time. Each
+  // attempt's terminal episode now ends at its settlement instant, so the
+  // settlement tail is charged to the phase that was generating when the attempt
+  // settled (A 2000→3500, B 70 000→73 500, C 95 000→99 500).
   assert.equal(settled.nonReasoningTokens, 60 + 540 + 500)
-  assert.equal(settled.outputMs, 1000 + 3000 + 4000)
-  assert.equal(settled.outputTps, 1100 * 1000 / 8000)
+  assert.equal(settled.outputMs, 1500 + 3500 + 4500)
+  assert.equal(settled.outputTps, 1100 * 1000 / 9500)
 
   // The forbidden arithmetic mean over attempts would be
-  // (60/1 + 180/3 + 125/4) / 3 = 50.4 output tokens/s; the weighted turn value is
-  // 137.5. Averaging per-attempt rates is what this test exists to prevent.
-  assert.notEqual(settled.outputTps, (60 / 1 + 180 / 3 + 125 / 4) / 3)
+  // (60/1.5 + 540/3.5 + 500/4.5) / 3 ≈ 101.8 output tokens/s; the weighted turn
+  // value is 1100 / 9.5 ≈ 115.8. Averaging per-attempt rates is what this test
+  // exists to prevent.
+  assert.notEqual(settled.outputTps, (60 / 1.5 + 540 / 3.5 + 500 / 4.5) / 3)
 
   assert.equal(settled.generatedTokens, 1500)
   assert.equal(settled.generatedTokensQuality, MetricQuality.EXACT)
@@ -106,11 +110,13 @@ test('tool latency excludes the model time and is reported as both sums', () => 
 test('the curve is compressed: tool waits and next-call TTFT contribute no width', () => {
   const store = new TurnTelemetryStore()
   const { settled } = driveMultiCallTurn(store)
-  // Model-generated spans: 2000 (A) + 6000 (B) + 4000 (C) = 12 000 ms, against a
-  // 100 000 ms turn. The curve must reflect the 12 s, not the 100 s.
-  assert.equal(settled.curve.durationMs, 12_000)
+  // Model-generated spans including each attempt's settlement tail: A 1000→3500
+  // = 2500, B 67 000→73 500 = 6500, C 95 000→99 500 = 4500; 13 500 ms against a
+  // 100 000 ms turn. The terminal episode is charged to the attempt's own
+  // settlement instant, while tool waits and next-call TTFT still own no width.
+  assert.equal(settled.curve.durationMs, 13_500)
   assert.deepEqual(settled.curve.segments.map(s => [s.startMs, s.endMs]), [
-    [0, 2000], [2000, 8000], [8000, 12_000],
+    [0, 2500], [2500, 9000], [9000, 13_500],
   ])
   assert.equal(settled.curve.quality, 'estimated')
   assert.ok(settled.curve.peakTps > 0)
@@ -125,12 +131,14 @@ test('the completed curve is an attempt trace list with phase-coloured runs, not
     'the legend order is fixed')
 
   /**
-   * One trace per model call, and the trace is the total rolling measurement: every phase
-   * counted, one window per attempt, reset at every call.
+   * One trace per model call, and each trace is that attempt's own phase-cumulative
+   * measurement: every phase counted, one episode per phase run, reset at every call.
+   * The attempt starts where the previous attempt's terminal episode ended, so the
+   * settlement tails are part of the compressed axis.
    */
   assert.deepEqual(curve.attempts.map(attempt => attempt.attemptId), ['a1', 'b1', 'c1'],
     'one trace per attempt, in turn order')
-  assert.deepEqual(curve.attempts.map(attempt => attempt.startMs), [0, 2000, 8000])
+  assert.deepEqual(curve.attempts.map(attempt => attempt.startMs), [0, 2500, 9000])
 
   /**
    * The runs are the **colour segmentation** of those traces, one per contiguous phase
@@ -215,48 +223,61 @@ test('the completed curve is an attempt trace list with phase-coloured runs, not
   ], 'and its order is the run order, so the two views cannot disagree')
 })
 
-test('the live window is reset at each attempt and reports no TPS while a tool runs', () => {
+test('the live episode is reset at each attempt and reports no TPS while a tool runs', () => {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
   const a = store.beginAttempt(record, { attemptId: 'a1', step: 1, startedAtMs: 0 })
   store.acceptChunk(record, a, { timeMs: 100, chunk: chunk('output', 'x'.repeat(400)) })
+  store.acceptChunk(record, a, { timeMs: 200, chunk: chunk('output', 'x'.repeat(400)) })
+  store.acceptChunk(record, a, { timeMs: 300, chunk: chunk('output', 'x'.repeat(400)) })
 
-  const streaming = store.liveSnapshot('s1', 200)
+  const streaming = store.liveSnapshot('s1', 400)
   assert.equal(streaming.phase, 'streaming')
+  assert.equal(streaming.tps, 1000, '300 tokens over the 300 ms since the episode began')
   assert.equal(streaming.tpsQuality, MetricQuality.ESTIMATED)
   assert.equal(streaming.activePhase, 'output')
-  assert.ok(streaming.tps > 0)
 
-  store.toolStarted(record, { callId: 'c1', name: 'pwsh', timeMs: 300 })
+  store.toolStarted(record, { callId: 'c1', name: 'pwsh', timeMs: 500 })
   const tooling = store.liveSnapshot('s1', 2000)
   assert.equal(tooling.phase, 'tool')
   assert.equal(tooling.tps, null, 'never a stale or zero TPS while a tool runs')
-  assert.equal(tooling.toolElapsedMs, 1700)
+  assert.equal(tooling.toolElapsedMs, 1500)
 
   store.toolSettled(record, { callId: 'c1', timeMs: 2050, status: 'ok' })
   const b = store.beginAttempt(record, { attemptId: 'b1', step: 2, startedAtMs: 2100 })
   assert.equal(b.attemptId, 'b1')
-  assert.equal(store.liveSnapshot('s1', 2100).tps, 0, 'the new attempt starts from an empty window')
+  const pending = store.liveSnapshot('s1', 2100)
+  assert.equal(pending.phase, 'pending')
+  assert.equal(pending.tps, null, 'a fresh attempt has no episode, so no rate — and not a zero')
 
   store.acceptChunk(record, b, { timeMs: 2200, chunk: chunk('output', 'y'.repeat(40)) })
-  const after = store.liveSnapshot('s1', 2300)
+  store.acceptChunk(record, b, { timeMs: 2300, chunk: chunk('output', 'y'.repeat(40)) })
+  store.acceptChunk(record, b, { timeMs: 2400, chunk: chunk('output', 'y'.repeat(40)) })
+  const after = store.liveSnapshot('s1', 2500)
   assert.equal(after.phase, 'streaming')
-  assert.ok(after.tps < streaming.tps, 'only the new attempt tokens are in the window')
+  assert.equal(after.tps, 100, '30 tokens over the 300 ms since this attempt\'s episode began')
+  assert.ok(after.tps < streaming.tps, 'only the new attempt\'s tokens are in the episode')
 })
 
-test('two sessions never share a live window or a turn record', () => {
+test('two sessions never share a live episode or a turn record', () => {
   const store = new TurnTelemetryStore()
   const s1 = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
   const s2 = store.beginTurn({ sessionId: 's2', turn: 1, timeMs: 0 })
 
   const a1 = store.beginAttempt(s1, { attemptId: 'x', step: 1 })
   store.acceptChunk(s1, a1, { timeMs: 100, chunk: chunk('output', 'a'.repeat(400)) })
+  store.acceptChunk(s1, a1, { timeMs: 200, chunk: chunk('output', 'a'.repeat(400)) })
+  store.acceptChunk(s1, a1, { timeMs: 300, chunk: chunk('output', 'a'.repeat(400)) })
   const a2 = store.beginAttempt(s2, { attemptId: 'y', step: 1 })
-  store.acceptChunk(s2, a2, { timeMs: 100, chunk: chunk('output', 'b') })
+  store.acceptChunk(s2, a2, { timeMs: 100, chunk: chunk('output', 'b'.repeat(4)) })
+  store.acceptChunk(s2, a2, { timeMs: 200, chunk: chunk('output', 'b'.repeat(4)) })
+  store.acceptChunk(s2, a2, { timeMs: 300, chunk: chunk('output', 'b'.repeat(4)) })
 
-  const one = store.liveSnapshot('s1', 200)
-  const two = store.liveSnapshot('s2', 200)
-  assert.ok(one.tps > two.tps * 10, 'each session keeps its own rolling window')
+  const one = store.liveSnapshot('s1', 400)
+  const two = store.liveSnapshot('s2', 400)
+  assert.equal(one.tps, 1000, 'three 100-token deltas over the 300 ms since s1\'s episode began')
+  assert.equal(two.tps, 10, 'three 1-token deltas over the same episode clock')
+  assert.ok(one.tps > two.tps * 10, 'each session keeps its own episode')
 
   store.endTurn(s1, { timeMs: 1000, status: 'completed' })
   assert.equal(store.latestSettled('s1').turn, 1)
@@ -282,6 +303,12 @@ test('an attempt that never streamed does not create an empty phase denominator'
   const b = store.beginAttempt(record, { attemptId: 'b1', step: 1 })
   store.acceptChunk(record, b, { timeMs: 0, chunk: chunk('output', 'a') })
   store.acceptChunk(record, b, { timeMs: 2000, chunk: chunk('output', 'b') })
+  /**
+   * The attempt's terminal episode ends at its settlement instant, so an attempt
+   * whose settlement was never observed has no measurable denominator at all.
+   * Settling it is what turns the observed deltas into measured generation time.
+   */
+  store.settleAttempt(b, { settledAtMs: 2000, settlementKind: 'message', surfaceCommitted: true, attemptOutcome: 'committed' })
   const settled = store.endTurn(record, { timeMs: 3000, status: 'completed' })
   assert.equal(settled.outputMs, 2000)
   assert.equal(settled.emptyAttemptCount, 1)

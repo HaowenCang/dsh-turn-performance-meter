@@ -1,16 +1,17 @@
 /**
- * The rolling-window sampler and the render-time reducer, as pure functions.
+ * The phase-cumulative sampler and the render-time reducer, as pure functions.
  *
  * This file is the unit-level half of the curve contract; the scenario half lives in
- * `test/curve-reference-window.test.js` (an independent brute-force reference),
+ * `test/curve-phase-cumulative.test.js` (the statistic, the vertex grid and the caps),
  * `test/curve-regression-matrix.test.js` (one named scenario per frozen semantic) and
  * `test/curve-attempt-boundary.test.js` (the cross-attempt counterexample).
  *
  * Two functions carry the whole definition:
  *
- *   - `totalRollingTpsSeries` rolls **one** trailing window over one attempt's samples,
- *     counting every phase, and labels each vertex with the phase of the newest sample at
- *     or before it. It has no notion of an attempt, which is why it must never be called
+ *   - `cumulativePhaseTpsSeries` measures **one phase episode at a time**: the mass of
+ *     the current maximal same-phase run divided by the wall time since that run's first
+ *     sample, and each vertex is labelled with the phase of the newest sample at or
+ *     before it. It has no notion of an attempt, which is why it must never be called
  *     across a boundary;
  *   - `downsampleSeries` reduces a series for rendering without ever being able to delete
  *     the global peak.
@@ -22,45 +23,57 @@ import {
   DEFAULT_MAX_POINTS,
   MIN_MAX_POINTS,
   attemptTrace,
+  cumulativePhaseTpsSeries,
   downsampleRun,
   downsampleSeries,
   peakTps,
   phaseRuns,
   phaseSpans,
-  totalRollingTpsSeries,
   visualRunsOf,
 } from '../src/core/curve.js'
 
-test('the total rolling series counts every phase in one window', () => {
+test('the phase-cumulative series measures one episode at a time', () => {
+  /**
+   * A reasoning delta and, half a second later, an output delta; the attempt's own end
+   * instant is 1000 ms, so the terminal episode is drawn across its own tail.
+   *
+   *    0 ms    the reasoning episode opens: elapsed 0, so the vertex publishes 0
+   *    250     reasoning: 600 tokens / 0.25 s                            -> 2400
+   *    500     the output episode opens (reasoning's clock and mass are not carried) -> 0
+   *    750     output: 400 / 0.25 s                                      -> 1600
+   *    1000    output: 400 / 0.5 s                                       -> 800
+   */
   const samples = [
     { activeTimeMs: 0, phase: 'reasoning', tokens: 600 },
     { activeTimeMs: 500, phase: 'output', tokens: 400 },
   ]
-  const series = totalRollingTpsSeries(samples, { sampleEveryMs: 500, durationMs: 1500 })
-  assert.equal(series.find(p => p.localMs === 0).tps, 600,
-    'the opening vertex measures the reasoning delta alone')
-  assert.equal(series.find(p => p.localMs === 500).tps, 1000,
-    'at the transition the window holds 600 reasoning + 400 output')
-  assert.equal(series.at(-1).localMs, 500,
-    'the grid ends on the last sample, so `durationMs: 1500` no longer fabricates a decay past it')
-  assert.equal(peakTps(series), 1000)
+  const series = cumulativePhaseTpsSeries(samples, {
+    sampleEveryMs: 250, durationMs: 1000, sampleEndMs: 1000,
+  })
+  assert.deepEqual(series.map(p => [p.localMs, p.tps]), [
+    [0, 0], [250, 2400], [500, 0], [750, 1600], [1000, 800],
+  ])
+  assert.deepEqual(series.map(p => p.activePhase),
+    ['reasoning', 'reasoning', 'output', 'output', 'output'])
+  assert.equal(peakTps(series), 2400, 'the peak is the maximum of the published series')
 })
 
-test('a bounded call stops at its last sample rather than at `durationMs`', () => {
+test('a bounded call stops at its own end instant rather than at `durationMs`', () => {
   /**
-   * `durationMs` used to be read as "sample this far", which is how the final attempt acquired
-   * a one-window tail: the caller asked for `bodyEnd + windowMs`. It is now a ceiling alone.
+   * `durationMs` is a ceiling, not a request: the sampler covers the attempt's own
+   * evidence — here, the episode that opened on the first delta and ran to the second —
+   * and never samples past it.
    */
   const samples = [
     { activeTimeMs: 0, phase: 'output', tokens: 100 },
     { activeTimeMs: 500, phase: 'output', tokens: 100 },
   ]
-  const long = totalRollingTpsSeries(samples, { sampleEveryMs: 250, durationMs: 10_000 })
+  const long = cumulativePhaseTpsSeries(samples, { sampleEveryMs: 250, durationMs: 10_000 })
   assert.deepEqual(long.map(point => point.localMs), [0, 250, 500])
-  assert.deepEqual(long.map(point => point.tps), [100, 100, 200])
+  assert.deepEqual(long.map(point => point.tps), [0, 400, 400])
 
-  /** And a ceiling below the last sample still bounds the trace, as before. */
-  const bounded = totalRollingTpsSeries(samples, { sampleEveryMs: 250, toMs: 250 })
+  /** And a ceiling below the end still bounds the trace, as before. */
+  const bounded = cumulativePhaseTpsSeries(samples, { sampleEveryMs: 250, toMs: 250 })
   assert.deepEqual(bounded.map(point => point.localMs), [0, 250])
 })
 
@@ -69,54 +82,70 @@ test('the phase is a label on a vertex, never a filter of the series', () => {
     { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
     { activeTimeMs: 750, phase: 'output', tokens: 90 },
   ]
-  const series = totalRollingTpsSeries(samples, { sampleEveryMs: 250, durationMs: 1750 })
+  const series = cumulativePhaseTpsSeries(samples, { sampleEveryMs: 250, durationMs: 1750 })
   assert.deepEqual(series.map(p => [p.localMs, p.activePhase]), [
     [0, 'reasoning'], [250, 'reasoning'], [500, 'reasoning'], [750, 'output'],
   ], 'the label changes exactly where the newest sample does, to the trace\'s own end')
-  assert.deepEqual(series.map(p => p.tps), [10, 10, 10, 100],
-    'and the rate is one total: at 750 ms both samples are inside the window')
+  assert.deepEqual(series.map(p => p.tps), [0, 40, 20, 0],
+    'one measurement per episode: reasoning is averaged against its own clock until the '
+    + 'boundary, and the boundary vertex opens the output episode with no elapsed time yet')
 })
 
-test('an empty window reads zero, and the trough of a stall is a real zero', () => {
-  const series = totalRollingTpsSeries([
+test('a stall decays hyperbolically and never reaches exactly zero', () => {
+  /**
+   * 5 s of silence inside one episode. The numerator holds at the first delta's 100
+   * tokens while the clock advances, so the stall is drawn as a continuous decay,
+   * never as a stretch reading zero:
+   *
+   *    500 ms   100 / 0.5 s   -> 200
+   *    3000     100 / 3       -> 33.3 -> 33
+   *    5000     200 / 5       -> 40   (the second delta lands)
+   */
+  const series = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'output', tokens: 100 },
-    /** 5 s of silence: a delivery stall, preserved on the compressed clock. */
     { activeTimeMs: 5000, phase: 'output', tokens: 100 },
   ], { sampleEveryMs: 500, durationMs: 5000 })
 
-  assert.equal(series.find(p => p.localMs === 500).tps, 100)
-  assert.equal(series.find(p => p.localMs === 3000).tps, 0, 'the stall must be visible')
-  assert.equal(series.find(p => p.localMs === 5000).tps, 100)
+  assert.equal(series.find(p => p.localMs === 500).tps, 200)
+  assert.equal(series.find(p => p.localMs === 3000).tps, 33)
+  assert.equal(series.find(p => p.localMs === 5000).tps, 40)
   assert.equal(series.at(-1).localMs, 5000)
+  assert.ok(series.slice(1).every(point => point.tps > 0),
+    'the decay is asymptotic: no vertex after the opening one reads exactly zero')
 })
 
 test('simultaneous samples of two phases resolve by the authoritative stream order', () => {
   /**
-   * A reasoning delta and a text delta can share a timestamp. The vertex's label is read off
-   * the newest sample at or before it, and "newest" is decided by the **authoritative stream
-   * ordinal**: DSH's transient frame index and its durable compact stream member order, which
-   * `compressAttempts` publishes as `sampleOrder`. Array position is that order for a caller
-   * that supplies no ordinal of its own.
+   * A reasoning delta and a text delta can share a timestamp. The vertex's label — and the
+   * episode whose clock its rate is measured on — is read off the newest sample at or
+   * before it, and "newest" is decided by the **authoritative stream ordinal**: DSH's
+   * transient frame index and its durable compact stream member order, which
+   * `compressAttempts` publishes as `sampleOrder`. Array position is that order for a
+   * caller that supplies no ordinal of its own.
    *
    * The previous revision broke the tie with a fixed phase hierarchy instead, so `output`
-   * always won and the completed label could disagree with `LiveMeter.streamingPhase` — which
-   * reads the last accepted sample — for the very same stream. Phase 7C.1 replaced the
-   * hierarchy with the ordinal: the two orders now produce the same **rate** and legitimately
-   * different **labels**, and the old `arrival order cannot change the series` assertion is
-   * restated below in the form that is actually true.
+   * always won and the completed label could disagree with `LiveMeter.streamingPhase` —
+   * which reads the last accepted sample — for the very same stream. Phase 7C.1 replaced
+   * the hierarchy with the ordinal. Each order now decides which episode is in force, so
+   * the two orders publish legitimately different labels *and* rates; the assertions below
+   * state both.
    * `test/curve-stream-order.test.js` carries the end-to-end counterexample.
    */
-  const reasoningFirst = totalRollingTpsSeries([
+  const reasoningFirst = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
     { activeTimeMs: 0, phase: 'output', tokens: 20 },
-  ], { sampleEveryMs: 250, durationMs: 0 })
-  const outputFirst = totalRollingTpsSeries([
+  ], { sampleEveryMs: 250, durationMs: 500, sampleEndMs: 500 })
+  const outputFirst = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'output', tokens: 20 },
     { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
-  ], { sampleEveryMs: 250, durationMs: 0 })
+  ], { sampleEveryMs: 250, durationMs: 500, sampleEndMs: 500 })
 
-  assert.equal(reasoningFirst[0].tps, 30, 'both deltas are inside the window regardless of order')
-  assert.equal(outputFirst[0].tps, 30, 'so the numeric series is order-independent')
+  assert.deepEqual(reasoningFirst.map(point => point.tps), [0, 80, 40],
+    'the output episode the newest sample opened: 20 tokens over 250 ms and over 500 ms')
+  assert.deepEqual(outputFirst.map(point => point.tps), [0, 40, 20],
+    'and the reasoning episode the other order opened: 10 tokens over the same clocks')
+  assert.equal(reasoningFirst[0].tps, outputFirst[0].tps,
+    'at the shared instant both orders open an episode, so both publish the zero anchor')
   assert.equal(reasoningFirst[0].activePhase, 'output',
     'reasoning then output: the output delta is the last authoritative sample')
   assert.equal(outputFirst[0].activePhase, 'reasoning',
@@ -148,8 +177,8 @@ test('tool time contributes no curve width at all', () => {
     { activeTimeMs: 1000, phase: 'output', tokens: 50 },
   ]
   assert.deepEqual(
-    totalRollingTpsSeries(local, { sampleEveryMs: 250, durationMs: 1000 }),
-    totalRollingTpsSeries(local.map(s => ({ ...s })), { sampleEveryMs: 250, durationMs: 1000 }),
+    cumulativePhaseTpsSeries(local, { sampleEveryMs: 250, durationMs: 1000 }),
+    cumulativePhaseTpsSeries(local.map(s => ({ ...s })), { sampleEveryMs: 250, durationMs: 1000 }),
   )
 })
 
@@ -159,14 +188,14 @@ test('series sampling is bounded and covers the whole attempt', () => {
    * which for this one-delta attempt is the single instant its delta arrived at. The bound
    * therefore reports what a ten-minute turn would cost rather than what this one did.
    */
-  const series = totalRollingTpsSeries([{ activeTimeMs: 0, phase: 'output', tokens: 1 }], {
+  const series = cumulativePhaseTpsSeries([{ activeTimeMs: 0, phase: 'output', tokens: 1 }], {
     sampleEveryMs: 250,
     durationMs: 60_000,
   })
   assert.equal(series.length, 1)
   assert.equal(series[0].localMs, 0)
 
-  const long = totalRollingTpsSeries(
+  const long = cumulativePhaseTpsSeries(
     [{ activeTimeMs: 0, phase: 'output', tokens: 1 }, { activeTimeMs: 60_000, phase: 'output', tokens: 1 }],
     { sampleEveryMs: 250, durationMs: 60_000 },
   )
@@ -175,10 +204,10 @@ test('series sampling is bounded and covers the whole attempt', () => {
   assert.equal(long.at(-1).localMs, 60_000)
 })
 
-test('invalid window or cadence is rejected instead of producing infinite TPS', () => {
-  assert.throws(() => totalRollingTpsSeries([], { windowMs: 0 }), TypeError)
-  assert.throws(() => totalRollingTpsSeries([], { sampleEveryMs: 0 }), TypeError)
-  assert.throws(() => totalRollingTpsSeries([], { windowMs: Number.NaN }), TypeError)
+test('an invalid cadence is rejected instead of producing infinite TPS', () => {
+  assert.throws(() => cumulativePhaseTpsSeries([], { sampleEveryMs: 0 }), TypeError)
+  assert.throws(() => cumulativePhaseTpsSeries([], { sampleEveryMs: -1 }), TypeError)
+  assert.throws(() => cumulativePhaseTpsSeries([], { sampleEveryMs: Number.NaN }), TypeError)
 })
 
 test('visual runs share their boundary vertex and cover the grid exactly once', () => {
@@ -194,16 +223,17 @@ test('visual runs share their boundary vertex and cover the grid exactly once', 
     ['reasoning', 0, 1],
     ['output', 1, 3],
     ['reasoning', 3, 4],
-  ], 'each run ends on the vertex the next one opens on, and the boundary is the midpoint '
-    + 'between the last vertex of the old label and the first of the new one')
+  ], 'each run ends on the vertex the next one opens on: the boundary is the last vertex '
+    + 'still carrying the outgoing label')
   assert.equal(runs.reduce((sum, run) => sum + run.pointCount, 0), points.length + runs.length - 1,
     'the shared seams are the only duplication')
   assert.deepEqual(visualRunsOf([]), [], 'no points, no runs')
   assert.deepEqual(visualRunsOf([{ timeMs: 0, activePhase: null }]).map(run => run.phase), [null],
     'a vertex with no sample at or before it opens its own run rather than being merged away')
   /**
-   * A silence between the two labels moves the seam into the middle of it, so neither tone is
-   * painted over a stretch its own phase did not produce, and the two still meet.
+   * A silence between the two labels is not divided between the tones: the seam lands on the
+   * last vertex still carrying the outgoing label, and the incoming run opens on that same
+   * vertex, so the two still meet.
    */
   const gapped = visualRunsOf([
     { timeMs: 0, activePhase: 'reasoning' },
@@ -215,7 +245,7 @@ test('visual runs share their boundary vertex and cover the grid exactly once', 
   assert.deepEqual(gapped.map(run => [run.phase, run.startIndex, run.endIndex]),
     [['reasoning', 0, 2], ['output', 2, 4]],
     'the seam lands on the last vertex still labelled reasoning, which is also the first the '
-    + 'output run can open on: the midpoint of the silence')
+    + 'output run can open on, so a tone change has no silence to divide')
 })
 
 test('a phase with no run is absent, never a flat zero line', () => {
@@ -411,7 +441,7 @@ test('the rendered series stays bounded for a real turn shape', () => {
   for (let t = 0; t <= 600_000; t += 40) {
     samples.push({ activeTimeMs: t, phase: t < 200_000 ? 'reasoning' : 'output', tokens: 3 })
   }
-  const series = totalRollingTpsSeries(samples, { durationMs: 600_000, sampleEveryMs: 250 })
+  const series = cumulativePhaseTpsSeries(samples, { durationMs: 600_000, sampleEveryMs: 250 })
   assert.equal(series.length, 2401)
   const reduced = downsampleSeries(series)
   assert.ok(reduced.length <= DEFAULT_MAX_POINTS, '250 ms sampling of a 10-minute turn still fits the budget')
@@ -428,7 +458,8 @@ test('an attempt trace measures its own clock and relabels onto the compressed o
   assert.deepEqual(trace.points.map(point => point.localMs), [0, 250, 500])
   assert.deepEqual(trace.points.map(point => point.timeMs), [5000, 5250, 5500],
     'the drawn coordinate is the local one shifted by the segment start')
-  assert.deepEqual(trace.points.map(point => point.tps), [100, 100, 200])
+  assert.deepEqual(trace.points.map(point => point.tps), [0, 400, 400],
+    'the episode opens at zero; 100 tokens at 250 ms and 200 at 500 ms average to 400')
   assert.equal(trace.durationMs, 500, 'the trace is as wide as the attempt\'s own generation')
   assert.equal(trace.tokens, 200)
   assert.equal(trace.calibratedTokens, null, 'an estimated magnitude is never reported as calibrated')
@@ -443,7 +474,9 @@ test('an off-grid final sample is the trace\'s own last vertex on both clocks', 
   assert.deepEqual(trace.points.map(point => point.localMs), [0, 250, 500, 510])
   assert.deepEqual(trace.points.map(point => point.timeMs), [5000, 5250, 5500, 5510],
     'the endpoint anchor is relabelled like every other vertex')
-  assert.deepEqual(trace.points.map(point => point.tps), [100, 100, 100, 200])
+  assert.deepEqual(trace.points.map(point => point.tps), [0, 400, 200, 392],
+    'the frozen numerator at 100 tokens is diluted to 200 at the 500 ms ladder step, and the '
+    + 'off-grid final delta lifts the episode mass to 200 over its 510 ms clock')
   assert.equal(trace.points.at(-1).timeMs, trace.startMs + trace.durationMs)
 })
 

@@ -449,7 +449,7 @@ test('15. the peak stays approximate at every allocation mode', () => {
     assert.equal(settled.quality.displayPhaseSplit === 'exact',
       settled.quality.phaseSplitQuality === QualityLevel.EXACT)
     /**
-     * The peak is a trailing-window rate over reconstructed per-delta magnitudes, so it
+     * The peak is a phase-cumulative rate over reconstructed per-delta magnitudes, so it
      * carries `≈` at every mode. Nothing here may expose a provider-exact peak.
      */
     const published = settled.phaseTokens.reasoning + settled.phaseTokens.output

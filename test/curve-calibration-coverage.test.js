@@ -48,7 +48,7 @@ const DELTA_CHARS = 400
 const outputChunk = text => ({ type: 'text-delta', index: 0, text })
 
 /**
- * A turn of several attempts, each with two deltas half a window apart.
+ * A turn of several attempts, each with two deltas half a second apart.
  *
  * `usages` is positional: `null` means the attempt reported no provider usage at all,
  * which is the case the coverage levels are about.

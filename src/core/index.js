@@ -36,7 +36,7 @@ export {
   usageFromChunk,
 } from './delta-accounting.js'
 
-export { PHASE, attributePhaseDurations } from './phase-duration.js'
+export { PHASE, attributePhaseDurations, phaseEpisodes } from './phase-duration.js'
 
 export {
   calibrateAttemptSamples,
@@ -51,11 +51,10 @@ export {
   PhaseEvidenceIssue,
   TemporalAllocationMode,
   analyzePhaseEvidence,
+  analyzePhaseEvidenceFrom,
 } from './phase-evidence.js'
 
-export { SlidingWindowMeter } from './sliding-window.js'
-
-export { LiveMeter, LivePhase } from './live-metrics.js'
+export { LiveMeter, LivePhase, FIRST_OUTPUT_GUARD_MS, MIN_WARMUP_SAMPLES } from './live-metrics.js'
 
 export { summarizeToolCalls, unionDurationMs } from './tool-timing.js'
 
@@ -64,19 +63,20 @@ export { compressAttempts } from './time-axis.js'
 export {
   DEFAULT_MAX_POINTS,
   DEFAULT_SAMPLE_EVERY_MS,
-  DEFAULT_WINDOW_MS,
   MAX_RENDER_POINTS_TOTAL,
+  MAX_SERIES_POINTS,
   MIN_MAX_POINTS,
   allocateRunBudgets,
   attemptTrace,
   attemptTraces,
+  capSeriesPoints,
+  cumulativePhaseTpsSeries,
   downsampleRun,
   downsampleSeries,
   minimumRunCost,
   peakTps,
   phaseRuns,
   phaseSpans,
-  totalRollingTpsSeries,
   visualRunsOf,
 } from './curve.js'
 

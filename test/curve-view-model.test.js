@@ -7,11 +7,14 @@
  * nothing in the view model claims a provider-exact maximum. The element tree is
  * checked separately in `test/completed-interaction.test.js`.
  *
- * Phase 6 changed the input shape this module consumes: a series is now a list of
- * **runs**, one per attempt episode, each with its own path. A single path could
- * not represent `Reasoning A -> Output A -> Reasoning B` without drawing a line
- * through the stretch where reasoning was absent, so the multi-run shape is the
- * fix rather than a refactor.
+ * Phase 6 changed the input shape this module consumes: a series is a list of
+ * **runs**, one per contiguous phase stretch of an attempt's trace, each with its
+ * own path. A single path could not represent `Reasoning A -> Output A ->
+ * Reasoning B` without drawing a line through the stretch where reasoning was
+ * absent, so the multi-run shape is the fix rather than a refactor. Phase 9.2
+ * changed only the statistic the vertices carry — a phase-cumulative average over
+ * the episode in force, not a trailing window — so the view model's shape, its
+ * geometry and every assertion below are unchanged.
  */
 
 import test from 'node:test'
@@ -24,7 +27,7 @@ import {
   niceCeiling,
 } from '../src/client/completed/curve-view-model.js'
 import { formatTps } from '../src/client/format.js'
-import { DEFAULT_MAX_POINTS, downsampleSeries } from '../src/core/curve.js'
+import { DEFAULT_MAX_POINTS, DEFAULT_SAMPLE_EVERY_MS, downsampleSeries } from '../src/core/curve.js'
 
 /** One run as `telemetry-store.js` publishes it. */
 function run(attemptId, points) {
@@ -70,8 +73,7 @@ function settledCurve(overrides = {}) {
       ],
       peakTps: 700,
       quality: 'estimated',
-      sampleEveryMs: 250,
-      windowMs: 1000,
+      sampleEveryMs: DEFAULT_SAMPLE_EVERY_MS,
       ...overrides,
     },
   }

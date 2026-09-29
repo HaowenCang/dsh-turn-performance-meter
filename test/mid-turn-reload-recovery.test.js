@@ -239,8 +239,10 @@ test('a late frame of a superseded turn does not re-adopt it', () => {
 test('a reloaded page recovers the live meter with an unknown elapsed and TTFT', () => {
   const { controller, append } = reloadedMidTurn()
   append(transientEntry('a:1', 1200, output(HEAVY), { turn: TURN }))
-  /** Read while the newest delta is still inside the one-second window. */
-  const view = controller.project('s', 1200)
+  append(transientEntry('a:1', 1300, output(HEAVY), { turn: TURN }))
+  append(transientEntry('a:1', 1400, output(HEAVY), { turn: TURN }))
+  /** Read on the deltas the page observed; the episode has reached its warm-up count. */
+  const view = controller.project('s', 1400)
 
   assert.equal(view.kind, 'streaming', 'the adopted turn renders its live pill')
   assert.equal(view.turn, TURN)
@@ -248,21 +250,32 @@ test('a reloaded page recovers the live meter with an unknown elapsed and TTFT',
   assert.equal(controller.diagnostics('s').droppedDeltas, 0, 'and no delta was dropped for lack of a turn')
   assert.equal(controller.store.turns.size, 1, 'exactly one turn record exists')
 
-  const snapshot = controller.store.liveSnapshot('s', 1200)
+  const snapshot = controller.store.liveSnapshot('s', 1400)
   assert.equal(snapshot.turnElapsedMs, null, 'elapsed is unknown, never the time since the reload')
   assert.equal(snapshot.ttftMs, null, 'TTFT is unknown: the reload instant is not the turn start')
-  assert.ok(snapshot.tps > 0, 'the trailing rate is measurable from the deltas the page did observe')
+  assert.equal(snapshot.tps, Math.round((0.75 + 300) * 1000 / 300),
+    'the episode-cumulative rate over the deltas the page did observe')
 
-  /** Long after the last observed delta the rate goes quiet again, as it must. */
-  assert.equal(controller.store.liveSnapshot('s', 5200).tps, 0,
-    'an empty trailing window is a measured zero, not a stale rate')
-  assert.equal(controller.store.liveSnapshot('s', 5200).turnElapsedMs, null,
+  /**
+   * Long after the last observed delta the cumulative average decays — the numerator
+   * freezes while the denominator advances — but it never freezes at a value and never
+   * reaches exactly zero by rule. The old trailing window emptied instead, which is the
+   * decay law Phase 9.2 replaced.
+   */
+  const later = controller.store.liveSnapshot('s', 5200)
+  assert.equal(later.tps, Math.round(300.75 * 1000 / 4100))
+  assert.ok(later.tps > 0, 'the cumulative decay never reaches zero by rule')
+  assert.ok(later.tps < snapshot.tps, 'and it strictly decays as the silence grows')
+  assert.equal(later.turnElapsedMs, null,
     'and the elapsed stays unknown however long the page watches')
   controller.dispose()
 })
 
 test('the live elapsed and TTFT are measured once the durable start is observed', () => {
   const { controller, append } = reloadedMidTurn()
+  append(transientEntry('a:1', 1200, output(HEAVY), { turn: TURN }))
+  append(transientEntry('a:1', 1300, output(HEAVY), { turn: TURN }))
+  append(transientEntry('a:1', 1400, output(HEAVY), { turn: TURN }))
   assert.equal(controller.project('s', 5200).elapsedMs, null)
 
   /** The durable boundary finally enters this client's evidence. */
@@ -300,28 +313,31 @@ test('an observed start is never downgraded by later synthetic evidence', () => 
   controller.dispose()
 })
 
-test('the meter upgrades an unknown turn start without restarting the window', () => {
-  const meter = new LiveMeter({ windowMs: 1000 })
+test('the meter upgrades an unknown turn start without restarting the episode', () => {
+  const meter = new LiveMeter()
   meter.turnStarted({ turn: TURN, timeMs: null })
   meter.attemptStarted({ attemptId: 'a:1', step: 1, timeMs: 1100 })
   meter.acceptSample({ timeMs: 1100, phase: 'output', weight: 100, attemptId: 'a:1' })
+  meter.acceptSample({ timeMs: 1200, phase: 'output', weight: 100, attemptId: 'a:1' })
+  meter.acceptSample({ timeMs: 1300, phase: 'output', weight: 100, attemptId: 'a:1' })
 
-  assert.equal(meter.snapshot(1200).turnElapsedMs, null)
-  assert.equal(meter.snapshot(1200).ttftMs, null)
-  assert.equal(meter.snapshot(1200).tps, 100, 'the window is rolling on the observed deltas')
+  assert.equal(meter.snapshot(1300).turnElapsedMs, null)
+  assert.equal(meter.snapshot(1300).ttftMs, null)
+  assert.equal(meter.snapshot(1300).tps, 1500, 'the episode is cumulative over the observed deltas')
 
   assert.equal(meter.turnStartObserved({ turn: TURN, timeMs: 1000 }), true)
-  const upgraded = meter.snapshot(1200)
-  assert.equal(upgraded.turnElapsedMs, 200, 'elapsed is recomputed from the observed start')
+  const upgraded = meter.snapshot(1300)
+  assert.equal(upgraded.turnElapsedMs, 300, 'elapsed is recomputed from the observed start')
   assert.equal(upgraded.ttftMs, 100, 'and TTFT is the same first delta against the same start')
-  assert.equal(upgraded.tps, 100, 'the rolling window was not reset by the upgrade')
+  assert.equal(upgraded.tps, 1500, 'the episode was not restarted by the upgrade')
 
   /** Idempotent, and closed to a turn the meter is not tracking. */
   assert.equal(meter.turnStartObserved({ turn: TURN, timeMs: 1000 }), false)
   assert.equal(meter.turnStartObserved({ turn: TURN + 1, timeMs: 1000 }), false)
   assert.equal(meter.turnStartObserved({ turn: null, timeMs: 1000 }), false)
   assert.equal(meter.turnStartObserved({ turn: TURN, timeMs: Number.NaN }), false)
-  assert.equal(meter.snapshot(1200).turnElapsedMs, 200)
+  assert.equal(meter.snapshot(1300).turnElapsedMs, 300, 'a repeated observation changes nothing')
+  assert.equal(meter.snapshot(1300).tps, 1500)
 })
 
 test('a completed card reports TTFT from an observed start and unavailable without one', () => {

@@ -59,7 +59,13 @@ export function isContributingAttempt(attempt) {
  */
 export function reduceAttempt(attempt) {
   const samples = Array.isArray(attempt?.samples) ? attempt.samples : []
-  const durations = attributePhaseDurations(samples)
+  /**
+   * Phase-episode durations (Phase 9.2). The attempt's settlement instant ends its
+   * terminal episode, so the final generated-delta → settlement tail is charged to
+   * that episode — the MiMo definition — while tool and inter-attempt time is not
+   * reachable from this call at all.
+   */
+  const durations = attributePhaseDurations(samples, { settledAtMs: attempt?.settledAtMs })
   const usage = normalizeUsage(attempt?.usage)
   const calibration = calibrateAttemptSamples(samples, usage ?? undefined)
 
@@ -91,6 +97,16 @@ export function reduceAttempt(attempt) {
     hasReasoningStream: samples.some(sample => sample.phase === 'reasoning'),
     reasoningMs: durations.reasoningMs,
     outputMs: durations.outputMs,
+    /**
+     * How many phase episodes the attempt produced and how many of them were
+     * measurable. The denominator is only complete when every episode of the phase
+     * contributed a positive duration; a phase with a partial denominator makes the
+     * turn's rate optimistic, which `measuredRatio` states rather than hides.
+     */
+    reasoningEpisodeCount: durations.reasoningEpisodeCount,
+    reasoningMeasuredEpisodes: durations.reasoningMeasuredEpisodes,
+    outputEpisodeCount: durations.outputEpisodeCount,
+    outputMeasuredEpisodes: durations.outputMeasuredEpisodes,
     spanMs: durations.spanMs,
     usage,
     /** Where the usage came from, so a recovered total stays distinguishable. */
@@ -209,16 +225,21 @@ export function aggregateTurn(input = {}) {
     ? withUsage.reduce((sum, a) => sum + a.usage.nonReasoningTokens, 0)
     : null
 
-  // Phase denominators: sums of measured generation time. Attempts whose phase
-  // duration is not measurable (fewer than two generated deltas in that phase)
-  // are excluded from the sum and counted, so the rate can be marked optimistic
-  // rather than exact.
+  // Phase denominators: sums of measured episode time. An attempt whose phase
+  // duration is not measurable — no episode of that phase with a positive
+  // duration, or a phase whose episodes are only partly measurable — is not a
+  // complete denominator contribution and is counted as such, so the rate can be
+  // marked optimistic rather than exact.
   const reasoningDurations = reduced.map(a => a.reasoningMs)
   const outputDurations = reduced.map(a => a.outputMs)
   const reasoningMs = reasoningDurations.reduce((sum, ms) => sum + (ms ?? 0), 0)
   const outputMs = outputDurations.reduce((sum, ms) => sum + (ms ?? 0), 0)
-  const reasoningMeasured = reasoningDurations.filter(ms => ms !== null && ms > 0).length
-  const outputMeasured = outputDurations.filter(ms => ms !== null && ms > 0).length
+  const reasoningMeasured = reduced.filter(a => (
+    a.reasoningMs !== null && a.reasoningMs > 0 && a.reasoningMeasuredEpisodes === a.reasoningEpisodeCount
+  )).length
+  const outputMeasured = reduced.filter(a => (
+    a.outputMs !== null && a.outputMs > 0 && a.outputMeasuredEpisodes === a.outputEpisodeCount
+  )).length
 
   /**
    * Per-attempt phase allocations summed across the turn. For an attempt with

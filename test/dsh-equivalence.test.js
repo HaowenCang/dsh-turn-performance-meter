@@ -7,8 +7,8 @@
  *
  * The requirement: for the same completed turn, path A (transient plane plus
  * durable boundaries) and path B (durable settlements only) must agree on
- *   phase segmentation, reasoning/output/generated token totals, active
- *   generation duration, compressed chart coordinates, peak TPS, tool-argument
+ *   phase segmentation, reasoning/output/generated token totals, phase-episode
+ *   durations, compressed chart coordinates, peak TPS, tool-argument
  *   output accounting, tool durations, TTFT and the quality metadata,
  * with a numerical tolerance allowed only where `METRICS_SPEC.md` defines one.
  */
@@ -161,7 +161,7 @@ test('t5: a 1300-delta attempt decodes to the same chart on both paths', () => {
   assert.equal(live.quality.phaseSplitQuality, 'exact')
 
   // Intra-stream stalls must survive: the reasoning phase spans seconds while
-  // carrying 1038 deltas, so at least one second-long window is not empty.
+  // carrying 1038 deltas, so its measured episode duration exceeds one second.
   assert.ok(durableMetrics.reasoningMs > 1000, 't5 reasoning lasts more than one second')
   assert.ok(durableMetrics.outputMs > 1000, 't5 output lasts more than one second')
 })

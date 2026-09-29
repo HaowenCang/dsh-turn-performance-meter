@@ -41,6 +41,7 @@ import { createController } from '../src/client/live/controller.js'
 import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import { reconstructFromDurable } from '../src/dsh/durable-path.js'
 import { turnEndStatus } from '../src/dsh/adapter.js'
+import { heuristicTokenWeight } from '../src/core/token-allocation.js'
 import { loadTargetFixture } from './helpers/fixtures.js'
 import { createWindowDriver } from './helpers/assistant-stream-fold.js'
 
@@ -224,7 +225,7 @@ function comparableMetrics(settled) {
       peakTps: settled.curve.peakTps,
       durationMs: settled.curve.durationMs,
       sampleEveryMs: settled.curve.sampleEveryMs,
-      windowMs: settled.curve.windowMs,
+      maxSeriesPoints: settled.curve.maxSeriesPoints,
       attemptCount: settled.curve.attempts.length,
       attemptDurations: settled.curve.attempts.map(attempt => attempt.durationMs),
       attemptSampleCounts: settled.curve.attempts.map(attempt => attempt.sampleCount),
@@ -614,6 +615,11 @@ test('a recovered terminal turn does not leak into the turn that follows it', ()
    * is per session. A recovered turn that left samples or a running-tool set behind
    * would corrupt the next turn's live rate — which is the reason the recovery has
    * to go through the store rather than be assembled beside it.
+   *
+   * The pill is warm-up aware (Phase 9.2): one generated sample is below
+   * `MIN_WARMUP_SAMPLES`, so the honest reading of the first delta is the episode's
+   * elapsed counter; the rate appears once the episode has enough samples, and it
+   * is the episode-cumulative average over the episode's own clock.
    */
   const h = harness()
   h.driver.replace(TAIL_EVENTS.map(event => ({ type: 'event', event })))
@@ -622,18 +628,34 @@ test('a recovered terminal turn does not leak into the turn that follows it', ()
   // A second turn, observed normally and live, after the recovery.
   h.driver.append({ type: 'event', event: { type: 'turn/start', seq: 41, time: 1790497159000, data: { turn: 2 } } })
   h.driver.append({ type: 'event', event: { type: 'step/start', seq: 42, time: 1790497159010, data: { turn: 2, step: 1 } } })
-  h.driver.append({
+  const delta = (seq, time, index) => ({
     type: 'transient',
     event: {
       type: 'assistant/live-chunk',
-      seq: 43,
-      time: 1790497159100,
-      data: { attemptId: 'sess:2', turn: 2, step: 1, chunk: { type: 'text-delta', index: 0, text: 'hello' } },
+      seq,
+      time,
+      data: { attemptId: 'sess:2', turn: 2, step: 1, chunk: { type: 'text-delta', index, text: 'hello' } },
     },
   })
-  const live = h.project(1790497159100)
-  assert.equal(live.kind, 'streaming', 'the next turn streams normally')
+  h.driver.append(delta(43, 1790497159100, 0))
+
+  const warm = h.project(1790497159100)
+  assert.equal(warm.kind, 'warming', 'one sample is below the warm-up count: the pill shows the episode counter, never a rate')
+  assert.equal(warm.state, 'streaming-output')
+  assert.equal(warm.turn, 2)
+  assert.equal(warm.samples, 1)
+  assert.equal(warm.required, 3)
+
+  // Two more deltas reach the warm-up count; the rate is the episode-cumulative average.
+  h.driver.append(delta(44, 1790497159200, 1))
+  h.driver.append(delta(45, 1790497159300, 2))
+  const live = h.project(1790497159300)
+  assert.equal(live.kind, 'streaming', 'the next turn streams normally once its episode warms up')
   assert.equal(live.turn, 2)
+  const expectedTps = Math.round(
+    3 * heuristicTokenWeight('hello') * 1000 / (1790497159300 - 1790497159100),
+  )
+  assert.equal(live.tps, expectedTps, 'the episode-cumulative average over the episode\'s own clock')
   assert.equal(h.diagnostics().liveRunningTools, 0, 'no recovered tool is left running')
   assert.equal(h.controller.store.live(SESSION).turn, 2)
   assert.equal(h.controller.store.live(SESSION).firstTokenMs, 1790497159100, 'the new turn stamps its own first token')

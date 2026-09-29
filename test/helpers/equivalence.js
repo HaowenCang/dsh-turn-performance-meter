@@ -34,7 +34,6 @@ import { attributePhaseDurations } from '../../src/core/phase-duration.js'
 import { compressAttempts } from '../../src/core/time-axis.js'
 import {
   DEFAULT_SAMPLE_EVERY_MS,
-  DEFAULT_WINDOW_MS,
   attemptTraces,
   peakTps,
 } from '../../src/core/curve.js'
@@ -258,14 +257,15 @@ function textOf(chunk) {
 }
 
 /**
- * Compressed chart coordinates plus the attempt-local total traces and their peak.
+ * Compressed chart coordinates plus the attempt-local phase-cumulative traces and their peak.
  *
- * The trace is built the way the shipped curve builds it — **one trailing window per
- * attempt**, over every generated sample of that attempt whatever its phase — rather
- * than by rolling a single window over the concatenated samples, and rather than by
- * measuring each phase separately. A harness that reproduced either of those
- * arithmetic errors would keep agreeing with itself while disagreeing with the
- * product, which is exactly the failure this helper was rewritten to stop hiding.
+ * The trace is built the way the shipped curve builds it — **one phase-cumulative
+ * estimator per attempt**, over every generated sample of that attempt whatever its
+ * phase, with the episode clock reset at every phase transition — rather than by
+ * rolling one window over the concatenated samples, and rather than by measuring each
+ * phase as its own series. A harness that reproduced either of those arithmetic
+ * errors would keep agreeing with itself while disagreeing with the product, which is
+ * exactly the failure this helper was rewritten to stop hiding.
  *
  * The phase-keyed lists below are **views** of the total traces, cut on `activePhase`
  * exactly as the renderer cuts them, so a path whose phase labelling drifts from the
@@ -274,7 +274,6 @@ function textOf(chunk) {
 export function chartView(attempts) {
   const compressed = compressAttempts(attempts)
   const traces = attemptTraces(compressed.segments, compressed.samples, {
-    windowMs: DEFAULT_WINDOW_MS,
     sampleEveryMs: DEFAULT_SAMPLE_EVERY_MS,
   })
   const runsOf = phase => traces.flatMap(trace => (

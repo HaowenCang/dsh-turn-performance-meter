@@ -115,8 +115,34 @@ export const PhaseEvidenceIssue = Object.freeze({
  */
 export function analyzePhaseEvidence(samples, outputTokens, reasoningTokens) {
   const list = Array.isArray(samples) ? samples : []
-  const hasReasoningSamples = list.some(sample => sample?.phase === 'reasoning')
-  const hasOutputSamples = list.some(sample => sample?.phase === 'output')
+  return analyzePhaseEvidenceFrom({
+    hasReasoningSamples: list.some(sample => sample?.phase === 'reasoning'),
+    hasOutputSamples: list.some(sample => sample?.phase === 'output'),
+    reasoningSampleCount: list.filter(sample => sample?.phase === 'reasoning').length,
+    outputSampleCount: list.filter(sample => sample?.phase === 'output').length,
+  }, outputTokens, reasoningTokens)
+}
+
+/**
+ * The same decision, from a **summary** of the observed stream rather than its samples.
+ *
+ * The live meter cannot hold an attempt's whole sample list — it is a running
+ * estimator, not a log — but the contradiction rules below read exactly two facts
+ * from it: whether a phase produced any generated delta at all, and how many.
+ * This entry point exists so that the live path applies the *same* rules as the
+ * calibration path instead of a second, drifting copy of them.
+ *
+ * @param {{hasReasoningSamples:boolean, hasOutputSamples:boolean,
+ *   reasoningSampleCount?:number, outputSampleCount?:number}} summary
+ * @param {number|null|undefined} outputTokens the authoritative provider total
+ * @param {number|null|undefined} reasoningTokens the provider's reasoning counter, or absent
+ * @returns {object} the same shape `analyzePhaseEvidence` returns
+ */
+export function analyzePhaseEvidenceFrom(summary, outputTokens, reasoningTokens) {
+  const hasReasoningSamples = summary?.hasReasoningSamples === true
+  const hasOutputSamples = summary?.hasOutputSamples === true
+  const reasoningSampleCount = Number.isFinite(summary?.reasoningSampleCount) ? summary.reasoningSampleCount : 0
+  const outputSampleCount = Number.isFinite(summary?.outputSampleCount) ? summary.outputSampleCount : 0
   const splitAvailable = Number.isFinite(reasoningTokens) && reasoningTokens >= 0
   const total = Number.isFinite(outputTokens) && outputTokens >= 0 ? outputTokens : null
 
@@ -184,7 +210,7 @@ export function analyzePhaseEvidence(samples, outputTokens, reasoningTokens) {
       PhaseEvidenceIssue.REASONING_ZERO_WITH_DELTAS,
       'reasoning',
       0,
-      list.filter(sample => sample?.phase === 'reasoning').length,
+      reasoningSampleCount,
       'provider reported reasoningTokens=0 but the stream carries non-empty reasoning deltas; '
       + 'the phase split is downgraded',
     ))
@@ -203,7 +229,7 @@ export function analyzePhaseEvidence(samples, outputTokens, reasoningTokens) {
       PhaseEvidenceIssue.OUTPUT_ZERO_WITH_DELTAS,
       'output',
       0,
-      list.filter(sample => sample?.phase === 'output').length,
+      outputSampleCount,
       'provider reported no non-reasoning tokens but the stream carries output deltas; '
       + 'the phase split is downgraded',
     ))

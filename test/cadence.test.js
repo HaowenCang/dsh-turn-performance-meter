@@ -1,13 +1,13 @@
 /**
- * The presentation cadence contract (Phase 5A).
+ * The presentation cadence contract (Phase 9.2 selection).
  *
- * One number, one home. These tests exist because the previous revision had the
- * same conceptual cadence declared three times — in the controller, in the
- * scheduler and at the mount site — and a contract with three defaults drifts.
- *
- * The properties asserted here are structural. Whether 50 ms *looks* smooth is
- * not a unit test's question; it is answered by the browser A/B recorded in
- * `docs/IMPLEMENTATION_LOG.md`.
+ * One number, one home: `DEFAULT_PRESENTATION_REFRESH_MS` in
+ * `src/client/live/cadence.js`. Phase 9.2 moved the selection to 100 ms as a
+ * *fidelity* decision — MiMo samples its metrics and presents them at ~100 ms —
+ * while 200 ms, 50 ms (the Phase 5A winner) and 10 ms remain reachable through
+ * the diagnostic override. The properties asserted here are structural: whether
+ * 100 ms *looks* smooth is answered by the browser A/B recorded in
+ * `docs/IMPLEMENTATION_LOG.md`, not by a unit test.
  */
 
 import test from 'node:test'
@@ -26,8 +26,9 @@ import { createController } from '../src/client/live/controller.js'
 const readSource = relative => readFile(new URL(`../${relative}`, import.meta.url), 'utf8')
 
 test('the selected production cadence is the single source both consumers read', async () => {
-  assert.equal(DEFAULT_PRESENTATION_REFRESH_MS, 50, 'the cadence the A/B selected')
-  assert.equal(DEFAULT_PRESENTATION_REFRESH_MS === 200, false, 'the 200 ms baseline is no longer the default')
+  assert.equal(DEFAULT_PRESENTATION_REFRESH_MS, 100, 'the cadence Phase 9.2 selected')
+  assert.equal(DEFAULT_PRESENTATION_REFRESH_MS === 50, false, 'the Phase 5A winner is no longer the default')
+  assert.equal(DEFAULT_PRESENTATION_REFRESH_MS === 200, false, 'the 200 ms baseline is not the default either')
 
   const refresh = await readSource('src/client/live/refresh.js')
   const controller = await readSource('src/client/live/controller.js')
@@ -35,8 +36,8 @@ test('the selected production cadence is the single source both consumers read',
 
   for (const [name, source] of [['refresh.js', refresh], ['controller.js', controller], ['main.js', main]]) {
     assert.equal(source.includes('DEFAULT_PRESENTATION_REFRESH_MS'), true, `${name} imports the one constant`)
-    assert.equal(/=\s*200\b/.test(source), false, `${name} declares no cadence of its own`)
-    assert.equal(/intervalMs\s*=\s*\d/.test(source), false, `${name} hard-codes no interval default`)
+    assert.equal(/(?:interval|refresh|delay|timeout|cadence)\w*\s*[:=]\s*\d/i.test(source), false,
+      `${name} declares no numeric cadence of its own`)
   }
   assert.equal(refresh.includes('DEFAULT_PRESENTATION_REFRESH_MS,'), true,
     'the scheduler default *is* the shared constant, not a copy of its value')
@@ -45,7 +46,7 @@ test('the selected production cadence is the single source both consumers read',
 })
 
 test('every cadence the A/B measured can actually be requested', () => {
-  assert.deepEqual([...PRESENTATION_REFRESH_CANDIDATES_MS], [200, 50, 10])
+  assert.deepEqual([...PRESENTATION_REFRESH_CANDIDATES_MS], [200, 100, 50, 10])
   assert.equal(PRESENTATION_REFRESH_CANDIDATES_MS.includes(DEFAULT_PRESENTATION_REFRESH_MS), true,
     'the shipped cadence is one of the measured ones')
   for (const cadence of PRESENTATION_REFRESH_CANDIDATES_MS) {
@@ -56,6 +57,7 @@ test('every cadence the A/B measured can actually be requested', () => {
 })
 
 test('a debug override resolves to a usable cadence and never to a broken timer', () => {
+  assert.equal(resolvePresentationRefreshMs('100'), 100)
   assert.equal(resolvePresentationRefreshMs('50'), 50)
   assert.equal(resolvePresentationRefreshMs('10'), 10)
   assert.equal(resolvePresentationRefreshMs(200), 200)
@@ -107,7 +109,11 @@ test('1000+ deltas are all ingested while presentation stays on the cadence', ()
   }
 })
 
-test('a settled view leaves no ticker, at every candidate cadence', () => {
+test('the controller takes the shared cadence by default and any candidate on request', () => {
+  const fallback = createController({ sessions: { binding: () => undefined } })
+  assert.equal(fallback.refreshMs, DEFAULT_PRESENTATION_REFRESH_MS)
+  fallback.dispose()
+
   for (const cadence of PRESENTATION_REFRESH_CANDIDATES_MS) {
     const controller = createController({ sessions: { binding: () => undefined }, refreshMs: cadence })
     assert.equal(controller.refreshMs, cadence)

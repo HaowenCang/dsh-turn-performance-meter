@@ -190,11 +190,20 @@ test('completed -> a new turn returns the pill immediately and never shows both'
   assert.equal(controller.project(fixture.sessionId, 20_000).columns, undefined,
     'no card fields exist while a turn is open')
 
-  // It streams, then settles into its own card.
+  // It streams, then settles into its own card. Three deltas are appended so the
+  // episode passes its warm-up count, and the durable settlement below carries the
+  // same three members — the live reading and the settlement describe one stream.
   source.appendEntry(transientEntry('t2:1', 20_400, { type: 'text-delta', index: 0, text: 'second answer' }, { turn: 2 }), (revision += 1))
-  const streaming = controller.project(fixture.sessionId, 20_400)
-  assert.equal(['streaming', 'waiting'].includes(streaming.kind), true, 'the model side owns the slot again')
+  source.appendEntry(transientEntry('t2:1', 20_600, { type: 'text-delta', index: 0, text: ' done' }, { turn: 2 }), (revision += 1))
+  source.appendEntry(transientEntry('t2:1', 20_900, { type: 'text-delta', index: 0, text: '!' }, { turn: 2 }), (revision += 1))
+  const streaming = controller.project(fixture.sessionId, 20_900)
+  assert.equal(streaming.kind, 'streaming', 'the model side owns the slot again')
   assert.equal(streaming.kind === 'completed', false)
+  /**
+   * The published rate is the episode's cumulative average:
+   * `round((3.25 + 1.25 + 0.25) * 1000 / (20900 - 20400))`.
+   */
+  assert.equal(streaming.tps, 10)
   /**
    * The settlement carries the same compact stream shape the real log does
    * (`text-chunks` with `dt` gaps), so this exercises the durable settlement the
@@ -389,8 +398,8 @@ test('a rebaseline drops live state but the rebuilt window still yields the card
  *
  * Two rules are frozen here. A reload must not turn the turn into a completed card
  * it never was, and the live pane must not present the pre-reload window's tokens as
- * a current rate: those transient deltas are gone, and a rolling window reassembled
- * as though they had arrived would be a fabrication rather than a measurement.
+ * a current rate: those transient deltas are gone, and an episode reassembled as
+ * though they had arrived would be a fabrication rather than a measurement.
  */
 test('a reload mid-turn reopens the live pill from durable evidence and claims no completed card', () => {
   const sessions = fakeSessionsService()
@@ -403,9 +412,11 @@ test('a reload mid-turn reopens the live pill from durable evidence and claims n
   source.appendEntry(durableEntry('turn/start', 4, 1000, { turn: 1 }), (revision += 1))
   source.appendEntry(transientEntry('a:1', 1100, { type: 'text-delta', index: 0, text: 'x'.repeat(400) }), (revision += 1))
   source.appendEntry(transientEntry('a:1', 1600, { type: 'text-delta', index: 0, text: 'x'.repeat(400) }), (revision += 1))
-  const beforeReload = controller.project('s-reload', 1600)
+  source.appendEntry(transientEntry('a:1', 1900, { type: 'text-delta', index: 0, text: 'x'.repeat(400) }), (revision += 1))
+  const beforeReload = controller.project('s-reload', 1900)
   assert.equal(beforeReload.kind, 'streaming')
-  assert.ok(beforeReload.tps > 0)
+  /** `round(300 * 1000 / 800)`: the episode's own cumulative average. */
+  assert.equal(beforeReload.tps, 375)
 
   /**
    * The reload: the superseded window is swapped for the durable plane only. The

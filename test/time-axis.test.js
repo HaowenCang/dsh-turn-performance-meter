@@ -12,8 +12,10 @@ test('compressed chart removes tool/inter-attempt wall gaps and next-call TTFT',
   assert.deepEqual(result.samples.map(x => x.activeTimeMs), [0, 2000, 2000, 3000])
   assert.equal(result.durationMs, 3000)
   /**
-   * A segment ends on its own last model-producing delta, which is also the coordinate the
-   * next attempt opens on — the same instant, stated once.
+   * A segment ends on its **terminal episode's end** — the attempt's settlement instant
+   * when one is known, its last generated delta otherwise — and that end is also the
+   * coordinate the next attempt opens on, the same instant stated once. With no
+   * settlement observed here, each attempt keeps its last delta as the bound.
    */
   assert.deepEqual(result.segments, [
     {
@@ -39,9 +41,10 @@ test('every sample carries both clocks, and only the first attempt\'s coincide',
     { attemptId: 'b', samples: [{ timeMs: 33_000 }, { timeMs: 34_000 }] },
   ])
   /**
-   * `activeTimeMs` is the drawable coordinate; `attemptTimeMs` is the clock the
-   * rolling window is measured on. Publishing only the first is what let the
-   * completed curve roll a turn-global window while believing it was local.
+   * `activeTimeMs` is the drawable coordinate; `attemptTimeMs` is the clock a
+   * phase episode is measured on. Publishing only the first is what let the
+   * completed curve measure one attempt's episode on a turn-global clock while
+   * believing it was local.
    */
   assert.deepEqual(result.samples.map(x => x.activeTimeMs), [0, 2000, 2000, 3000])
   assert.deepEqual(result.samples.map(x => x.attemptTimeMs), [0, 2000, 0, 1000])
@@ -52,26 +55,60 @@ test('every sample carries both clocks, and only the first attempt\'s coincide',
   }
 })
 
-test('every attempt is bounded by its own last delta, the final one included', () => {
-  const result = compressAttempts([
+test('every attempt is bounded by its terminal episode end, the final one included', () => {
+  /**
+   * With no settlement observed, the terminal episode ends at the attempt's last
+   * generated delta: the axis still stops there and the next attempt opens on that
+   * same coordinate. This is the shape every attempt keeps when the evidence
+   * contains no settlement instant.
+   */
+  const unobserved = compressAttempts([
     { attemptId: 'a', samples: [{ timeMs: 0 }, { timeMs: 500 }] },
     { attemptId: 'b', samples: [{ timeMs: 900 }, { timeMs: 1400 }] },
     { attemptId: 'c', samples: [{ timeMs: 2000 }, { timeMs: 2500 }] },
   ])
-  assert.deepEqual(result.segments.map(s => [s.startMs, s.endMs]), [
+  assert.deepEqual(unobserved.segments.map(s => [s.startMs, s.endMs]), [
     [0, 500],
     [500, 1000],
     [1000, 1500],
   ])
-  assert.equal(result.segments.at(-1).endMs, result.durationMs,
-    'the final attempt ends on its own last delta, at the axis end and never past it')
-  for (let index = 1; index < result.segments.length; index += 1) {
-    assert.equal(result.segments[index - 1].endMs, result.segments[index].startMs,
+  assert.equal(unobserved.segments.at(-1).endMs, unobserved.durationMs,
+    'the final attempt ends at the axis end and never past it')
+
+  /**
+   * With a settlement the terminal episode runs to it: that tail is model-attempt
+   * elapsed time under the MiMo-style definition, so the segment is wider than the
+   * last delta. A settlement recorded *before* the last delta is clock skew and is
+   * refused rather than allowed to shrink real generation time.
+   *
+   *   a  samples 0..500, settles at 700      -> width 700   (tail charged)
+   *   b  samples 900..1400, settles at 1400  -> width 500   (settlement on the last delta)
+   *   c  samples 2000..2500, settles at 2400 -> width 500   (skew refused, last delta wins)
+   */
+  const settled = compressAttempts([
+    { attemptId: 'a', samples: [{ timeMs: 0 }, { timeMs: 500 }], settledAtMs: 700 },
+    { attemptId: 'b', samples: [{ timeMs: 900 }, { timeMs: 1400 }], settledAtMs: 1400 },
+    { attemptId: 'c', samples: [{ timeMs: 2000 }, { timeMs: 2500 }], settledAtMs: 2400 },
+  ])
+  assert.deepEqual(settled.segments.map(s => [s.startMs, s.endMs]), [
+    [0, 700],
+    [700, 1200],
+    [1200, 1700],
+  ])
+  assert.deepEqual(settled.samples.map(x => x.activeTimeMs), [0, 500, 700, 1200, 1200, 1700])
+  assert.equal(settled.segments[0].localEndMs, 700,
+    'the settlement instant ends the terminal episode, past the last generated delta')
+  assert.equal(settled.segments[2].localEndMs, 500,
+    'a settlement before the last delta cannot shrink real generation time')
+  assert.equal(settled.segments.at(-1).endMs, settled.durationMs,
+    'the final attempt ends at the axis end and never past it')
+  for (let index = 1; index < settled.segments.length; index += 1) {
+    assert.equal(settled.segments[index - 1].endMs, settled.segments[index].startMs,
       'and each attempt opens on the coordinate its predecessor closed on')
   }
-  assert.equal('nextStartMs' in result.segments[0], false,
+  assert.equal('nextStartMs' in settled.segments[0], false,
     'the successor bound is gone: it was the same coordinate as endMs, and it existed only to give the final attempt a tail')
-  assert.equal('hasSuccessor' in result.segments[0], false)
+  assert.equal('hasSuccessor' in settled.segments[0], false)
 })
 
 test('the authoritative stream ordinal survives compression', () => {
@@ -114,29 +151,36 @@ test('a zero-width attempt with two simultaneous deltas keeps both', () => {
   assert.deepEqual(result.samples.map(sample => [sample.attemptTimeMs, sample.sampleOrder]), [[0, 0], [0, 1]])
 })
 
-test('a long tool delay adds no horizontal width at all', () => {
+test('a long tool delay adds no horizontal width at all, while the charged tails still count', () => {
   const samples = [{ timeMs: 0 }, { timeMs: 5000 }]
   const shortGap = compressAttempts([
-    { attemptId: 'a', samples },
-    { attemptId: 'b', samples: [{ timeMs: 6000 }, { timeMs: 9000 }] },
+    { attemptId: 'a', samples, settledAtMs: 5100 },
+    { attemptId: 'b', samples: [{ timeMs: 6000 }, { timeMs: 9000 }], settledAtMs: 9050 },
   ])
   const longGap = compressAttempts([
-    { attemptId: 'a', samples },
-    { attemptId: 'b', samples: [{ timeMs: 65_000 }, { timeMs: 68_000 }] },
+    { attemptId: 'a', samples, settledAtMs: 5100 },
+    { attemptId: 'b', samples: [{ timeMs: 65_000 }, { timeMs: 68_000 }], settledAtMs: 68_050 },
   ])
   assert.equal(shortGap.durationMs, longGap.durationMs)
   assert.deepEqual(
     shortGap.samples.map(x => x.activeTimeMs),
     longGap.samples.map(x => x.activeTimeMs),
   )
+  /**
+   * The width is the attempts' own spans — A's 5100 ms including its charged
+   * settlement tail, B's 3050 ms — and the tool wait between them (900 ms in one
+   * variant, 59 900 ms in the other) contributes nothing.
+   */
+  assert.equal(shortGap.durationMs, 5100 + 3050)
 })
 
-test('an intra-stream stall keeps its full width inside the attempt', () => {
+test('an intra-stream stall keeps its full width inside the attempt, tail included', () => {
   const result = compressAttempts([
-    { attemptId: 'a', samples: [{ timeMs: 0 }, { timeMs: 12_000 }, { timeMs: 12_100 }] },
+    { attemptId: 'a', samples: [{ timeMs: 0 }, { timeMs: 12_000 }, { timeMs: 12_100 }], settledAtMs: 12_350 },
   ])
   assert.deepEqual(result.samples.map(x => x.activeTimeMs), [0, 12_000, 12_100])
-  assert.equal(result.durationMs, 12_100)
+  assert.equal(result.durationMs, 12_350,
+    'the 12 s stall keeps its full width and the 250 ms settlement tail is appended')
 })
 
 test('attempts with no generated delta consume no width', () => {

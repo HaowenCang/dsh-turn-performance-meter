@@ -17,6 +17,7 @@ import { createPresentationScheduler } from '../src/client/live/refresh.js'
 import {
   DEFAULT_PRESENTATION_REFRESH_MS,
   PRESENTATION_REFRESH_CANDIDATES_MS,
+  resolvePresentationRefreshMs,
 } from '../src/client/live/cadence.js'
 
 function fakeTimers() {
@@ -55,8 +56,19 @@ function makeScheduler(onRender, timers, intervalMs = DEFAULT_PRESENTATION_REFRE
 test('the scheduler defaults to the selected production cadence, not to a local copy', () => {
   const scheduler = createPresentationScheduler({ onRender() {} })
   assert.equal(scheduler.intervalMs, DEFAULT_PRESENTATION_REFRESH_MS)
-  assert.equal(scheduler.intervalMs, 50)
+  assert.equal(scheduler.intervalMs, 100, 'the frozen Phase 9.2 selection')
   scheduler.dispose()
+})
+
+test('the override resolver coerces anything unusable to the selected production cadence', () => {
+  for (const invalid of [undefined, null, '', 'abc', Number.NaN, 0, -5, Number.POSITIVE_INFINITY, {}]) {
+    assert.equal(resolvePresentationRefreshMs(invalid), DEFAULT_PRESENTATION_REFRESH_MS,
+      `${JSON.stringify(invalid) ?? String(invalid)} must resolve to the selected cadence, not to a broken timer`)
+  }
+  assert.equal(DEFAULT_PRESENTATION_REFRESH_MS, 100, 'the selected cadence is frozen at 100 ms')
+  for (const [candidate, expected] of [['200', 200], [50, 50], [10, 10]]) {
+    assert.equal(resolvePresentationRefreshMs(candidate), expected, `${candidate} is a usable cadence`)
+  }
 })
 
 test('the ticker is bounded and behaves identically at 200, 50 and 10 ms', () => {

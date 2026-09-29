@@ -27,7 +27,10 @@
  *
  * The last two sections exercise the same allocation through the settled snapshot
  * and the curve view model, because the defect is only observable to a reader if the
- * printed peak and the placed marker disagree.
+ * printed peak and the placed dot disagree. Since Phase 9.2 the published statistic is
+ * a phase-cumulative average, so a one-delta attempt publishes the opening anchor `0`
+ * and its own first step — a **two-vertex** run — and the counterexample is rebuilt
+ * around that geometry.
  */
 
 import test from 'node:test'
@@ -35,12 +38,13 @@ import assert from 'node:assert/strict'
 
 import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import {
+  DEFAULT_SAMPLE_EVERY_MS,
   MAX_RENDER_POINTS_TOTAL,
   MIN_MAX_POINTS,
   allocateRunBudgets,
   minimumRunCost,
 } from '../src/core/curve.js'
-import { curveViewModel } from '../src/client/completed/curve-view-model.js'
+import { CURVE_PLOT_HEIGHT, curveViewModel } from '../src/client/completed/curve-view-model.js'
 import { completedTree } from '../src/client/completed/completed-tree.js'
 import { COMPLETED_VIEW_CURVE } from '../src/client/completed/view-mode.js'
 import { completedViewModel } from '../src/client/ui-model.js'
@@ -345,23 +349,25 @@ test('a budget too small for the peak run is refused explicitly rather than clai
 
 /* ------------------------------------------------ through the settled snapshot */
 
-const WINDOW_MS = 1000
-const STEP_MS = 250
-const STRETCHES = 200
-const STRETCH_SPAN_MS = 2000
-const STRETCH_GAP_MS = 2000
-const DELTA_CHARS = 400
-const DELTA_TOKENS = 100
-/** Two 100-token deltas inside a one-second window: the rate every long run carries. */
-const LONG_RUN_TPS = 200
+const ORDINARY_CALLS = 120
+/** 400 characters weigh 100 tokens; asserted in `chunkWeighing` and again in the first test. */
+const ORDINARY_DELTA_CHARS = 400
+const ORDINARY_DELTA_TOKENS = 100
 /**
- * The three single-vertex attempts are driven as `tokens` because at a one-second window a
- * one-delta attempt's rate *is* its token weight. The last of them is the chart's maximum,
- * and it is placed deliberately behind two weaker short runs — the input order the old
- * length-partitioned allocation walked straight through.
+ * The three one-delta attempts, lightest first. Each settles one sampling step after its only
+ * delta, so its trace is the opening anchor and its own first step, `tokens * 1000 / 100`; the
+ * last of them is the chart's maximum, placed deliberately behind two weaker short runs — the
+ * input order the old length-partitioned allocation walked straight through.
  */
-const SINGLETON_TPS = [10, 20, 9999]
-const PEAK_TPS = SINGLETON_TPS[2]
+const SHORT_TOKENS = [10, 20, 9999]
+const SHORT_TAIL_MS = 100
+/** The chart maximum: 9999 tokens over the 100 ms from the episode's opening to the attempt's end. */
+const PEAK_TPS = SHORT_TOKENS[2] * 1000 / SHORT_TAIL_MS
+/**
+ * The strongest vertex an ordinary call publishes: its output episode's first step, 50 ms
+ * after the phase change at 750 ms, `100 * 1000 / 50`.
+ */
+const ORDINARY_PEAK_TPS = ORDINARY_DELTA_TOKENS * 1000 / 50
 
 const textDelta = text => ({ type: 'text-delta', index: 0, text })
 const reasoningDelta = text => ({ type: 'reasoning-delta', index: 0, text })
@@ -378,108 +384,125 @@ function chunkWeighing(tokens) {
 }
 
 /**
- * A saturated turn ending in a **singleton global peak**.
+ * A saturated turn whose global maximum lives in the **cheapest run that can carry one**.
  *
- * The heavy attempt interleaves an output delta and a reasoning delta at every 250 ms step
- * across `STRETCHES` two-second stretches, separated by gaps longer than one window. Since
- * Phase 7C a phase change is a **colour boundary**, not a new run per silence, so the run
- * count is driven by the alternation rather than by the gaps — which is the very behaviour
- * that keeps a long agent turn's chart from fragmenting. It produces several thousand runs
- * of a dozen vertices against a 512-vertex chart budget, so the chart is saturated by an
- * order of magnitude rather than marginally.
+ * Since Phase 9.2 the published statistic is a phase-cumulative average over the episode in
+ * force, so the shortest a peak-bearing run can be is two vertices: the opening anchor `0` and
+ * the first ladder instant, `mass * 1000 / 100`. That is the modern shape of the Phase 7A.1
+ * counterexample — a chart maximum in a low-cost run while ordinary runs compete for the
+ * budget — and it is the shape the allocation must keep.
  *
- * Three single-vertex attempts follow. `singletonTps` exists so the peak can be placed
- * behind two weaker short runs, which is the input order the old two-pass allocation walked
- * straight through the counterexample in. A fourth, trailing attempt is required by the
- * clock rather than by the scenario: `compressAttempts` gives an attempt zero width when it
- * produced a single delta, so an attempt with a successor is its own one-vertex trace — and
- * an attempt that never changes phase has exactly one run.
+ * The ordinary calls are 120 two-phase calls: three reasoning deltas on the 250 ms grid, then
+ * three tool-call-argument deltas, with the attempt settling a quarter-second after its last
+ * one. Each call contributes a reasoning run of eight vertices and an output run of nine, so
+ * the chart holds `120 * 2 + 4` runs and well over 512 vertices: the allocation really binds
+ * and runs really are refused, rather than being saturated only marginally.
+ *
+ * Three one-delta attempts follow, the chart maximum last, so it is placed behind two weaker
+ * short runs — the input order the old length-partitioned allocation walked straight through.
+ * A final zero-width attempt (one delta, settled on its own instant) publishes the opening
+ * anchor alone and keeps the marker half of the chart-wide bound live.
  */
-function driveSaturatedSingletonPeak({ singletonTps = SINGLETON_TPS } = {}) {
+function driveSaturatedShortPeak() {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
-  const heavy = store.beginAttempt(record, { attemptId: 'heavy', step: 1, startedAtMs: 0 })
-  let at = 0
-  let last = 0
-  for (let stretch = 0; stretch < STRETCHES; stretch += 1) {
-    /**
-     * Each stretch streams four output deltas and then four reasoning deltas, half a second
-     * apart inside each phase, and is followed by a gap longer than one window. The phases
-     * are contiguous rather than simultaneous: a reasoning delta and a text delta at the same
-     * instant are legal but pathological, and the chart a reader sees for them is a stack of
-     * one-vertex colour runs rather than a throughput trace.
-     */
-    for (const [kind, chunk] of [['output', textDelta], ['reasoning', reasoningDelta]]) {
-      for (let index = 0; index < 4; index += 1) {
-        const timeMs = at + index * 500
-        store.acceptChunk(record, heavy, { timeMs, chunk: chunk('x'.repeat(DELTA_CHARS)) })
-        last = Math.max(last, timeMs)
-      }
-      at += 2000
-    }
-    at += STRETCH_GAP_MS
-  }
-  store.settleAttempt(heavy, {
-    settledAtMs: last + 1,
-    settlementKind: 'message',
-    surfaceCommitted: true,
-    attemptOutcome: 'committed',
-  })
+  let wallMs = 0
 
-  /** Three one-delta attempts: `tps == tokens` at a one-second window, so the cost is the rate. */
-  for (const [index, tokens] of singletonTps.entries()) {
-    const attempt = store.beginAttempt(record, { attemptId: `short-${index}`, step: 2 + index, startedAtMs: at })
-    store.acceptChunk(record, attempt, { timeMs: at, chunk: chunkWeighing(tokens) })
+  for (let call = 0; call < ORDINARY_CALLS; call += 1) {
+    const attempt = store.beginAttempt(record, { attemptId: `a${call}`, step: call + 1, startedAtMs: wallMs })
+    for (const [kind, offset] of [
+      ['reasoning', 0], ['reasoning', 250], ['reasoning', 500],
+      ['output', 750], ['output', 1000], ['output', 1250],
+    ]) {
+      store.acceptChunk(record, attempt, {
+        timeMs: wallMs + offset,
+        chunk: (kind === 'reasoning' ? reasoningDelta : textDelta)('x'.repeat(ORDINARY_DELTA_CHARS)),
+      })
+    }
     store.settleAttempt(attempt, {
-      settledAtMs: at + 1,
+      settledAtMs: wallMs + 1500,
       settlementKind: 'message',
       surfaceCommitted: true,
       attemptOutcome: 'committed',
+      settlementSeq: call + 1,
     })
-    at += 1000
+    wallMs += 1500
   }
-  /** The successor that collapses the peak attempt's episode to its single instant. */
-  const tail = store.beginAttempt(record, { attemptId: 'tail', step: 9, startedAtMs: at })
-  store.acceptChunk(record, tail, { timeMs: at, chunk: textDelta('x'.repeat(DELTA_CHARS)) })
-  store.settleAttempt(tail, {
-    settledAtMs: at + 1,
+
+  for (const [index, tokens] of SHORT_TOKENS.entries()) {
+    const attempt = store.beginAttempt(record, {
+      attemptId: `short-${index}`,
+      step: ORDINARY_CALLS + 1 + index,
+      startedAtMs: wallMs,
+    })
+    store.acceptChunk(record, attempt, { timeMs: wallMs, chunk: chunkWeighing(tokens) })
+    store.settleAttempt(attempt, {
+      settledAtMs: wallMs + SHORT_TAIL_MS,
+      settlementKind: 'message',
+      surfaceCommitted: true,
+      attemptOutcome: 'committed',
+      settlementSeq: ORDINARY_CALLS + 1 + index,
+    })
+    wallMs += 1000
+  }
+
+  const zero = store.beginAttempt(record, { attemptId: 'zero-width', step: ORDINARY_CALLS + 4, startedAtMs: wallMs })
+  store.acceptChunk(record, zero, { timeMs: wallMs, chunk: chunkWeighing(ORDINARY_DELTA_TOKENS) })
+  store.settleAttempt(zero, {
+    settledAtMs: wallMs,
     settlementKind: 'message',
     surfaceCommitted: true,
     attemptOutcome: 'committed',
+    settlementSeq: ORDINARY_CALLS + 4,
   })
 
-  return store.endTurn(record, { timeMs: at + 2000, status: 'completed' })
+  return store.endTurn(record, { timeMs: wallMs + 2000, status: 'completed' })
 }
 
 const runsOf = settled => settled.curve.series.flatMap(entry => entry.runs)
 
-test('a saturated chart keeps a singleton global peak and the budget that bounds it', () => {
-  assert.equal(heuristicTokenWeight('x'.repeat(DELTA_CHARS)), DELTA_TOKENS)
-  const settled = driveSaturatedSingletonPeak()
+/** The allocation's own run order: attempt-major, the order the chart draws. */
+const allocationRunsOf = curve => curve.attempts.flatMap(attempt => attempt.runs)
+
+test('a saturated chart keeps a low-cost global peak and the budget that bounds it', () => {
+  assert.equal(heuristicTokenWeight('x'.repeat(ORDINARY_DELTA_CHARS)), ORDINARY_DELTA_TOKENS)
+  const settled = driveSaturatedShortPeak()
   const curve = settled.curve
   const runs = runsOf(settled)
 
-  assert.ok(runs.length > 400, `expected a saturated chart, found ${runs.length} runs`)
+  assert.ok(runs.length > 200, `expected a saturated chart, found ${runs.length} runs`)
+  assert.equal(runs.length, ORDINARY_CALLS * 2 + 4,
+    'two phase stretches per ordinary call, plus three short runs and one marker-only run')
   assert.equal(curve.renderBudget.total, MAX_RENDER_POINTS_TOTAL)
+  assert.ok(curve.renderBudget.degradedRuns > 0,
+    'a chart of this many runs against 512 vertices must refuse runs, or the bound is not exercised')
 
-  const sampled = runs.filter(run => run.points.length === 1 && run.attemptId.startsWith('short-'))
-  assert.equal(sampled.length, 3, 'the three one-delta attempts each contribute a one-vertex run')
-  assert.deepEqual(sampled.map(run => run.points[0].tps), SINGLETON_TPS,
-    'and each still carries the measurement it was created with')
-  const peakRun = runs.find(run => run.points.some(point => point.tps === PEAK_TPS))
+  /** Each one-delta attempt publishes its anchor and its own first step. */
+  const shortTraces = curve.attempts.filter(attempt => String(attempt.attemptId).startsWith('short-'))
+  assert.deepEqual(shortTraces.map(attempt => attempt.points.map(point => [point.localMs, point.tps])), [
+    [[0, 0], [100, 100]],
+    [[0, 0], [100, 200]],
+    [[0, 0], [100, 99_990]],
+  ], 'each short attempt is the anchor plus its own cumulative first step, tokens * 1000 / 100')
+  assert.equal(curve.peakTps, PEAK_TPS)
+  assert.equal(PEAK_TPS, 99_990)
+
+  /** The maximum is seated: its run is drawn and still carries the value the card prints. */
+  const peakRun = runs.find(run => run.points.some(point => Math.abs(point.tps - curve.peakTps) < 1e-9))
   assert.ok(peakRun !== undefined,
-    `the ${PEAK_TPS} tokens/s singleton is not drawn at all; published peak is ${curve.peakTps}`)
+    `the ${PEAK_TPS} tokens/s peak is not drawn at all; published peak is ${curve.peakTps}`)
   assert.equal(peakRun.degraded, false)
-  assert.equal(curve.peakTps, PEAK_TPS,
-    'the printed peak is the singleton measurement, not a rate assembled from the long runs')
+  assert.equal(peakRun.attemptId, 'short-2',
+    'the printed peak is the short attempt\'s own measurement, not a rate assembled from the long runs')
   assert.equal(curve.renderBudget.peakRetained, true)
-  assert.equal(runs[curve.renderBudget.peakRun], peakRun,
-    'the published peak index names the run that carries the maximum')
-  /** The long runs really are the weaker evidence here: the peak is not a tie. */
-  const longRunPeaks = runs.filter(run => run.points.length > 1).map(run => run.peak)
-  assert.ok(longRunPeaks.every(peak => peak <= LONG_RUN_TPS),
-    `a long run measured more than ${LONG_RUN_TPS} tokens/s: ${Math.max(...longRunPeaks)}`)
-  assert.equal(Math.max(...longRunPeaks), LONG_RUN_TPS, 'and the strongest of them is the expected rate')
+  assert.equal(allocationRunsOf(curve)[curve.renderBudget.peakRun].attemptId, 'short-2',
+    'the published peak index names the run that carries the maximum in the allocation\'s own order')
+  /** The ordinary runs really are the weaker evidence here: the peak is not a tie. */
+  const ordinaryPeaks = runs.filter(run => String(run.attemptId).startsWith('a')).map(run => run.peak)
+  assert.ok(ordinaryPeaks.every(peak => peak <= ORDINARY_PEAK_TPS),
+    `an ordinary run measured more than ${ORDINARY_PEAK_TPS} tokens/s: ${Math.max(...ordinaryPeaks)}`)
+  assert.equal(Math.max(...ordinaryPeaks), ORDINARY_PEAK_TPS,
+    'and the strongest of them is the output episode\'s own first step')
 
   /** Chart-wide bound: path vertices **and** singleton markers together are what 512 bounds. */
   assert.ok(curve.renderBudget.elementPoints <= MAX_RENDER_POINTS_TOTAL,
@@ -489,14 +512,15 @@ test('a saturated chart keeps a singleton global peak and the budget that bounds
     curve.renderBudget.elementPoints,
     curve.renderBudget.lineVertices + curve.renderBudget.markers,
   )
+  assert.equal(curve.sampleEveryMs, DEFAULT_SAMPLE_EVERY_MS, 'the ladder every trace above sits on')
 })
 
 test('a refused long run is emptied rather than thinned below its anchors', () => {
-  const settled = driveSaturatedSingletonPeak()
+  const settled = driveSaturatedShortPeak()
   const runs = runsOf(settled)
   const refused = runs.filter(run => run.degraded)
   assert.ok(refused.length > 0,
-    'a 400-run chart against a 512-vertex budget must refuse runs; the refusal path is not dead code')
+    'a 244-run chart against a 512-vertex budget must refuse runs; the refusal path is not dead code')
   for (const run of refused) {
     assert.deepEqual(run.points, [], 'a refused run carries no vertices')
     assert.equal(run.fullResolution, false)
@@ -511,28 +535,37 @@ test('a refused long run is emptied rather than thinned below its anchors', () =
 
 /* ------------------------------------------------------- peak value and position */
 
-test('the printed peak and the placed marker are the same measurement', () => {
-  const settled = driveSaturatedSingletonPeak()
+test('the printed peak and the placed dot are the same measurement', () => {
+  const settled = driveSaturatedShortPeak()
   const curve = settled.curve
   const view = curveViewModel({ curve })
   assert.equal(view.peak.value, curve.peakTps, 'the view model prints the settled peak')
   assert.equal(view.peak.value, PEAK_TPS)
 
+  /**
+   * The drawn coordinate that carries the peak: the short attempt's second vertex. A render
+   * budget may thin the drawing, but `downsampleRun` keeps every run's maximum and the
+   * allocator seats the peak-bearing run first, so the dot has a real vertex to sit on.
+   */
   const output = view.series.find(series => series.key === 'output')
-  assert.ok(output.markers.some(candidate => candidate.tps === PEAK_TPS),
-    `no singleton marker stands at ${PEAK_TPS} tokens/s; the placed markers are ${JSON.stringify(view.markers.map(m => m.tps))}`)
-  /** The rounded list the SVG layer receives, so the comparison below is on rendered coordinates. */
-  const marker = view.markers.find(candidate => candidate.tps === PEAK_TPS)
-  assert.equal(marker.series, 'output', 'the peak measurement belongs to the output series')
+  const carrying = output.runs
+    .flatMap(run => run.coordinates)
+    .filter(point => Math.abs(point.tps - PEAK_TPS) < 1e-9)
+  assert.equal(carrying.length, 1, 'exactly one drawn vertex measures the peak')
+  assert.equal(carrying[0].attemptId, 'short-2')
+  assert.equal(output.peak.tps, PEAK_TPS, 'and the output series carries it')
 
   /**
    * The defect this test exists for: `peak.value` was the full-series maximum while `x`/`y`
-   * were taken from whichever series happened to lead the *drawn* points. Once the singleton
-   * peak was starved, the card printed `≈9,999` and placed the dot on a 400 tokens/s vertex —
+   * were taken from whichever series happened to lead the *drawn* points. Once the peak-bearing
+   * run was starved, the card printed `≈9,999` and placed the dot on a 400 tokens/s vertex —
    * two different measurements, one pixel apart, and nothing on screen to tell them apart.
+   * The placed position must be the rounded coordinate of that very vertex.
    */
-  assert.equal(view.peak.x, marker.x, 'the peak marker sits on the vertex that measured the peak')
-  assert.equal(view.peak.y, marker.y)
+  const round2 = value => Math.round(value * 100) / 100
+  assert.equal(view.peak.x, round2(carrying[0].x),
+    'the peak dot sits on the vertex that measured the peak')
+  assert.equal(view.peak.y, round2(carrying[0].y))
   assert.equal(view.peak.leader, 'output')
 
   /** And the same claim through the rendered card, which is what a reader actually sees. */
@@ -549,27 +582,40 @@ test('the printed peak and the placed marker are the same measurement', () => {
 
   const [dot] = byClass(panel, 'dsh-tpm-peak-dot')
   assert.ok(dot !== undefined, 'the peak has a position on the chart')
-  const placed = byClass(panel, 'dsh-tpm-singleton-dot')
-  const atPeak = placed.filter(node => node.props['data-tps'] === String(PEAK_TPS))
-  assert.equal(atPeak.length, 1, 'exactly one marker stands for the peak measurement')
-  assert.equal(dot.props.style.left, atPeak[0].props.style.left,
-    'the peak dot is drawn on the marker that measured it')
-  assert.equal(dot.props.style.top, atPeak[0].props.style.top)
+  assert.equal(dot.props.style.left, `${view.peak.x}%`)
+  assert.equal(dot.props.style.top, `${(view.peak.y / CURVE_PLOT_HEIGHT) * 100}%`)
   assert.equal(dot.props['data-leader'], 'output')
+
+  /**
+   * The zero-width attempt keeps its own point marker, and it is not the peak: a marker whose
+   * measurement is the opening anchor reads 0, one plot-height away from the dot.
+   */
+  const [marker] = byClass(panel, 'dsh-tpm-singleton-dot')
+  assert.ok(marker !== undefined, 'the zero-width attempt is placed as a point marker')
+  assert.equal(marker.props['data-tps'], '0')
+  assert.notEqual(marker.props.style.top, dot.props.style.top,
+    'the peak dot is not drawn on the anchor-only marker')
 })
 
 test('a saturated curve never places the peak dot on a different measurement', () => {
-  const settled = driveSaturatedSingletonPeak()
+  const settled = driveSaturatedShortPeak()
   const curve = settled.curve
   const view = curveViewModel({ curve })
 
   /**
    * Whatever the allocation decides, the position must be *the* measurement or nothing at all.
-   * A dot at a different rate is the one outcome that is worse than no dot.
+   * A dot at a different rate is the one outcome that is worse than no dot. Coordinates are
+   * compared as rendered: the view model rounds the placed position and every marker to two
+   * decimals, and the drawn vertices are rounded the same way here.
    */
+  const round2 = value => Math.round(value * 100) / 100
   const positions = [
     ...view.markers.map(marker => ({ tps: marker.tps, x: marker.x, y: marker.y })),
-    ...view.series.flatMap(series => series.runs.flatMap(run => run.coordinates.map(point => ({ tps: point.tps, x: point.x, y: point.y })))),
+    ...view.series.flatMap(series => series.runs.flatMap(run => run.coordinates.map(point => ({
+      tps: point.tps,
+      x: round2(point.x),
+      y: round2(point.y),
+    })))),
   ]
   if (view.peak.x === null) {
     assert.equal(view.peak.y, null, 'a peak with no position is placed nowhere')
@@ -584,7 +630,7 @@ test('a saturated curve never places the peak dot on a different measurement', (
 /* --------------------------------------------------------- the chart-wide bound */
 
 test('line vertices plus singleton markers are bounded by the chart budget together', () => {
-  const settled = driveSaturatedSingletonPeak()
+  const settled = driveSaturatedShortPeak()
   const curve = settled.curve
   const view = curveViewModel({ curve })
 
@@ -602,8 +648,8 @@ test('line vertices plus singleton markers are bounded by the chart budget toget
     `the SVG would receive ${view.renderElementPoints} elements against a budget of ${MAX_RENDER_POINTS_TOTAL}`)
 
   const markers = view.series.reduce((sum, series) => sum + series.markers.length, 0)
+  assert.equal(markers, 1, 'the zero-width attempt is the chart\'s only marker')
   assert.equal(view.markers.length, markers)
   assert.equal(curve.renderBudget.markers, markers, 'and the snapshot counted the same markers')
   assert.equal(curve.renderBudget.lineVertices, view.drawnPoints)
-  assert.equal(WINDOW_MS, 1000, 'the rolling window the rates above are measured over')
 })

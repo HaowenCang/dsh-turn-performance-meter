@@ -92,6 +92,27 @@ test('streaming shows the live TPS with its quality and never a curve', () => {
   assert.equal('curve' in view, false, 'live mode has no curve')
 })
 
+test('a streaming episode below its warm-up count is a warming view, not a rate', () => {
+  const view = liveViewModel({
+    turn: 4,
+    phase: 'streaming',
+    tps: null,
+    activePhase: 'reasoning',
+    episodeElapsedMs: 450,
+    episodeSampleCount: 1,
+    warmupSamples: 3,
+    turnElapsedMs: 5200,
+  })
+  assert.equal(view.kind, 'warming')
+  assert.equal(view.activePhase, 'reasoning')
+  assert.equal(view.episodeElapsedMs.value, 450)
+  assert.equal(view.episodeElapsedMs.quality, MetricQuality.EXACT)
+  assert.equal(view.samples, 1)
+  assert.equal(view.required, 3)
+  assert.equal(view.turnElapsed.value, 5200)
+  assert.equal('tps' in view, false, 'no rate is published before the warm-up count')
+})
+
 test('a tool phase shows the tool timer and no TPS at all', () => {
   const single = liveViewModel({
     turn: 4,

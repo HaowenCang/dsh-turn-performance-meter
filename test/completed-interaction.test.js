@@ -54,8 +54,7 @@ const settledCurve = () => ({
   peakTps: 700,
   phaseSpans: { reasoning: { startMs: 0, endMs: 6000 }, output: { startMs: 5000, endMs: 20_000 } },
   quality: 'estimated',
-  sampleEveryMs: 250,
-  windowMs: 1000,
+  sampleEveryMs: 100,
 })
 
 function viewOf(curve = null) {

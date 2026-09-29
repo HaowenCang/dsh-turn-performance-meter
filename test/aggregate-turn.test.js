@@ -1,3 +1,25 @@
+/**
+ * Attempt-level reduction and turn-level aggregation (Phase 9.2).
+ *
+ * The statistical unit is the whole **turn**. A turn may contain several model
+ * attempts, retries and tool calls, and the completed TPS values are ratios of
+ * turn-level sums:
+ *
+ *   reasoning TPS = sum(reasoning tokens) / sum(reasoning generation time)
+ *   output TPS    = sum(non-reasoning output tokens) / sum(output generation time)
+ *
+ * An arithmetic mean of per-step or per-attempt TPS values is never computed
+ * (`docs/METRICS_SPEC.md` §1, §7). Generation time is the sum of the attempts'
+ * measurable phase-episode durations: under the Phase 9.2 policy each attempt's
+ * terminal episode ends at its **own** settlement instant, so the within-attempt
+ * settlement tail is charged while tool and inter-attempt time never reaches the
+ * aggregation at all.
+ *
+ * Provider usage semantics: `reasoningTokens`, when present, is already included
+ * in `outputTokens`, so non-reasoning output is `outputTokens - reasoningTokens`.
+ * The two counters are never added.
+ */
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { aggregateTurn, reduceAttempt } from '../src/core/aggregate-turn.js'
@@ -5,7 +27,11 @@ import { MetricQuality } from '../src/core/metric-quality.js'
 import { QualityLevel } from '../src/core/quality-model.js'
 import { compressAttempts } from '../src/core/time-axis.js'
 
-/** Attempt A: reasoning 0 -> 2000, then output 2000 -> 5000. */
+/**
+ * Attempt A: reasoning 0 -> 2000, then output 2000 -> 5000, settled at 6000.
+ * The terminal output episode is therefore 2000 -> 6000: the 1000 ms
+ * generated-delta -> settlement tail is charged to it.
+ */
 const ATTEMPT_A = {
   attemptId: 'a1',
   turn: 1,
@@ -14,6 +40,7 @@ const ATTEMPT_A = {
   surfaceCommitted: true,
   attemptOutcome: 'committed',
   usage: { outputTokens: 100, reasoningTokens: 40 },
+  settledAtMs: 6000,
   samples: [
     { timeMs: 0, phase: 'reasoning', weight: 4 },
     { timeMs: 2000, phase: 'reasoning', weight: 6 },
@@ -23,7 +50,7 @@ const ATTEMPT_A = {
 }
 
 /**
- * Attempt B: reasoning 0 -> 3000, then output 3000 -> 12000.
+ * Attempt B: reasoning 0 -> 3000, then output 3000 -> 9000, settled at 9000.
  * Attempt-local zero, exactly as DSH reports it: there is no global clock in the
  * samples.
  */
@@ -35,11 +62,12 @@ const ATTEMPT_B = {
   surfaceCommitted: true,
   attemptOutcome: 'committed',
   usage: { outputTokens: 900, reasoningTokens: 360 },
+  settledAtMs: 9000,
   samples: [
     { timeMs: 0, phase: 'reasoning', weight: 6 },
     { timeMs: 3000, phase: 'reasoning', weight: 4 },
     { timeMs: 3000, phase: 'output', weight: 8 },
-    { timeMs: 12_000, phase: 'output', weight: 2 },
+    { timeMs: 9000, phase: 'output', weight: 2 },
   ],
 }
 
@@ -56,10 +84,11 @@ test('turn TPS is token/duration weighted, never the arithmetic mean of attempt 
   assert.equal(result.reasoningMs, 5000)
   assert.equal(result.reasoningTps, 80)
 
-  // Non-reasoning output: (100-40) + (900-360) = 600 tokens over 3000 + 9000 = 12000 ms.
+  // Non-reasoning output: (100-40) + (900-360) = 600 tokens over
+  // 4000 + 6000 = 10000 ms.
   assert.equal(result.nonReasoningTokens, 600)
-  assert.equal(result.outputMs, 12_000)
-  assert.equal(result.outputTps, 50)
+  assert.equal(result.outputMs, 10_000)
+  assert.equal(result.outputTps, 60)
 
   // generatedTokens is the provider output total (reasoning included): 100 + 900.
   assert.equal(result.generatedTokens, 1000)
@@ -71,10 +100,10 @@ test('turn TPS is token/duration weighted, never the arithmetic mean of attempt 
   assert.equal(result.reasoningTpsQuality, MetricQuality.EXACT)
   assert.equal(result.outputTpsQuality, MetricQuality.EXACT)
 
-  // The forbidden arithmetic mean would be (40 + 120) / 2 = 80 for reasoning
-  // and (20 + 60) / 2 = 40 for output; the weighted values differ, and the
+  // The forbidden arithmetic mean would be (20 + 120) / 2 = 70 for reasoning
+  // and (15 + 90) / 2 = 52.5 for output; the weighted values differ, and the
   // output case is asserted explicitly.
-  const arithmeticMeanOutput = (20 + 60) / 2
+  const arithmeticMeanOutput = (15 + 90) / 2
   assert.notEqual(result.outputTps, arithmeticMeanOutput)
 })
 
@@ -82,16 +111,23 @@ test('reasoningTokens is never added to outputTokens', () => {
   const result = aggregateTurn({
     turnStartMs: 0,
     turnEndMs: 1000,
-    attempts: [{ attemptId: 'x', usage: { outputTokens: 1000, reasoningTokens: 600 }, samples: [
-      { timeMs: 0, phase: 'reasoning', weight: 1 },
-      { timeMs: 100, phase: 'output', weight: 1 },
-    ] }],
+    attempts: [{
+      attemptId: 'x',
+      usage: { outputTokens: 1000, reasoningTokens: 600 },
+      settledAtMs: 200,
+      samples: [
+        { timeMs: 0, phase: 'reasoning', weight: 1 },
+        { timeMs: 100, phase: 'output', weight: 1 },
+      ],
+    }],
   })
   // METRICS_SPEC fixture B: 1000 output, 600 reasoning, 400 non-reasoning.
   assert.equal(result.generatedTokens, 1000, 'never 1600')
   assert.equal(result.reasoningTokens, 600)
   assert.equal(result.nonReasoningTokens, 400)
   assert.equal(result.reasoningTokens + result.nonReasoningTokens, result.generatedTokens)
+  assert.equal(result.outputMs, 100, '100 -> 200: the terminal output episode')
+  assert.equal(result.outputTps, 4000, '400 non-reasoning tokens over 100 ms')
 })
 
 test('one attempt without authoritative usage makes the exact turn total unavailable without dropping the partial sum', () => {
@@ -128,8 +164,10 @@ test('one attempt without authoritative usage makes the exact turn total unavail
   assert.equal(result.phaseTokens.output, 60, 'the rest of the observed total is allocated to output')
   assert.equal(result.phaseTokens.reasoning + result.phaseTokens.output, result.observedGeneratedTokens,
     'the phase pair never sums past the total that was actually observed')
+  assert.equal(result.reasoningMs, 2000)
+  assert.equal(result.outputMs, 4000, 'only the settled attempt contributes a measurable output episode')
   assert.equal(result.reasoningTps, 20, '40 allocated tokens over the 2000 ms of measured reasoning time')
-  assert.equal(result.outputTps, 20, '60 allocated tokens over the 3000 ms of measured output time')
+  assert.equal(result.outputTps, 15, '60 allocated tokens over the 4000 ms of measured output time')
   assert.equal(result.outputTpsQuality, MetricQuality.ESTIMATED,
     'only one of the two contributing attempts had a measurable output phase')
   assert.equal(result.splitQuality, MetricQuality.ESTIMATED)
@@ -142,6 +180,7 @@ test('missing reasoningTokens across every attempt keeps the total exact and the
     attempts: [{
       attemptId: 'h',
       usage: { outputTokens: 500 },
+      settledAtMs: 3500,
       samples: [
         { timeMs: 0, phase: 'reasoning', weight: 5 },
         { timeMs: 1000, phase: 'reasoning', weight: 5 },
@@ -168,20 +207,37 @@ test('missing reasoningTokens across every attempt keeps the total exact and the
   assert.equal(result.reasoningTps, 250)
   assert.equal(result.reasoningTpsQuality, MetricQuality.CALIBRATED,
     'anchored to an exact total over complete measured timing, with an unmeasured division')
-  assert.equal(result.outputTps, 125, 'the same 250 allocated tokens over the 2000 ms output span')
+  assert.equal(result.outputMs, 2500, '1000 -> 3500: the terminal output episode')
+  assert.equal(result.outputTps, 100, 'the same 250 allocated tokens over the 2500 ms output episode')
   assert.equal(result.outputTpsQuality, MetricQuality.CALIBRATED)
 })
 
 test('a single-delta attempt yields no rate rather than an infinite one', () => {
-  const result = aggregateTurn({
+  const unmeasured = aggregateTurn({
     turnStartMs: 0,
     turnEndMs: 100,
     attempts: [{ attemptId: 'one', usage: { outputTokens: 10, reasoningTokens: 0 }, samples: [{ timeMs: 0, phase: 'output', weight: 1 }] }],
   })
-  assert.equal(result.outputMs, 0)
-  assert.equal(result.outputTps, null)
-  assert.equal(result.outputTpsQuality, MetricQuality.UNAVAILABLE)
-  assert.equal(Number.isFinite(result.outputTps ?? 0), true)
+  assert.equal(unmeasured.outputMs, 0, 'no measurable episode contributes nothing to the sum')
+  assert.equal(unmeasured.attemptBreakdown[0].outputMs, null, 'the attempt itself has no measurable duration')
+  assert.equal(unmeasured.outputTps, null)
+  assert.equal(unmeasured.outputTpsQuality, MetricQuality.UNAVAILABLE)
+  assert.equal(Number.isFinite(unmeasured.outputTps ?? 0), true)
+
+  // With the attempt's own settlement the same single delta is measurable.
+  const measured = aggregateTurn({
+    turnStartMs: 0,
+    turnEndMs: 100,
+    attempts: [{
+      attemptId: 'one',
+      usage: { outputTokens: 10, reasoningTokens: 0 },
+      settledAtMs: 100,
+      samples: [{ timeMs: 0, phase: 'output', weight: 1 }],
+    }],
+  })
+  assert.equal(measured.outputMs, 100)
+  assert.equal(measured.outputTps, 100, '10 tokens over 100 ms')
+  assert.equal(measured.outputTpsQuality, MetricQuality.EXACT)
 })
 
 test('attempts that emitted no generated delta are excluded from the denominators but counted', () => {
@@ -233,52 +289,62 @@ test('an interrupted turn still reports the throughput it was observed to reach'
         surfaceCommitted: true,
         attemptOutcome: 'interrupted',
         usage: null,
+        settledAtMs: 2500,
         samples: [
-          { timeMs: 0, phase: 'reasoning', weight: 3 },
-          { timeMs: 2000, phase: 'reasoning', weight: 3 },
+          { timeMs: 0, phase: 'reasoning', weight: 5 },
+          { timeMs: 2000, phase: 'reasoning', weight: 5 },
         ],
       },
     ],
   })
   assert.equal(result.status, 'interrupted')
-  assert.equal(result.reasoningMs, 2000, 'observed generation time is real even without usage')
+  assert.equal(result.reasoningMs, 2500, '0 -> 2500: observed generation time is real even without usage')
   assert.equal(result.ttftMs, 500, 'TTFT is defined for an interrupted turn too')
   assert.equal(result.generatedTokens, null, 'no usage means no exact total')
   /**
    * The interrupted prefix is still real evidence. Without usage the published
-   * phase magnitude is the raw shape weight and the rate inherits `estimated`, so
+   * phase magnitude is the raw shape weight and the rate inherits `calibrated`, so
    * the card can show what the turn was reaching before it was stopped — always
    * behind `≈`, never as an exact rate and never as a fabricated token count.
    */
-  assert.equal(result.phaseTokens.reasoning, 6)
+  assert.equal(result.phaseTokens.reasoning, 10)
   assert.equal(result.phaseTokens.output, null, 'the output phase has no evidence at all')
-  assert.equal(result.reasoningTps, 3, '6 shape tokens over the 2000 ms observed reasoning span')
+  assert.equal(result.reasoningTps, 4, '10 shape tokens over the 2500 ms observed reasoning episode')
   assert.equal(result.reasoningTpsQuality, MetricQuality.CALIBRATED,
-    'the shape is anchored to a real observed span even with no provider counter')
+    'the shape is anchored to a real observed episode even with no provider counter')
   assert.ok(result.shapeTokens.reasoning > 0)
   assert.equal(result.shapeTokens.output, 0)
 })
 
 test('reduceAttempt reports measured durations from the samples it was given', () => {
-  const reduced = reduceAttempt(ATTEMPT_B)
-  assert.equal(reduced.reasoningMs, 3000)
-  assert.equal(reduced.outputMs, 9000)
-  assert.equal(reduced.spanMs, 12_000)
-  assert.equal(reduced.splitQuality, MetricQuality.EXACT)
+  const a = reduceAttempt(ATTEMPT_A)
+  assert.equal(a.reasoningMs, 2000)
+  assert.equal(a.outputMs, 4000, '2000 -> 6000: the terminal episode runs to the settlement instant')
+  assert.equal(a.spanMs, 5000, 'last sample - first sample; the settlement tail is not a sample')
+  assert.equal(a.reasoningEpisodeCount, 1)
+  assert.equal(a.reasoningMeasuredEpisodes, 1)
+  assert.equal(a.outputEpisodeCount, 1)
+  assert.equal(a.outputMeasuredEpisodes, 1)
+
+  const b = reduceAttempt(ATTEMPT_B)
+  assert.equal(b.reasoningMs, 3000)
+  assert.equal(b.outputMs, 6000)
+  assert.equal(b.spanMs, 9000)
+  assert.equal(b.splitQuality, MetricQuality.EXACT)
 })
 
 test('turn TPS denominators exclude tool and inter-call waiting time', () => {
   // Fixture D: LLM A 4s -> tool 60s -> LLM B 6s -> tool 20s -> LLM C 5s.
   // Scaled to seconds-as-milliseconds to keep the arithmetic exact.
-  const attemptA = { attemptId: 'A', usage: { outputTokens: 400, reasoningTokens: 0 }, samples: [
+  const attemptA = { attemptId: 'A', usage: { outputTokens: 400, reasoningTokens: 0 }, settledAtMs: 4000, samples: [
     { timeMs: 0, phase: 'output', weight: 100 },
     { timeMs: 4000, phase: 'output', weight: 100 },
   ] }
-  const attemptB = { attemptId: 'B', usage: { outputTokens: 600, reasoningTokens: 0 }, samples: [
+  const attemptB = { attemptId: 'B', usage: { outputTokens: 600, reasoningTokens: 0 }, settledAtMs: 6000, samples: [
     { timeMs: 0, phase: 'output', weight: 100 },
     { timeMs: 6000, phase: 'output', weight: 100 },
   ] }
-  const attemptC = { attemptId: 'C', usage: { outputTokens: 500, reasoningTokens: 0 }, samples: [
+  const attemptC = { attemptId: 'C', usage: { outputTokens: 500, reasoningTokens: 0 }, settledAtMs: 5000, samples: [
     { timeMs: 0, phase: 'output', weight: 100 },
     { timeMs: 5000, phase: 'output', weight: 100 },
   ] }
@@ -309,4 +375,39 @@ test('turn TPS denominators exclude tool and inter-call waiting time', () => {
   // The same model samples with a 1 s tool call must produce an identical curve width.
   const shortTool = compressAttempts([attemptA, attemptB, attemptC])
   assert.equal(shortTool.durationMs, compressed.durationMs)
+})
+
+test('an attempt whose phase episodes are only partly measurable cannot claim a complete denominator', () => {
+  /**
+   * reasoning 0 -> 1000, output 1000 -> 2000, reasoning 2000 -> unmeasurable:
+   * the attempt settled after its last delta, but the settlement instant was
+   * never observed, so the terminal reasoning episode has no measurable end.
+   * The measurable prefix is still reported, together with the completeness
+   * counts that state the denominator is short.
+   */
+  const result = aggregateTurn({
+    turnStartMs: 0,
+    turnEndMs: 5000,
+    attempts: [{
+      attemptId: 'partial',
+      usage: { outputTokens: 30, reasoningTokens: 10 },
+      samples: [
+        { timeMs: 0, phase: 'reasoning', weight: 5 },
+        { timeMs: 1000, phase: 'output', weight: 5 },
+        { timeMs: 2000, phase: 'reasoning', weight: 5 },
+      ],
+    }],
+  })
+
+  assert.equal(result.reasoningMs, 1000, 'only the first reasoning episode is measurable')
+  assert.equal(result.outputMs, 1000)
+  assert.equal(result.attemptBreakdown[0].reasoningEpisodeCount, 2)
+  assert.equal(result.attemptBreakdown[0].reasoningMeasuredEpisodes, 1)
+  assert.equal(result.reasoningMeasuredAttempts, 0, 'a partly measurable phase is not a complete contribution')
+  assert.equal(result.outputMeasuredAttempts, 1)
+  assert.equal(result.reasoningTps, 10, '10 reasoning tokens over the 1000 ms measurable episode')
+  assert.equal(result.reasoningTpsQuality, MetricQuality.UNAVAILABLE,
+    'a short denominator is refused a quality level rather than published as exact')
+  assert.equal(result.outputTps, 20, '20 non-reasoning tokens over the 1000 ms output episode')
+  assert.equal(result.outputTpsQuality, MetricQuality.EXACT)
 })

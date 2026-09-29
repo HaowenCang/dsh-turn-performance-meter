@@ -175,16 +175,23 @@ test('session switch: A and B never share machines, subscriptions or resets', ()
   assert.equal(controller.attach('session-A'), true)
   assert.equal(sessions.listenerCount('session-A'), 1, 'exactly one eventSource subscription for A')
 
-  // A starts streaming.
+  // A starts streaming. Three deltas so the episode passes its warm-up count and
+  // publishes a rate; `from-A` weighs 1.5 shape tokens, so the cumulative average at
+  // 250 ms is `round(3 * 1.5 * 1000 / 50)`.
   let revision = 1
   const aStart = durableEntry('turn/start', 1, 100, { turn: 1 })
   const aChunk = transientEntry('a:1', 200, { type: 'text-delta', index: 0, text: 'from-A' })
-  sourceA.replaceEntries([aChunk ? aStart : aStart], (revision += 1))
+  const aChunk2 = transientEntry('a:1', 210, { type: 'text-delta', index: 0, text: 'from-A' })
+  const aChunk3 = transientEntry('a:1', 220, { type: 'text-delta', index: 0, text: 'from-A' })
+  sourceA.replaceEntries([aStart], (revision += 1))
   sourceA.appendEntry(aStart, (revision += 1)) // duplicate seq: reported, ignored
   sourceA.appendEntry(aChunk, (revision += 1))
+  sourceA.appendEntry(aChunk2, (revision += 1))
+  sourceA.appendEntry(aChunk3, (revision += 1))
   const viewA = controller.project('session-A', 250)
   assert.equal(viewA.kind, 'streaming', 'A streams')
   assert.equal(viewA.turn, 1)
+  assert.equal(viewA.tps, 90)
 
   // B attaches idle, then runs its own turn.
   assert.equal(controller.attach('session-B'), true)
@@ -192,11 +199,16 @@ test('session switch: A and B never share machines, subscriptions or resets', ()
 
   const bStart = durableEntry('turn/start', 1, 100, { turn: 1 })
   const bChunk = transientEntry('b:1', 200, { type: 'text-delta', index: 0, text: 'from-B' })
+  const bChunk2 = transientEntry('b:1', 210, { type: 'text-delta', index: 0, text: 'from-B' })
+  const bChunk3 = transientEntry('b:1', 220, { type: 'text-delta', index: 0, text: 'from-B' })
   sourceB.replaceEntries([], (revision += 1))
   sourceB.appendEntry(bStart, (revision += 1))
   sourceB.appendEntry(bChunk, (revision += 1))
+  sourceB.appendEntry(bChunk2, (revision += 1))
+  sourceB.appendEntry(bChunk3, (revision += 1))
   const viewB = controller.project('session-B', 250)
   assert.equal(viewB.kind, 'streaming', 'B streams')
+  assert.equal(viewB.tps, 90, 'and it measures its own episode, not A\'s')
 
   // B settles: it gets its own card, and A must be untouched (no shared
   // currentTurn, no wrong reset, no cross-session card).
@@ -245,8 +257,16 @@ test('settle-assistant + llm/retry: durable attempts settle with separated conce
 
   push(transientEntry('s:1', 1200, textChunk('partial answer')))
   const viewStreaming = controller.project('s-retry', 1300)
-  assert.equal(viewStreaming.kind, 'streaming')
+  /**
+   * One delta is below `MIN_WARMUP_SAMPLES`, so the pill shows the episode's
+   * elapsed counter rather than a one-sample rate — but it is a *live* streaming
+   * view, not a transition and not a card.
+   */
+  assert.equal(viewStreaming.kind, 'warming')
   assert.equal(viewStreaming.phase, 'output')
+  assert.equal(viewStreaming.samples, 1)
+  assert.equal(viewStreaming.required, 3)
+  assert.equal(viewStreaming.counterMs, 100)
 
   // The failed attempt settles durably as assistant/attempt via the fold.
   const attemptSettle = durableEntry('assistant/attempt', 5, 1500, {
@@ -276,7 +296,10 @@ test('settle-assistant + llm/retry: durable attempts settle with separated conce
   // The retried attempt starts, streams, and commits as a surface message.
   push(transientEntry('s:2', 2000, textChunk('final answer')))
   const viewWait = controller.project('s-retry', 2000)
-  assert.equal(viewWait.kind, 'streaming')
+  assert.equal(viewWait.kind, 'warming', 'the new attempt is live and below its warm-up count')
+  assert.equal(viewWait.phase, 'output')
+  assert.equal(viewWait.samples, 1)
+  assert.equal(viewWait.counterMs, 0)
   const messageSettle = durableEntry('assistant/message', 9, 2400, {
     turn: 1,
     step: 1,

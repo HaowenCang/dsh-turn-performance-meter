@@ -225,24 +225,29 @@ test('a partial replacement does not keep evidence the new window does not conta
 
 test('a replacement window that begins mid-turn re-adopts the open turn', () => {
   const run = attached('s-adopt')
+  /** A 400-character delta weighs 100 estimated tokens (`heuristicTokenWeight`). */
+  const heavy = 'x'.repeat(400)
   run.push(durableEntry('turn/start', 4, 1000, { turn: 1 }))
-  run.push(transientEntry('a', 1100, output('x')))
-  run.push(transientEntry('a', 1200, output('y')))
+  run.push(transientEntry('a', 1100, output(heavy)))
+  run.push(transientEntry('a', 1200, output(heavy)))
+  run.push(transientEntry('a', 1300, output(heavy)))
 
   /** No `turn/start` in the replacement window at all: a live tail, adopted from transient evidence. */
   run.replace([
-    transientEntry('a', 1100, output('x'), { step: 1 }),
-    transientEntry('a', 1200, output('y'), { step: 1 }),
+    transientEntry('a', 1100, output(heavy), { step: 1 }),
+    transientEntry('a', 1200, output(heavy), { step: 1 }),
+    transientEntry('a', 1300, output(heavy), { step: 1 }),
   ])
 
   const record = recordOf(run.controller, 's-adopt')
   assert.ok(record !== undefined, 'the transient tail re-creates the turn')
   assert.equal(record.startMs, null, 'the start is still unobserved, so nothing is measured from the reload')
-  assert.equal(record.attempts[0].samples.length, 2, 'and both deltas of the new generation are kept, exactly once')
+  assert.equal(record.attempts[0].samples.length, 3, 'and every delta of the new generation is kept, exactly once')
 
-  const view = run.controller.project('s-adopt', 1300)
+  const view = run.controller.project('s-adopt', 1400)
   assert.equal(view.kind, 'streaming', 'the live meter is rebuilt from the replacement window')
-  assert.ok(view.tps > 0, 'and reports the rate the window actually measured')
+  assert.equal(view.tps, Math.round(300 * 1000 / (1400 - 1100)),
+    'and reports the episode-cumulative rate the window actually measured')
   assert.equal(view.elapsedMs, null,
     'elapsed is unknown rather than zero: the turn start is not in this window')
   run.dispose()
@@ -266,8 +271,12 @@ test('an authoritative turn/start still upgrades a recovered record after a repl
   assert.equal(upgraded.attempts[0].samples.length, 1, 'and no evidence is replayed by the upgrade')
 
   const view = run.controller.project('s-upgrade', 1300)
-  assert.equal(view.kind, 'streaming')
+  assert.equal(view.kind, 'warming', 'one delta is below the warm-up count, so no rate is published yet')
+  assert.equal(view.samples, 1)
+  assert.equal(view.required, 3)
+  assert.equal(view.counterMs, 200, 'the episode clock runs from the delta the window carries')
   assert.equal(view.elapsedMs, 300, 'elapsed becomes computable over the same evidence')
+  assert.equal('tps' in view, false, 'and no rate is claimed from a single sample')
   run.dispose()
 })
 
@@ -382,7 +391,10 @@ test('tool state that the replacement window does not contain does not survive i
   assert.equal(record.tools.length, 0, 'the tool call belongs to the superseded window')
   const view = run.controller.project('s-tool', 1300)
   assert.notEqual(view.kind, 'tool', 'and no timer is left claiming a call is still running')
-  assert.equal(view.kind, 'streaming', 'the rebuilt live state follows the replacement window')
+  assert.equal(view.kind, 'warming', 'the rebuilt live state follows the replacement window: one delta is below the warm-up count')
+  assert.equal(view.samples, 1)
+  assert.equal(view.required, 3)
+  assert.equal(view.counterMs, 200, 'the episode clock runs from the delta the replacement window carries')
   run.dispose()
 })
 

@@ -315,7 +315,7 @@ test('an abandoned attempt keeps its prefix as evidence and downgrades the timin
 
 // ── retries and errors ─────────────────────────────────────────────────────
 
-test('a retry before a tool resets the window on both sides of the boundary', () => {
+test('a retry before a tool resets the episode on both sides of the boundary', () => {
   const { settled, live } = drive({
     attempts: [
       {
@@ -353,11 +353,14 @@ test('a retry before a tool resets the window on both sides of the boundary', ()
   const ratio = traces[0].tokens / traces[1].tokens
   assert.ok(ratio >= 9.5, `the two attempts differ by ${ratio.toFixed(2)}×`)
   /**
-   * Both attempts end on their own last delta, so the two traces have the **same** length.
-   * The previous expectation read `traces[0].points.length + 4` and called the extra four
-   * vertices "the axis tail the replacement owns"; since Phase 7C.1 no attempt owns one, and
-   * which attempt is last may not change how many vertices its evidence produces.
+   * Each trace is its own episode's cumulative average, sampled on the same 100 ms
+   * ladder: the abandoned attempt's 500-token deltas and the replacement's 10-token
+   * ones, each measured from its own first sample. A bridged estimator would put
+   * `firstTokens + secondTokens` in the replacement's opening vertices and break the
+   * second array at its first entry.
    */
+  assert.deepEqual(traces[0].points.map(point => point.tps), [0, 5000, 2500, 1667, 1250, 2000])
+  assert.deepEqual(traces[1].points.map(point => point.tps), [0, 100, 50, 33, 25, 40])
   assert.equal(traces[1].points.length, traces[0].points.length,
     'the same script produces the same number of vertices in either placement')
   for (let index = 0; index < traces[0].points.length; index += 1) {
@@ -365,24 +368,21 @@ test('a retry before a tool resets the window on both sides of the boundary', ()
     const theirs = traces[0].points[index]
     assert.equal(mine.timeMs - traces[1].startMs, theirs.timeMs - traces[0].startMs,
       'the two traces are sampled at the same attempt-local instants')
-    assert.ok(Math.abs(mine.tps * ratio - theirs.tps) < 1e-9,
-      `local ${theirs.localMs}: ${mine.tps} × ${ratio.toFixed(2)} ≠ ${theirs.tps}`)
   }
   assert.ok(traces[1].tokens < traces[0].tokens / 9, 'the replacement generated far less')
   /**
    * The decisive check: the abandoned attempt's tokens never appear in the
-   * replacement's trace. A bridged window would put `firstTokens + secondTokens` in
-   * the replacement's opening vertex, which would break the tenfold ratio at the
-   * first vertex rather than merely shifting it.
+   * replacement's trace, and no vertex exceeds what the replacement's own mass can
+   * produce over one ladder step of its own clock.
    */
-  assert.ok(traces[1].points.every(point => point.tps <= traces[1].tokens * 1000 / 1000 + 1e-9),
-    'every vertex of the retry is bounded by the retry\'s own tokens')
+  assert.ok(traces[1].points.every(point => point.tps <= traces[1].tokens * 1000 / 100 + 1e-9),
+    'every vertex of the retry is bounded by the retry\'s own tokens and its own clock')
   assert.equal(settled.attemptBreakdown.map(a => a.attemptOutcome).join(','), 'retried,committed')
   assert.equal(settled.curve.quality, QualityLevel.ESTIMATED,
     'the abandoned attempt has no settlement sequence, so the timing claim is dropped')
 })
 
-test('a retry after a tool resets the window again, and the tool keeps zero width', () => {
+test('a retry after a tool resets the episode again, and the tool keeps zero width', () => {
   const { settled } = drive({
     attempts: [
       { id: 'a', step: 1, at: 0, chunks: [[0, output('x'.repeat(400))], [500, output('x'.repeat(400))]] },
@@ -404,7 +404,13 @@ test('a retry after a tool resets the window again, and the tool keeps zero widt
   assert.deepEqual(runs.map(run => run.attemptId), ['a', 'b', 'c'],
     'the abandoned attempt and its replacement are separate runs')
   assert.equal(settled.curve.durationMs, 500 + 500 + 500, 'the 4.4 s tool contributes no width')
-  assert.deepEqual(runs[2].points.map(p => p.tps), [10, 10, 20],
+  /**
+   * The second retry's series is its own episode's cumulative average: ten shape
+   * tokens from local zero, so `round(10 * 1000 / t)` on the 100 ms ladder, ending on
+   * its own last delta. Nothing of the two earlier attempts is in it — a bridged
+   * estimator would open with their 4000-token mass instead of `0`.
+   */
+  assert.deepEqual(runs[2].points.map(p => p.tps), [0, 100, 50, 33, 25, 40],
     'the second retry starts empty, whatever the first two attempts measured, and ends on its own last delta')
   assert.ok(settled.curve.peakTps >= 1000)
 })
@@ -477,7 +483,7 @@ test('a duplicate row object is deduplicated, not double counted', () => {
   /**
    * A re-attach, a lagging subscription or a replayed page can publish the same
    * window row twice. The feed identifies a row by object identity, so the second
-   * delivery of the same row must reach neither the samples nor the rolling window:
+   * delivery of the same row must reach neither the samples nor the live episode:
    * counting it would double the measured throughput of one delta.
    */
   const sessions = fakeSessionsService()
@@ -486,12 +492,12 @@ test('a duplicate row object is deduplicated, not double counted', () => {
   controller.attach('s-dupes')
   let revision = 1
   source.appendEntry(durableEntry('turn/start', 4, 1000, { turn: 1 }), (revision += 1))
-  const row = {
+  const rowAt = time => ({
     type: 'transient',
     event: {
       type: 'assistant/live-chunk',
-      seq: 7,
-      time: 1100,
+      seq: 7 + (time - 1100) / 100,
+      time,
       data: {
         attemptId: 'a:1',
         turn: 1,
@@ -499,18 +505,25 @@ test('a duplicate row object is deduplicated, not double counted', () => {
         chunk: { type: 'text-delta', index: 0, text: 'x'.repeat(400) },
       },
     },
-  }
-  source.appendEntry(row, (revision += 1))
-  const once = controller.project('s-dupes', 1200)
+  })
+  const first = rowAt(1100)
+  const second = rowAt(1200)
+  const third = rowAt(1300)
+  source.appendEntry(first, (revision += 1))
+  source.appendEntry(second, (revision += 1))
+  source.appendEntry(third, (revision += 1))
+  const once = controller.project('s-dupes', 1400)
   assert.equal(once.kind, 'streaming')
+  /** Three 100-token deltas from local zero: `round(300 * 1000 / 300)`. */
+  assert.equal(once.tps, 1000)
   const record = controller.store.turns.get(turnKey('s-dupes', 1))
-  assert.equal(record.attempts[0].samples.length, 1)
+  assert.equal(record.attempts[0].samples.length, 3)
 
   /** The same row object delivered again under a new window revision. */
-  source.appendEntry(row, (revision += 1))
-  const twice = controller.project('s-dupes', 1200)
+  source.appendEntry(second, (revision += 1))
+  const twice = controller.project('s-dupes', 1400)
   assert.equal(twice.tps, once.tps, 'a duplicate row cannot change the rate')
-  assert.equal(record.attempts[0].samples.length, 1, 'and it is stored once')
+  assert.equal(record.attempts[0].samples.length, 3, 'and it is stored once')
   assert.equal(controller.diagnostics('s-dupes').feedIssues.some(issue => issue.kind === 'duplicate-transient-row'), true,
     'the duplicate is reported rather than silently ignored')
   controller.dispose()
@@ -570,14 +583,23 @@ test('a transient row naming an untracked turn adopts the boundary instead of dr
    */
   source.appendEntry({ type: 'transient', event: { type: 'assistant/live-chunk', seq: 1, time: 1100, data: { attemptId: 'a:1', turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'orphan' } } } }, (revision += 1))
   const view = controller.project('s-orphan', 1200)
-  assert.equal(view.kind, 'streaming', 'the adopted turn renders its live pill')
+  /**
+   * One delta is below `MIN_WARMUP_SAMPLES`, so the pill is the episode's elapsed
+   * counter rather than a one-sample rate — and it is a live streaming view, not a
+   * transition and not a card.
+   */
+  assert.equal(view.kind, 'warming', 'the adopted turn renders its live pill')
+  assert.equal(view.phase, 'output')
+  assert.equal(view.samples, 1)
+  assert.equal(view.required, 3)
+  assert.equal(view.counterMs, 100, 'the episode clock starts at the row\'s own instant')
   assert.equal(view.turn, 1, 'the turn number comes from the row, never invented')
   assert.equal(controller.diagnostics('s-orphan').droppedDeltas, 0, 'the delta is owned, not dropped')
   assert.equal(controller.store.turns.size, 1, 'exactly one turn record exists for it')
   const record = [...controller.store.turns.values()][0]
   assert.equal(record.startMs, null, 'and its start time is unknown, not the reload instant')
   assert.equal(view.elapsedMs, null, 'so the elapsed run is omitted instead of printed as 0 s')
-  assert.equal(controller.project('s-orphan', 1200).kind, 'streaming', 'and the adoption is idempotent')
+  assert.equal(controller.project('s-orphan', 1200).kind, 'warming', 'and the adoption is idempotent')
   controller.dispose()
 })
 
@@ -665,10 +687,10 @@ test('missing timestamps are refused rather than defaulted to zero', () => {
   assert.equal(settled.timestampsComplete, undefined)
   /**
    * The curve is still built from the samples that do carry a timestamp, and no
-   * vertex is placed at zero by default. The turn's timing claim is `estimated`
-   * because an attempt with no settlement sequence cannot support more.
+   * vertex is placed at zero by default. The attempt's width is its terminal
+   * episode's end — the settlement at 400 — minus its first sample at 100.
    */
-  assert.equal(settled.curve.durationMs, 200)
+  assert.equal(settled.curve.durationMs, 300)
   for (const series of settled.curve.series) {
     for (const run of series.runs) {
       for (const point of run.points) {
@@ -679,6 +701,32 @@ test('missing timestamps are refused rather than defaulted to zero', () => {
 })
 
 // ── the recorded corpus ────────────────────────────────────────────────────
+
+/**
+ * Independent re-derivation of the published statistic for one vertex.
+ *
+ * The reference walks the attempt's own trace samples leftwards from the newest
+ * sample at or before `localMs` to the start of that sample's phase run, then
+ * divides the run's mass by the time elapsed since it began — the documented
+ * phase-cumulative definition, restated here so the corpus is checked against an
+ * implementation that shares no code with `src/core/curve.js`. A static ceiling
+ * (`point.tps <= trace.tokens`) is no longer meaningful: a cumulative average can
+ * legitimately exceed the attempt's total token count over a short episode clock.
+ */
+function referenceCumulativeRate(samples, localMs) {
+  const upto = samples.filter(sample => sample.activeTimeMs <= localMs + 1e-9)
+  if (upto.length === 0) return 0
+  const phase = upto[upto.length - 1].phase ?? null
+  let start = upto.length - 1
+  while (start > 0 && (upto[start - 1].phase ?? null) === phase) start -= 1
+  const elapsed = localMs - upto[start].activeTimeMs
+  if (!(elapsed > 0)) return 0
+  let mass = 0
+  for (let index = start; index < upto.length; index += 1) {
+    mass += upto[index].tokens ?? upto[index].weight ?? 0
+  }
+  return Math.round(mass * 1000 / elapsed)
+}
 
 test('every recorded turn survives the full settle path under both readings', () => {
   /**
@@ -696,21 +744,20 @@ test('every recorded turn survives the full settle path under both readings', ()
       const where = `${name}/${path}`
       assert.ok(settled.attemptCount > 0 || settled.status === null, `${where} has attempts`)
       /**
-       * The ceiling is taken from the **attempt's own curve trace**, not from the stored
-       * raw samples. Since Phase 7C the drawn magnitudes are the calibrated allocation
-       * when authoritative usage exists, so `record.attempts[].samples` is a different
-       * magnitude system from the vertices: comparing against it would either pass
-       * vacuously (when calibration scales the curve down) or fail wrongly (when it scales
-       * it up). `trace.tokens` is the sum the window actually read, which is the only
-       * quantity a vertex can be bounded by.
+       * Every vertex is checked against an **independent re-derivation** of the
+       * documented definition (see `referenceCumulativeRate` above), computed from the
+       * attempt's own trace samples rather than from the production sampler that
+       * produced the vertex. The magnitudes are the calibrated allocation when
+       * authoritative usage exists, so `record.attempts[].samples` is a different
+       * magnitude system from the vertices; `trace.samples` is the series the
+       * estimator actually read, which is what the reference walks.
        */
       for (const trace of settled.curve.attempts) {
-        const ceiling = trace.tokens
         for (const run of trace.runs) {
           for (const point of run.points) {
             assert.ok(Number.isFinite(point.tps), `${where} ${trace.attemptId} has a finite rate`)
-            assert.ok(point.tps <= ceiling + 1e-6,
-              `${where} ${trace.attemptId} at ${point.timeMs} claims ${point.tps} from ${ceiling} tokens`)
+            assert.equal(point.tps, referenceCumulativeRate(trace.samples, point.localMs),
+              `${where} ${trace.attemptId} at local ${point.localMs}`)
           }
           assert.equal(run.peak, Math.max(...run.points.map(p => p.tps)), `${where} run peak`)
         }

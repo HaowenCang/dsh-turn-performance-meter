@@ -404,8 +404,7 @@ function settledCurve(overrides = {}) {
     peakTps: 900,
     phaseSpans: { reasoning: { startMs: 0, endMs: 10_000 }, output: { startMs: 10_000, endMs: 20_000 } },
     quality: 'estimated',
-    sampleEveryMs: 250,
-    windowMs: 1000,
+    sampleEveryMs: 100,
     ...overrides,
   }
 }
@@ -711,14 +710,14 @@ test('a real fixture renders a collapsed row and a complete expanded card', () =
   const view = completedViewModel(durableSettledView(loadFixture('t4-reasoning-tool-deepseek-official')).settled)
 
   const row = texts(one(cardOfView(view, en, { collapsed: true }), 'dsh-tpm-card-progress')).join('')
-  assert.equal(row, 'completed · thinking ≈50.6 tokens/s · output 138 tokens/s · 151 tokens · TTFT 7.58 s')
+  assert.equal(row, 'completed · thinking ≈50.6 tokens/s · output 124 tokens/s · 151 tokens · TTFT 7.58 s')
 
   const tree = cardOfView(view, en)
   const cells = one(layer(tree, 'summary'), 'dsh-tpm-cells').children
   assert.equal(cells.length, 4)
   assert.deepEqual(cells.map(cell => texts(cell.children[0])[0]),
     ['Reasoning TPS', 'Output TPS', 'Generated Tokens', 'TTFT'])
-  assert.deepEqual(cells.map(cell => texts(cell.children[1].children[0])[0]), ['≈50.6', '138', '151', '7.58'])
+  assert.deepEqual(cells.map(cell => texts(cell.children[1].children[0])[0]), ['≈50.6', '124', '151', '7.58'])
   assert.deepEqual(cells.map(cell => texts(cell.children[1].children[1])[0]), ['tokens/s', 'tokens/s', 'tokens', 's'])
   assert.deepEqual(cells.map(cell => cell.props['data-approximate']), ['true', 'false', 'false', 'false'],
     'the reasoning rate is estimated, the exact split and total are not')
