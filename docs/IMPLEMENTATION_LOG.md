@@ -4191,3 +4191,119 @@ reopening presentation logic on unreproduced evidence would be exactly the kind 
 is left as a candidate for a future round with its conditions stated — page reloaded, settlement while the tab is
 backgrounded, stale until the next reload — so that a later attempt starts from the conditions rather than from a
 symptom.
+
+**Resolved in Phase 9.3.1: not reproduced, 10/10 trials correct without a reload.** See §Phase 9.3.1 below.
+
+---
+
+## Phase 9.3.1 — Background settlement presentation verification (2026-09-29)
+
+Baseline `0c2f16d18c65e82615f12406ba2fc7bd82350976`, DSH `0.2.0-rc.2`. The subject is the single observation §9 above left
+open: after a page reload, a turn settled while the tab was backgrounded, and the completed card kept showing the
+previous turn until another reload. The brief forbids reopening metric semantics, cadence, curve arithmetic, the DSH
+adapter and tool accounting, and requires the observation to be *resolved* rather than re-described; a production change
+is permitted only if a reproducible presentation defect demands a minimal one.
+
+### 1. Outcome
+
+**No defect reproduced. No production fix required.** Ten trials ran the exact recorded sequence (page reloaded → card
+for turn N visible → turn N+1 started → tab backgrounded → turn N+1 settled → at least 1 s of dwell → tab foregrounded,
+**no reloaded page**), and in all ten the completed card advanced to turn N+1 on its own. In every minimize-verified trial
+the card had already advanced *before* the browser window was restored, so the foreground-to-correct-card latency was
+0 ms: there was nothing left for foregrounding to trigger.
+
+The deterministic half of the evidence is
+[`test/background-settlement.test.js`](../test/background-settlement.test.js): five tests that ingest a settlement and a
+terminal boundary with **zero** projections interleaved — which is what a throttled background tab amounts to — and then
+require the first projection to be the newest turn. The file was checked against a deliberately defeated controller (the
+`turn/end` invalidation removed): all five tests fail, and the first projection returns turn 1's card, which is the
+recorded symptom. The regression is therefore load-bearing rather than decorative.
+
+### 2. Why the recorded symptom cannot be produced by the current code
+
+The chain has four links, and the trials plus the regression locate the recorded observation at none of them.
+
+`turn/end` is routed by `applyEvent` to `store.endTurn`, which is what makes the turn *readable*; the settled machine and
+the settled snapshot are both in place before `invalidate(state)` runs, so the **very next** `project()` returns the new
+card. That ordering is the first place a stale card could be manufactured, and the defeated-controller experiment shows
+exactly what it would look like: dropping the invalidation alone reproduces "the previous card survives the settlement".
+
+What a background tab actually changes is narrower than it first appears. Ingestion is a subscription on
+`SessionEventSource`, not a timer, so the store receives the settlement while the tab is hidden; only *presentation* is
+throttled, because the sole thing that calls `project()` from a live view is the 100 ms ticker
+(`src/client/live/refresh.js`). The tab is also not left without a scheduler when the card is on screen: `MeterRoot`'s
+subscription calls `refreshView()` directly for a static projection and the scheduler is never notified. That path is the
+one the trials exercised, and it is why the DOM card had advanced before foregrounding in every minimize-verified trial.
+
+The two remaining candidates — a stale `settledRead` and a mis-keyed projection cache — are both per-(session, settled
+turn) and both invalidated on `turn/end`; there is no path on which a settled view for turn N can satisfy a projection
+request for turn N+1. Assertions are in the regression for each: the first projection's turn, its identity distinct from
+the previous card, its `projectionKey`, and the memo's behaviour under a moving clock.
+
+### 3. Browser trials
+
+**Runtime.** A second DSH `0.2.0-rc.2` web host on `127.0.0.1:50077` with its own `DSH_HOME`
+(`dev/scratch/phase931-iso/`, git-ignored), mounting this repository's plugin from the workspace and the dev-only
+fixture recorder, so the trials neither read nor wrote the operator's own sessions. Turns were driven through
+`ctx.sessionController` — the same seam the GUI uses — with one prompt per turn and a fresh session per trial.
+
+**What "backgrounded" was measured as, and why it is not `document.visibilityState`.** On this workstation, activating
+another *tab* through DevTools does not background the DSH tab: the page reports `visible`, keeps focus, and keeps
+servicing a 50 ms timer at 50 ms. Raising a topmost cover window does not change that either, but it *does* throttle
+`requestAnimationFrame` to 1 Hz, which is a partial backgrounding. The condition the trials use is therefore the
+unambiguous one: the browser window is **minimized** (`browser-window.ps1`, `IsIconic` verified true before and false
+after). While minimized, the page stops being painted — the instrument records `requestAnimationFrame` gaps of
+1000–1004 ms — and it also stops servicing its 50 ms sampler, which is why the sampler's own maximum interval stays near
+its nominal value and the rAF record, not the sampler, is the backgrounding evidence. `document.visibilityState`
+remained `visible` throughout, so it is reported as measured and is explicitly **not** used as the criterion.
+
+**Per-trial record.** `data-turn` is the card's own attribute; the store read is
+`controller.store.latestSettled(sessionId).turn` through the plugin's debug handle; the durable turn is the newest
+`turn/end` in the host's session log for that session.
+
+| Trial | Session | Durable newest settled turn | Store newest settled turn | DOM card turn | generatedTokens displayed | Card advanced while minimized | Foreground→correct card | Reload needed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `fixture-mumqw2fd-12` | 2 | 2 | 2 | 10.0 (≈) | yes (rAF 1 Hz record) | 0 ms | no |
+| 2 | `fixture-mumr1pq9-16` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 3 | `fixture-mumr34ct-18` | 2 | 2 | 2 | 9.00 (≈) | yes | 0 ms | no |
+| 4 | `fixture-mumr4ey5-20` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 5 | `fixture-mumr5w3y-22` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 6 | `fixture-mumr73e4-24` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 7 | `fixture-mumr87ew-26` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 8 | `fixture-mumr9d6v-28` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 9 | `fixture-mumrajro-30` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 10 | `fixture-mumrbs0z-32` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+
+Trial 1 is the trial whose backgrounding evidence is the weakest: its covered window is documented by a 1 Hz `rAF`
+record (23 gaps of 1000–1004 ms spanning it) but the tab was not minimized, so it is reported as a trial that passed on
+the acceptance criterion — the card advanced without a reload — rather than as one whose backgrounding is proven.
+Trials 2–10 are all minimize-verified.
+
+Trial 10's page recorded its card change at page-clock 24 419 ms and `Date.now()` 1 790 691 327 198 at page-clock
+77 035 ms, which places the change 756 ms **before** the window was restored (`wallClock(t) = t − 77 035 + 1 790 691 327 198`).
+That is the general shape of every minimize-verified trial: the card was already correct when the tab came back, so the
+foreground-to-correct-card latency is not a small positive number but zero.
+
+**No provider-level failures were investigated or needed.** Every trial's turn completed with `reason: { kind:
+'completed' }` in the durable log; the plugin's own counters were identical in all ten
+(`rawTurnEndSeen: 2`, `turnEndLookupHit: 2`, `turnEndLookupMiss: 0`, `turnEndReconstructed: 0`,
+`settledSnapshotBuilt: 2`, `unmatchedToolResults: 0`, `lateTurnRows: 0`, `lateTurnEvents: 0`).
+
+### 4. What this does and does not establish
+
+The recorded sequence is not reproducible on the baseline commit under the conditions stated, and the presentation layer
+is demonstrably not the layer that could hold a previous card once a new turn has settled. What the trials cannot settle
+is what the single Phase 9.3 occurrence *was*: it was observed once, on a page whose reload coincided with an
+API-environment failure the operator has since repaired, and it left no page-side record. The honest statement is
+therefore that the observation is **not reproduced after targeted verification**, not that it is explained.
+
+Two conditions from the original context are deliberately outside the trials' coverage, and are recorded as such rather
+than folded into the pass: a settlement that arrives while the tab is backgrounded *and* the DSH web host is
+unreachable, and a settlement whose `turn/end` never reaches the client at all. The first is an API-environment
+condition the brief excludes; the second would leave the durable log without the boundary the acceptance criterion keys
+on, so it is a different defect with a different signature — the card would be *live*, not stale.
+
+One documentation defect surfaced and was corrected in `src/client/live/MeterRoot.js`: `isStatic`'s docstring claimed a
+`hidden` projection was static, which the function never did and which would have been wrong (the ticker's own lifecycle
+tests `view.kind !== 'hidden'` separately). The comment was aligned with the code; the code was not changed.
+

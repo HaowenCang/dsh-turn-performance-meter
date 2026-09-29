@@ -58,7 +58,15 @@ let styleUsers = 0
  */
 const PLUGIN_CSS = `${BASE_CSS}\n${LIVE_CSS}\n${COMPLETED_CSS}`
 
-/** A projection that cannot change until an event arrives. */
+/**
+ * A projection that cannot change until an event arrives.
+ *
+ * A completed card is the only such view: it is a pure function of the settled
+ * turn, so it is rebuilt once per event and never by a clock. `hidden` is *not*
+ * static in this sense — it means "no view for this session", and the meter is
+ * not on screen to be rebuilt — which is why the ticker's own lifecycle below
+ * tests `view.kind !== 'hidden'` separately.
+ */
 function isStatic(view) {
   return view.kind === 'completed'
 }

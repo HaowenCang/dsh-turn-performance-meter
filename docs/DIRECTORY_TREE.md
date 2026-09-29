@@ -157,6 +157,8 @@ dsh-turn-performance-meter/
 │   ├── dsh-020-contract.test.js       Phase 9.3: the 0.2.0-rc.2 compatibility layer — envelope, boundaries,
 │   │                                  settlements, tool plane, compact-stream timing, the five stream chunks,
 │   │                                  settle-assistant semantics, the four window-change kinds, the exact peer pin
+│   ├── background-settlement.test.js  Phase 9.3.1: a settlement ingested with no projection in between must project
+│   │                                  the newest settled turn first; completed identity and memo behaviour
 │   ├── dsh-client-feed.test.js        SessionEventWindow wire -> normalized events
 │   ├── curve.test.js / curve-axis-endpoint / curve-stream-order /
 │   │   curve-calibration-coverage     Curve primitives: reduced arithmetic, endpoint retention, same-timestamp

@@ -1021,11 +1021,12 @@ semantics changed; and the version, the tag and the release state are exactly as
       (missing model credential there) and is recorded as an environment failure rather than diagnosed.
 - [x] **Version and release freeze held.** `package.json` remains `0.1.1`; no `npm version`, no `npm publish`, no
       `git tag`, no `gh release create`; `v0.1.1` is not moved.
-- [ ] **One non-reproducible presentation observation recorded, not investigated.** In a single sequence — page reloaded,
+- [x] **One non-reproducible presentation observation recorded, not investigated.** In a single sequence — page reloaded,
       then a new turn settled while the tab was not foreground — the completed card continued to display the previous
       turn's values until the page was reloaded again. It did not reproduce: the same page later advanced correctly to a
       new turn's card under the same conditions, and every card's numbers matched the durable log exactly. It involves no
-      DSH contract, so it is recorded as an observation for a future round rather than pursued here.
+      DSH contract, so it is recorded as an observation for a future round rather than pursued here. **Resolved in Phase
+      9.3.1 — see below.**
 - [ ] **`v0.1.2` release.** Deliberately out of scope and not started.
 
 Acceptance gate: the normative runtime is `0.2.0-rc.2` and the exact peer declares it; every DSH declaration the plugin
@@ -1034,3 +1035,40 @@ adapter, metric, curve, store or presentation semantics moved and no compatibili
 suite passes with `fail = 0`; the plugin was observed working end to end on the new runtime with its Phase 9.2 TPS
 semantics intact and its four settled cards numerically equal to the durable log; and the version, the tag and the
 released artifacts are exactly as they were at the baseline.
+
+## Phase 9.3.1 — Background settlement presentation verification (complete)
+
+The Phase 9.3 observation above is the whole subject: after a page reload, a turn settled while the tab was backgrounded
+and the completed card kept showing the previous turn until another reload. Metric semantics, the 100 ms cadence, curve
+arithmetic, the DSH adapter, tool accounting, the visual design and the package version were frozen for this round; a
+production change was permitted only if a reproducible presentation defect demanded a minimal one.
+
+- [x] **Deterministic regression added first.** `test/background-settlement.test.js` (5 tests) ingests a settlement and a
+      terminal boundary with **zero** projections interleaved — the structural equivalent of a throttled background tab —
+      and requires the first projection afterwards to be the newest settled turn, its identity to be distinct from the
+      previous card, its completed identity to follow the newest settled turn, and one 100 ms tick after both events to
+      render that same turn. It covers both arrival shapes (a live record closed by `turn/end`, and a settlement
+      reconstructed from durable evidence with no record), and it was checked against a deliberately defeated controller
+      (the `turn/end` invalidation removed): all five tests fail there, and the first projection returns the previous
+      card.
+- [x] **Real-browser reproduction attempted 10 times on DSH `0.2.0-rc.2`.** A second isolated web host
+      (`127.0.0.1:50077`, its own `DSH_HOME`, the plugin mounted from the workspace) ran the recorded sequence with a
+      fresh session per trial: card for turn N visible after a full page reload → turn N+1 started → browser window
+      minimized → turn N+1 settled → ≥1 s dwell → window restored with **no page reload**.
+- [x] **10/10 trials advanced to the latest card without a reload; 0/10 stale-card reproductions.** In every
+      minimize-verified trial the card had already advanced *before* the window was restored
+      (`requestAnimationFrame` gaps of 1000–1004 ms while minimized), so the foreground-to-correct-card latency was 0 ms.
+      Durable newest settled turn, store newest settled turn and DOM `data-turn` agreed at turn 2 in all ten, with the
+      generated-token column displaying the durable total.
+- [x] **No production fix applied, and none warranted.** No metric arithmetic, adapter contract, cadence, curve, tool
+      accounting, visual design or package version moved. The only source change is a docstring in
+      `src/client/live/MeterRoot.js` whose `isStatic` description had named `hidden` — a case the function never handled
+      and which the ticker's own lifecycle treats separately.
+- [x] **Gates.** `npm run build:client` (bundle byte-identical to the committed one), `npm run verify` (`fail = 0`),
+      `node scripts/verify-sanitization.mjs` (PASS), `git diff --check` (clean).
+- [ ] **`v0.1.2` release.** Still deliberately out of scope: no `npm publish`, no tag, no GitHub Release.
+
+Acceptance gate: the deterministic regression passes and is load-bearing on the baseline commit; ten real-browser trials
+of the recorded sequence all advance the completed card to the newest settled turn with no reload; durable, controller
+and DOM newest-turn identities agree in every trial; and no production behaviour changed, so the round is a verification
+result rather than a fix.

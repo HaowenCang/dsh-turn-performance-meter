@@ -673,3 +673,48 @@ no test pretends to.
 
 Verification for this phase is likewise reported as a **local** result: the repository has no CI runner, so
 `npm run verify` here is a local test result and is not described as CI-verified anywhere.
+
+## 11. Phase 9.3.1 — background settlement presentation
+
+The subject is a presentation outcome rather than a statistic: after a page reload, a turn that settles while the browser
+tab is backgrounded must advance the completed card to the newest turn on its own, with no reload and no user action. A
+statistical assertion cannot reach it, because the difference between "the card advanced" and "the card stayed" is not a
+number — it is which settled turn the projection names. The deterministic layer therefore asserts *identities and
+ordering*, and the browser layer, which the brief requires, is a trial protocol whose record is kept in
+`docs/IMPLEMENTATION_LOG.md` (Phase 9.3.1).
+
+- `test/background-settlement.test.js` (5 tests). The harness runs the real `SessionEventFeed` +
+  `TurnTelemetryStore` + `LivePresenter` chain over the verified window semantics, with the presentation driven the way
+  `MeterRoot` drives it: a 100 ms scheduler whose tick renders through `onRender`, and ingestion that never projects on
+  its own. `settleInBackground` ingests a settlement and a terminal boundary with the ticker stopped and **asserts** that
+  no projection happened in between, which is the structural equivalent of a throttled background tab — not a
+  simulation of one, but the same sequence of calls the browser makes.
+  - **the first projection after a background settlement** is asserted to be the newest settled turn, its kind to be
+    `completed`, and its identity to be the newest turn's own — never the previous card. The durable reference
+    (`store.latestSettled`) is asserted first, so a failure distinguishes ingestion from presentation.
+  - **settlement before the next scheduled tick, then one tick** — the settlement and `turn/end` both arrive with the
+    ticker stopped; exactly one scheduled render follows, and it renders the newest turn, agreeing with a direct
+    projection.
+  - **the completed-view identity follows the newest settled turn** — a new settled turn is a new view object with a new
+    identity, and while nothing changes the settled view is memoized *by identity*, including across a moved clock.
+  - **a settlement never observed live** — the `turnEndLookupMiss` path, where the durable settlement and the terminal
+    boundary arrive for a turn whose opening row is outside the live tail; the card is still that turn, reconstructed
+    from durable evidence.
+  - **projection is what advances the card** — the inverse statement of the defect: the store holds the newest turn
+    immediately, and only a projection can put it on screen. This is the assertion that makes the recorded observation a
+    *presentation* question rather than an ingestion one.
+
+The regression is required to be load-bearing, not merely green: with the controller's `turn/end` invalidation removed,
+all five tests fail and the first projection returns the previous turn's card, which is the recorded symptom. That
+experiment is part of the round's evidence and is recorded in the implementation log.
+
+Totals after this phase: **768 tests, 768 pass, 0 fail, 0 skipped, 0 todo** (763 before the phase). `npm run verify` runs
+`scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
+(`node scripts/verify-sanitization.mjs`).
+
+The browser half is a trial protocol, not a test, and is not claimed to be one: 10 trials of the recorded sequence on an
+isolated DSH `0.2.0-rc.2` host, with the browser window minimized for the settlement and `requestAnimationFrame` gaps of
+1000–1004 ms as the backgrounding record. `document.visibilityState` is **not** the criterion, because on this
+workstation neither activating another tab nor raising a topmost cover window makes the page report `hidden`, whereas
+minimizing stops the page being painted and serviced. Per-trial values are tabulated in
+`docs/IMPLEMENTATION_LOG.md` (Phase 9.3.1 §3).
