@@ -1051,14 +1051,16 @@ production change was permitted only if a reproducible presentation defect deman
       reconstructed from durable evidence with no record), and it was checked against a deliberately defeated controller
       (the `turn/end` invalidation removed): all five tests fail there, and the first projection returns the previous
       card.
-- [x] **Real-browser reproduction attempted 10 times on DSH `0.2.0-rc.2`.** A second isolated web host
+- [x] **Real-browser reproduction attempted 11 times on DSH `0.2.0-rc.2`.** A second isolated web host
       (`127.0.0.1:50077`, its own `DSH_HOME`, the plugin mounted from the workspace) ran the recorded sequence with a
       fresh session per trial: card for turn N visible after a full page reload → turn N+1 started → browser window
-      minimized → turn N+1 settled → ≥1 s dwell → window restored with **no page reload**.
-- [x] **10/10 trials advanced to the latest card without a reload; 0/10 stale-card reproductions.** In every
+      minimized → turn N+1 settled → ≥1 s dwell → window restored with **no page reload**. Trial 11 is the stronger
+      construction: it prepares two turns first, so the card it starts from is a *replacement* the store already holds
+      (the advance observed is 2 → 3).
+- [x] **11/11 trials advanced to the latest card without a reload; 0/11 stale-card reproductions.** In every
       minimize-verified trial the card had already advanced *before* the window was restored
       (`requestAnimationFrame` gaps of 1000–1004 ms while minimized), so the foreground-to-correct-card latency was 0 ms.
-      Durable newest settled turn, store newest settled turn and DOM `data-turn` agreed at turn 2 in all ten, with the
+      Durable newest settled turn, store newest settled turn and DOM `data-turn` agreed in all eleven, with the
       generated-token column displaying the durable total.
 - [x] **No production fix applied, and none warranted.** No metric arithmetic, adapter contract, cadence, curve, tool
       accounting, visual design or package version moved. The only source change is a docstring in
@@ -1068,7 +1070,7 @@ production change was permitted only if a reproducible presentation defect deman
       `node scripts/verify-sanitization.mjs` (PASS), `git diff --check` (clean).
 - [ ] **`v0.1.2` release.** Still deliberately out of scope: no `npm publish`, no tag, no GitHub Release.
 
-Acceptance gate: the deterministic regression passes and is load-bearing on the baseline commit; ten real-browser trials
+Acceptance gate: the deterministic regression passes and is load-bearing on the baseline commit; eleven real-browser trials
 of the recorded sequence all advance the completed card to the newest settled turn with no reload; durable, controller
 and DOM newest-turn identities agree in every trial; and no production behaviour changed, so the round is a verification
 result rather than a fix.

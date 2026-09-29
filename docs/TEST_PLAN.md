@@ -712,9 +712,10 @@ Totals after this phase: **768 tests, 768 pass, 0 fail, 0 skipped, 0 todo** (763
 `scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
 (`node scripts/verify-sanitization.mjs`).
 
-The browser half is a trial protocol, not a test, and is not claimed to be one: 10 trials of the recorded sequence on an
+The browser half is a trial protocol, not a test, and is not claimed to be one: 11 trials of the recorded sequence on an
 isolated DSH `0.2.0-rc.2` host, with the browser window minimized for the settlement and `requestAnimationFrame` gaps of
 1000–1004 ms as the backgrounding record. `document.visibilityState` is **not** the criterion, because on this
 workstation neither activating another tab nor raising a topmost cover window makes the page report `hidden`, whereas
 minimizing stops the page being painted and serviced. Per-trial values are tabulated in
-`docs/IMPLEMENTATION_LOG.md` (Phase 9.3.1 §3).
+`docs/IMPLEMENTATION_LOG.md` (Phase 9.3.1 §3), including trial 11, which advances the card 2 → 3 rather than 1 → 2 so the
+superseded card is one the store already held.

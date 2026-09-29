@@ -4208,9 +4208,10 @@ is permitted only if a reproducible presentation defect demands a minimal one.
 
 **No defect reproduced. No production fix required.** Ten trials ran the exact recorded sequence (page reloaded → card
 for turn N visible → turn N+1 started → tab backgrounded → turn N+1 settled → at least 1 s of dwell → tab foregrounded,
-**no reloaded page**), and in all ten the completed card advanced to turn N+1 on its own. In every minimize-verified trial
-the card had already advanced *before* the browser window was restored, so the foreground-to-correct-card latency was
-0 ms: there was nothing left for foregrounding to trigger.
+**no reloaded page**), and all ten advanced the completed card to turn N+1 on its own; an eleventh trial repeated the
+sequence from a card at turn 2 and advanced 2 → 3. In every minimize-verified trial the card had already advanced
+*before* the browser window was restored, so the foreground-to-correct-card latency was 0 ms: there was nothing left for
+foregrounding to trigger.
 
 The deterministic half of the evidence is
 [`test/background-settlement.test.js`](../test/background-settlement.test.js): five tests that ingest a settlement and a
@@ -4273,11 +4274,22 @@ remained `visible` throughout, so it is reported as measured and is explicitly *
 | 8 | `fixture-mumr9d6v-28` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
 | 9 | `fixture-mumrajro-30` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
 | 10 | `fixture-mumrbs0z-32` | 2 | 2 | 2 | 10.0 (≈) | yes | 0 ms | no |
+| 11 | `fixture-mumrh1eu-1` | **3** | **3** | **3** | 9.00 (≈) | yes | 0 ms | no |
+
+**Trial 11 is the stronger construction** and was added after the first ten. The first ten all advanced the card 1 → 2
+from a freshly created session, so in every one of them the card the trial started from was the *only* settled turn the
+store had ever held, and the terminal boundary arrived with its turn record open (`turnEndLookupHit`). Trial 11 prepares
+**two** turns first — the reloaded page shows turn 2's card, the store holds turns 1 and 2, and `turn/end` for turn 3 has
+to supersede a card that was already a *replacement* — and the advance observed is 2 → 3, with `turnEndLookupHit: 3`,
+`turnEndLookupMiss: 0` and all three settled turns present in both the store and the durable log. Its page-side record
+shows the same shape as trials 2–10: the card change (page clock 21 828 ms) precedes the read that prompted the release
+(the page's clock/wall pair at read time is 30 537 / 1 790 691 529 756, so the change lands ≈2.8 s before the window was
+restored), and `requestAnimationFrame` gaps of 1000–1004 ms bracket the minimized window.
 
 Trial 1 is the trial whose backgrounding evidence is the weakest: its covered window is documented by a 1 Hz `rAF`
 record (23 gaps of 1000–1004 ms spanning it) but the tab was not minimized, so it is reported as a trial that passed on
 the acceptance criterion — the card advanced without a reload — rather than as one whose backgrounding is proven.
-Trials 2–10 are all minimize-verified.
+Trials 2–11 are all minimize-verified.
 
 Trial 10's page recorded its card change at page-clock 24 419 ms and `Date.now()` 1 790 691 327 198 at page-clock
 77 035 ms, which places the change 756 ms **before** the window was restored (`wallClock(t) = t − 77 035 + 1 790 691 327 198`).
