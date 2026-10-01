@@ -366,13 +366,31 @@ export function curveViewModel(settled) {
 
   const durationMs = Number.isFinite(curve.durationMs) ? Math.max(0, curve.durationMs) : 0
   /**
+   * The published peak, or `null` when nothing was publishable.
+   *
+   * `curve.peakTps` is `null` — never `0` — when the shared rate-publication policy
+   * withheld every vertex (`src/core/rate-publication.js`), and the two readings are
+   * not interchangeable. "No publishable peak measurement" and "a measured peak of
+   * zero" are different facts about the turn, and collapsing the first into `0` made
+   * this view model assert the second. Carrying the `null` through is what keeps
+   * `peak.value` honest; the printed `display` and the geometry are untouched, so the
+   * card renders exactly as before (Phase 9.4.1).
+   */
+  const peakValue = Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : null
+  /**
    * The axis is scaled by the **full-series** peak, never by the drawn points:
    * downsampling is a drawing budget and may not rescale the chart either.
    * `downsampleRun` guarantees the peak-bearing point survives, so the drawn
    * curve reaches the top of the axis rather than falling short of it.
+   *
+   * Axis geometry is arithmetic and cannot take a `null`, so the published `null` is
+   * projected onto `0` at this one seam and nowhere else — `niceCeiling`'s floor keeps
+   * the scale well-defined, and the result is the `1` ceiling an unpublished peak has
+   * always produced. Everything below reads `axisPeak`; nothing downstream of this line
+   * lets the `null` into a quotient, a ratio or a comparison.
    */
-  const peakValue = Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : 0
-  const axisMax = niceCeiling(peakValue)
+  const axisPeak = peakValue ?? 0
+  const axisMax = niceCeiling(axisPeak)
 
   /**
    * The runs come from the attempt traces when the curve carries them, because those
@@ -467,7 +485,9 @@ export function curveViewModel(settled) {
    * what `curve.renderBudget.peakRetained` reports in words. Placing a different
    * measurement is not.
    */
-  const placedPeak = leaderSeries.peak !== null && Math.abs(leaderSeries.peak.tps - peakValue) < 1e-9
+  const placedPeak = peakValue !== null
+    && leaderSeries.peak !== null
+    && Math.abs(leaderSeries.peak.tps - peakValue) < 1e-9
     ? leaderSeries.peak
     : null
 
@@ -515,10 +535,16 @@ export function curveViewModel(settled) {
      * maximum (`docs/METRICS_SPEC.md` §9). `x`/`y` place the marker on the
      * measurement itself, and they are `null` when that measurement is not on the
      * chart — never a position borrowed from a weaker vertex.
+     *
+     * `value` is the published magnitude or `null`: it is `null` **only** when the
+     * curve published no peak at all, and `0` means a measured peak of zero. The
+     * `display` string is deliberately unchanged by that distinction — a peak that is
+     * absent and a peak that is zero both print the em dash — because the point of the
+     * split is to stop the field asserting a measurement, not to alter the card.
      */
     peak: {
       value: peakValue,
-      display: peakValue > 0 ? `≈${formatTps(peakValue)}` : DASH,
+      display: axisPeak > 0 ? `≈${formatTps(axisPeak)}` : DASH,
       unit: 'tokens/s',
       approximate: true,
       leader,

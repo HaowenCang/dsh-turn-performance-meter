@@ -226,8 +226,21 @@ test('a turn whose only episode is below the gates reports no peak and draws an 
   assert.equal(settled.curve.peakTps, null, 'no publishable point exists, so there is no peak')
   const view = curveViewModel(settled)
   assert.equal(view.peak.display, DASH, 'the card prints — rather than a fabricated number')
-  assert.equal(view.peak.value, 0)
+  assert.equal(view.peak.value, null,
+    'unavailable is null, not 0: the view model may not claim a measured peak of zero')
   assert.equal(view.series.every(entry => entry.peak === null), true)
+  /**
+   * The geometry still has to be drawable, so the axis takes the `null` at exactly
+   * one seam and the marker is withheld rather than fabricated. A `null` that leaked
+   * into the arithmetic would surface here as a throw, a `NaN` ceiling or a placed
+   * dot; all three are asserted absent.
+   */
+  assert.equal(view.axis.max, 1, 'the axis keeps the well-defined ceiling it always had')
+  assert.equal(Number.isFinite(view.axis.max), true)
+  assert.equal(view.peak.x, null, 'no vertex was measured, so no peak marker may be placed')
+  assert.equal(view.peak.y, null)
+  assert.equal(view.markers.every(marker => marker.isPeak === false), true,
+    'no surviving marker may be relabelled as the peak')
 })
 
 test('the calibrated spike is removed without moving the token integral or the summary rates', () => {

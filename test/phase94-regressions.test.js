@@ -141,6 +141,17 @@ function episodeTurn({ samples, settleAtMs, sessionId = 's-phase94', usage = nul
 const publishedOf = points => points.filter(point => Number.isFinite(point.tps))
 
 /**
+ * One completed turn that produced nothing publishable at all: an attempt with no
+ * accepted chunk settles immediately, so the shared publication policy withholds
+ * the curve's single opening anchor and `curve.peakTps` comes back `null`.
+ */
+function absentPeakTurn(sessionId) {
+  const { store, record, attempt } = openTurn({ sessionId })
+  store.settleAttempt(attempt, settle(attempt, { settledAtMs: 300 }))
+  return store.endTurn(record, { timeMs: 300, status: 'completed' })
+}
+
+/**
  * The publication contract stated on the vertices themselves.
  *
  * A finite `tps` is a measurement that passed **both** gates and says so; every
@@ -498,9 +509,11 @@ test('§16 CASE 7 — a one- or two-sample terminal episode contributes evidence
 
 test('§16 — nothing publishable reports a null peak and the card prints 峰值 —, not a measured zero', () => {
   /**
-   * The three statements are different and all three matter: the value is `null`
-   * (not `0`), the view model carries `0` only as a rendering placeholder, and the
-   * rendered row prints an em dash beside the 峰值 label.
+   * The three statements are different and all three matter: `curve.peakTps` is
+   * `null` (not `0`), the view model's `peak.value` is `null` too (Phase 9.4.1 — it
+   * used to carry `0` as a rendering placeholder, which made an absent measurement
+   * indistinguishable from a measured zero), and the rendered row prints an em dash
+   * beside the 峰值 label.
    *
    * v0.1.2: `peakTps` was `0` here — its `peakTps` could not return anything else
    * for an empty series — which is precisely the "峰值 0 tokens/s" reading the
@@ -512,11 +525,61 @@ test('§16 — nothing publishable reports a null peak and the card prints 峰�
 
   assert.equal(settled.curve.peakTps, null, 'no publishable vertex exists, so there is no peak')
   const row = peakRowOf(settled)
-  assert.equal(row.view.peak.value, 0)
+  assert.equal(row.view.peak.value, null,
+    'Phase 9.4.1: unavailable is null, distinct from a measured peak of zero')
+  assert.equal(row.view.peak.x, null, 'and no peak marker is fabricated to go with it')
+  assert.equal(row.view.peak.y, null)
   assert.equal(row.view.peak.display, DASH)
   assert.equal(row.label, '峰值')
   assert.equal(row.value, DASH, 'the value cell is an em dash, not a zero')
   assert.equal(typeof row.aria, 'string')
   assert.equal(row.aria.includes('峰值 —'), true, `the accessible name reads 峰值 —: ${row.aria}`)
   assert.equal(row.aria.includes('峰值 0'), false, 'and never 峰值 0 tokens/s')
+})
+
+test('§16b — an unavailable peak is null where a measured zero is 0, and neither changes the card', () => {
+  /**
+   * The semantic split Phase 9.4.1 closes, and the proof that closing it is free.
+   *
+   * `peak.value === null` says "the shared publication policy withheld every
+   * vertex, so no peak was measured". `peak.value === 0` says "the published series
+   * has a maximum of zero". v0.1.2 and Phase 9.4 both reported `0` for the first,
+   * so a caller reading the field could not tell an absent measurement from a
+   * measured one — an assertion of evidence that did not exist.
+   *
+   * The second half is the no-visual-change proof. The input is one settled turn
+   * with the single field `curve.peakTps` moved between `null` and `0`; everything
+   * else — geometry, series, markers, axis — is byte-identical, so any difference in
+   * the rendered tree would be the split leaking into the card. The trees must be
+   * deeply equal, the display must be the same em dash in both, and nothing may be
+   * drawn at the axis floor.
+   *
+   * v0.1.2 / Phase 9.4: `absence.peak.value` was `0`, which the first assertion
+   * catches.
+   */
+  const absence = absentPeakTurn('s-ui-absent')
+  assert.equal(absence.curve.peakTps, null, 'the fixture must publish no peak')
+  const absentView = curveViewModel(absence)
+  assert.equal(absentView.peak.value, null,
+    'unavailable is null, never a measured zero')
+  assert.equal(absentView.peak.display, DASH, 'and it still prints the em dash')
+  assert.equal(absentView.peak.x, null, 'no peak marker may be fabricated')
+  assert.equal(absentView.peak.y, null)
+  assert.equal(Number.isFinite(absentView.axis.max), true,
+    'the axis keeps a finite ceiling: the null is projected onto 0 for geometry only')
+  assert.ok(absentView.axis.max > 0, `the axis must stay drawable: ${absentView.axis.max}`)
+  assert.equal(absentView.markers.every(marker => marker.isPeak === false), true,
+    'and no surviving marker may be relabelled as the peak')
+
+  const measuredZero = absentPeakTurn('s-ui-zero')
+  measuredZero.curve.peakTps = 0
+  const zeroView = curveViewModel(measuredZero)
+  assert.equal(zeroView.peak.value, 0,
+    'a finite peak of zero is a measurement, and the two readings must stay distinguishable')
+  assert.notEqual(zeroView.peak.value, absentView.peak.value)
+  assert.equal(zeroView.peak.display, DASH,
+    'while the printed card is unchanged: the split is in the field, not in the pixels')
+
+  assert.deepEqual(curveTree(rec, zeroView, [], zh), curveTree(rec, absentView, [], zh),
+    'the rendered tree is identical for both readings, so this fix has no visual effect')
 })
