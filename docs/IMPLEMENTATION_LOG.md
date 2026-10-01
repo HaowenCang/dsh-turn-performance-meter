@@ -5681,3 +5681,234 @@ test was skipped, todo'd or deleted, and no tolerance was widened. The Phase 9.4
 `test/curve-episode-opening.test.js`, `test/dsh-017-materialize-reconstruction.test.js`) re-runs green at 78/78. Ordinary
 commits only: no `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`. Nothing was published,
 versioned, tagged or released, and no real-machine run happened.
+
+---
+
+## Phase 9.4.5 — Durable shape authority / reconciliation outcome provenance (2026-10-01)
+
+**Starting state:** `HEAD == origin/main == 5ef2f0d02c19601fb678acc62498f43e3eccd55e`, divergence `0 0`, clean tree.
+
+### 1. The residual defect, and what was explicitly not touched
+
+Phase 9.4.4's principal repair is accepted in full and was **not** redesigned: a correlated partial transient attempt is
+completed by authoritative replacement from a complete durable decode; `samples` and `phaseCuts` are replaced, never
+unioned or deduped; process-local attempt identity is preserved; first-token evidence upgrades one way; historical
+durable chunks are never replayed through `LiveMeter`; usage precedence stays settlement → in-stream fallback; an
+ambiguous correlation is never guessed.
+
+What Phase 9.4.4 left behind is a single source-level claim it could not support. The settled temporal-shape gate read
+
+```js
+const durableShape = record.attempts.length > 0
+  && record.attempts.every(attempt => Number.isFinite(attempt.settlementSeq))   // removed in this phase
+```
+
+`settlementSeq` proves only that a durable **settlement was observed**. It does not prove that the attempt's sample
+timeline came from a complete durable stream. When a decode was incomplete, `reconcileAttemptStream` correctly refused
+and the attempt kept its transient tail — evidence the window really saw, but partial — and `timestampsComplete` then
+only asked whether the *retained* sample timestamps were finite, which they were. The card therefore reported
+
+```text
+decoded.complete === false
+  -> reconciliation correctly refused
+  -> partial transient evidence retained
+  -> settleAttempt still records settlementSeq
+  -> durableShape becomes true solely from settlementSeq
+  -> the anchored partial tail is labelled temporalShapeQuality = reconstructed
+```
+
+which violates the project's own meaning of `reconstructed` (`src/core/quality-model.js`: "`durable` records *where* the
+timestamps came from … the live pane can be re-baselined or lose frames").
+
+A second, smaller defect lived beside it: `settlementStreamsUncorrelated` was incremented both for a genuinely
+uncorrelated settlement and for a **proven** correlation whose decode was refused. In the second case the correlation did
+not fail — the attempt it proved is exactly the record the refusal had to protect — so the counter's name asserted
+something false, and a regression that stopped adopting complete streams would have been indistinguishable from a decode
+that lost a record.
+
+### 2. Pre-fix reproduction, measured on `5ef2f0d`
+
+Driven through the real wire — `SessionEventFeed` → live controller → `TurnTelemetryStore` → `settle()` → `aggregateTurn`
+→ `qualityAxes` — with a real `SessionEventChange{kind:'replace'}` installing a window holding only the output samples at
+`300/350/400`, then a durable `assistant/message` carrying `usage: { outputTokens: 600, reasoningTokens: 300 }` and a
+compact stream whose output run declares one `dt` for three members (so the decoder reports `bad-dt`, still returns four
+decodable chunks, and marks `complete: false`), then `turn/end`:
+
+```text
+reconciliation                     refused (incomplete-decode)
+attempt.samples                    300/350/400            — the transient tail, unchanged
+attempt.phaseCuts                  []                     — the 120 boundary was not adopted
+attempt.settlementSeq              2                      — finite
+attempt.usage                      { 600, 300 }           — authoritative, source assistant-settlement
+attempt.calibration.totalAnchored  true
+quality.tokenTotalQuality          exact
+quality.temporalShapeQuality       reconstructed          <-- the defect
+curve.qualityAxes.temporalShapeQuality  reconstructed      <-- the defect
+counter                            reconciled 0, uncorrelated 1   (mislabeled: the correlation was proved)
+```
+
+Because `totalAnchored` was true and the retained timestamps were finite, nothing except the temporal-evidence
+provenance stood between this turn and the strongest shape claim — and that provenance was never consulted.
+
+### 3. The normative distinction
+
+Three facts now travel separately and none implies another:
+
+| Fact | Recorded as |
+|---|---|
+| a durable settlement was observed | `attempt.settlementSeq` |
+| the settlement's embedded stream decoded completely | `decoded.complete` |
+| that decode was **adopted** as the attempt's temporal evidence | `attempt.temporalEvidenceAuthority` |
+
+`temporalShapeQuality = reconstructed` is permitted only when every contributing attempt's temporal sample stream is
+backed by a complete authoritative durable decode.
+
+### 4. The representation, and why this one
+
+`src/core/types.js` (the normalized-domain vocabulary module, below both the DSH adapter and the host store) gains
+
+```js
+TEMPORAL_EVIDENCE_AUTHORITY = { LIVE: 'live', DURABLE_INCOMPLETE: 'durable-incomplete', DURABLE_COMPLETE: 'durable-complete' }
+TEMPORAL_EVIDENCE_RANK      = { live: 0, durable-incomplete: 1, durable-complete: 2 }
+hasDurableTemporalAuthority(attempt)  ===  attempt.temporalEvidenceAuthority === 'durable-complete'
+```
+
+An enum rather than a boolean, because the third state is real and reachable: the durable-only restoration of a
+malformed settlement stream produces an attempt whose samples **are** a decode — just not a complete one. Calling that
+`live` would have discarded a true fact about the evidence, and calling it `durable-complete` is the defect itself.
+
+The field is written where the decision is made, never inferred later from an incidental field, and
+`TurnTelemetryStore.temporalEvidenceObserved` applies one rule to every write: **one-way upward**. A proven claim may be
+raised when better evidence replaces the samples, and is never withdrawn, because nothing in this store removes a sample
+once it is recorded — so an incomplete settlement arriving after a complete one cannot demote an attempt whose adopted
+decode is still its timeline. An unknown, absent or unrecognised authority ranks as `live`, which is what makes the
+failure mode of a forgotten path an understated claim rather than an overstated one.
+
+### 5. `durableShape`
+
+```js
+const contributing = record.attempts.filter(isContributingAttempt)
+const durableShape = contributing.length > 0
+  && contributing.every(attempt => hasDurableTemporalAuthority(attempt))
+```
+
+The population is the **contributing** attempts — the same `isContributingAttempt` predicate `aggregateTurn` reduces
+with, so there is one definition of "contributes a denominator" rather than two. An attempt that emitted no generated
+sample draws no vertex and can neither support nor degrade the shape; the length guard is stated rather than left
+vacuous, so a turn with nothing to describe cannot claim a durable shape.
+
+Settlement identity and lifecycle are untouched by this: `settleAttempt` still records `settlementSeq`,
+`settlementKind`, `surfaceCommitted` and `attemptOutcome`, and it still never writes the authority. Observing a
+settlement and adopting its stream are different acts.
+
+### 6. Incomplete decode semantics
+
+A refused reconciliation due to `decoded.complete !== true` now, explicitly:
+
+- retains the transient `samples` and `phaseCuts` (unchanged from 9.4.4);
+- retains the settlement metadata (`settlementSeq`, kind, surface, outcome);
+- retains the authoritative usage and its provenance;
+- writes **nothing** to `temporalEvidenceAuthority`, so a correlated transient attempt stays `live`;
+- therefore reports `estimated` on the temporal axis — never `unavailable`, because valid transient shape evidence
+  exists — and never `reconstructed`.
+
+The three axes stay independent: in the principal fixture the token total remains `exact` while the temporal axis reads
+`estimated`, and `displayTokenTotal` stays `exact`.
+
+### 7. Diagnostics
+
+```text
+settlementStreamsReconciled    proved correlation + complete decode adopted
+settlementStreamsRejected      proved correlation, reconciliation refused (NEW)
+settlementStreamsUncorrelated  no unique/proven correlation; durable-restoration policy used
+```
+
+`Rejected` and `Uncorrelated` describe different facts about different records: the first says an *existing* attempt's
+evidence was examined and declined; the second says no existing attempt was proved to own the settlement at all. The
+9.4.4 counter that conflated them is not carried forward under its old meaning. A settlement that carried no decoded
+stream is counted by neither of the first two.
+
+### 8. Attempt-construction paths, dispositioned
+
+| Path | Authority | Why |
+|---|---|---|
+| `TurnTelemetryStore.beginAttempt` | `live` | the samples about to arrive are the transient plane's; an undeclared source is never durable |
+| `acceptChunk` / live-built attempt | `live` (unchanged) | a transient sample cannot make a timeline durable, and a late frame cannot withdraw a proven one; the method writes nothing |
+| `settleAttempt` (retry / `assistant/attempt`) | unchanged | settlement identity and lifecycle are recorded; observing a settlement claims no timeline |
+| `attemptFromDecoded` | from `decoded.complete` | the samples *are* that decode |
+| `reconstructFromDurable` | from `decoded.complete` | same rule, same site of truth |
+| `materializeReconstructedTurn` | carried through to `beginAttempt` | the store cannot see the decode, so it is told what the parser derived |
+| controller durable-only restoration | from the decode it was built from | `attemptFromDecoded` |
+| controller successful `reconcileAttemptStream` | `durable-complete` | the replacement was applied |
+| controller rejected `reconcileAttemptStream` | nothing written | the samples were not replaced |
+| open attempt at `turn/end` | `live` | the turn closing is not evidence about its samples |
+
+`test/temporal-evidence-authority.test.js` asserts this table row for row, through the same APIs, against a named audit
+list, so a new construction path cannot appear without a disposition.
+
+### 9. Equivalence harness
+
+`test/helpers/equivalence.js` now states each path's plane. `durableSettledView` (path B) carries the authority
+`reconstructFromDurable` derived from `decoded.complete`; `liveSettledView` (path A) declares none, because its samples
+come from the transient plane.
+
+`compareTuples` therefore no longer requires the two planes to agree on `quality.temporalShapeQuality`: that axis answers
+*which plane produced this timeline*, so requiring equality would require one of them to misdescribe its own provenance.
+It is compared only between tuples of the same plane (the frame-form vs client-folded-form comparison, one plane and two
+wire shapes), and in both cases each side must satisfy
+
+```text
+temporalShapeQuality === 'reconstructed'  =>  durableTemporalShape === true
+```
+
+which is strictly stronger than the equality it replaces: the old comparison could pass while both sides overstated
+their evidence, the new one fails as soon as one does. `test/dsh-equivalence.test.js` pins the live side at `estimated`
+and the durable side's `durableTemporalShape` at `true` for every recorded fixture, and the durable reading reaches
+`reconstructed` on the fixtures whose tokens are anchored.
+
+### 10. What was deliberately not changed
+
+- **Phase 9.4–9.4.4 contracts.** `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, phase-cut arithmetic,
+  `phaseCutOf`/`phaseCutsFromChunks`, the episode walk and origin, curve sampling, provider-baseline policy, TTFT
+  semantics, replacement semantics, the `LiveMeter` non-replay rule and usage precedence are byte-for-byte what they
+  were. No clamp, smoothing, ceiling or new timestamp dedupe.
+- **`settlementSeq` is neither removed nor repurposed.** It still proves the durable settlement occurred, and the
+  §13.2 durable-restoration identity policy still keys off it.
+- **The token and split axes.** Authoritative usage is still `exact` when the temporal axis is `estimated`; the gate
+  reaches the temporal axis and nothing else.
+- **The ambiguous-correlation policy.** An unprovable correlation still restores the settlement as its own attempt; its
+  authority follows the decode it was actually built from.
+- **The late-frame boundary.** `acceptChunk` does not lower a proven authority when a stray transient frame arrives
+  after a settlement. The authority describes the stream the reconciliation adopted; the store still does not dedupe a
+  late frame, which is pre-existing Phase 9.4.4 behaviour and out of this phase's scope.
+- **The stale-bundle guard, the fixture set, and the peer pin.** No fixture was regenerated, no version, tag or
+  publication change: `package.json` stays `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`.
+- **No real-machine runtime.** No DSH profile was started, stopped, attached to, installed into, modified or deleted;
+  the retained isolated profile was not touched.
+
+### 11. Gates
+
+```text
+npm run build:client             client.js rebuilt (610105 bytes, mirrored to lib/client.js)
+npm run verify                   structure OK (14 required files, 16 core modules, 73 test files, client bundle fresh,
+                                 lib/client.js mirrored); tests 865 · pass 865 · fail 0 · cancelled 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
+git diff --check                 clean
+client.js == lib/client.js       byte-identical (sha256 33E78BA95D20CA0FE547142B316FC1A8BF158FB248CE1C738C1DBBB836042A50)
+```
+
+Test totals rose from 853 to 865 — **12 new deterministic tests**, all in `test/temporal-evidence-authority.test.js`.
+That file was run from a detached `git worktree` at `5ef2f0d` with only the two vocabulary names the baseline does not
+export declared locally: **12 tests, 0 pass, 12 fail**, the principal case reporting
+`actual: 'reconstructed', expected: 'estimated'`. It is green on the repaired tree, the worktree was removed afterwards,
+and no baseline checkout remains in the workspace.
+
+`test/settlement-reconciliation.test.js` keeps all 15 of its Phase 9.4.4 cases. Exactly one diagnostics assertion
+changed, and the reason is stated in the file itself: the incomplete-decode case is a **proved** correlation, so the old
+`settlementStreamsUncorrelated` expectation was testing a mislabeled diagnostic rather than reconciliation behaviour.
+The reconciliation assertions around it are unchanged and are now pinned alongside it (transient tail retained, authority
+`live`).
+
+Ordinary commits only: no `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`. Nothing was
+published, versioned, tagged or released, and no real-machine run happened. Runtime acceptance remains blocked until
+independent GitHub audit of this phase.

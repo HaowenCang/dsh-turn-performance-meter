@@ -868,22 +868,57 @@ A single label must not describe a whole curve. The same turn routinely has an e
 
 `phaseSplitQuality` is additionally capped by `tokenTotalQuality`: a split cannot be better known than the total it divides.
 
+#### 11.2.1 What `reconstructed` requires (Phase 9.4.5)
+
+`reconstructed` is a claim about **where the timeline came from**, not about the timestamps agreeing with the clock. It is permitted only when
+
+```text
+every contributing attempt's temporal sample stream
+is backed by a complete authoritative durable decode
+```
+
+Three facts are distinct and none implies another:
+
+| Fact | Where it is recorded |
+|---|---|
+| a durable settlement was observed | `attempt.settlementSeq` |
+| the settlement's embedded stream decoded completely | `decoded.complete` |
+| that decode was **adopted** as the attempt's temporal evidence | `attempt.temporalEvidenceAuthority` |
+
+The third is the only one the temporal axis may read, and it is written where the decision is made (`TurnTelemetryStore.temporalEvidenceObserved`) rather than inferred later from an incidental field. Its values are `live`, `durable-incomplete` and `durable-complete`; anything else — including a missing field or an unrecognised name — counts as `live`, so a path that forgets to declare its source can only *understate* authority.
+
+Consequences, all of them normative:
+
+- a settlement whose decode lost a record is refused by the reconciliation, the transient evidence stands, and the attempt stays `live` — so the settled shape is `estimated`, even though the settlement is recorded, the usage counter is authoritative and the phase integrals are anchored;
+- an attempt restored from a partial decode *is* durable-derived, and is reported `durable-incomplete`: real evidence, not authoritative evidence;
+- an attempt still streaming when the turn closes is `live`, and the turn closing does not change that;
+- the turn's axis is the **weakest** contribution: one live or incomplete contributor among several forbids a turn-level `reconstructed`;
+- an empty population is not a durable shape either — a turn with no contributing attempt reads `unavailable`, never `reconstructed`.
+
+The gate constrains the temporal axis only. `tokenTotalQuality` and `phaseSplitQuality` are counted from provider counters and stream phase evidence, so an authoritative usage counter stays `exact` while the temporal axis is `estimated` (§11.3).
+
 ### 11.3 Derivation
 
 | Evidence | tokenTotalQuality | phaseSplitQuality | temporalShapeQuality |
 |---|---|---|---|
-| authoritative `outputTokens` and `reasoningTokens` on every contributing attempt, **and the stream shows both phases**, durable timestamps | `exact` | `exact` | `reconstructed` |
-| authoritative `outputTokens` on every contributing attempt, no `reasoningTokens` | `exact` | `estimated` | `reconstructed` |
-| authoritative `outputTokens` and `reasoningTokens` on every contributing attempt, but at least one counter is contradicted by the stream's phase evidence (§8.3.1) | `exact` | at most `estimated` | `reconstructed` |
-| authoritative usage on some contributing attempts only | `partial` | at most `estimated` | `reconstructed` |
-| no provider usage at all, durable timestamps | `unavailable` | `unavailable` | `estimated` |
+| authoritative `outputTokens` and `reasoningTokens` on every contributing attempt, **and the stream shows both phases**, every contributing attempt `durable-complete` | `exact` | `exact` | `reconstructed` |
+| authoritative `outputTokens` on every contributing attempt, no `reasoningTokens`, every contributing attempt `durable-complete` | `exact` | `estimated` | `reconstructed` |
+| authoritative `outputTokens` and `reasoningTokens` on every contributing attempt, but at least one counter is contradicted by the stream's phase evidence (§8.3.1), every contributing attempt `durable-complete` | `exact` | at most `estimated` | `reconstructed` |
+| authoritative usage on some contributing attempts only, every contributing attempt `durable-complete` | `partial` | at most `estimated` | `reconstructed` |
+| no provider usage at all, every contributing attempt `durable-complete` | `unavailable` | `unavailable` | `estimated` |
 | no provider usage, live observation only | `unavailable` | `unavailable` | `estimated` |
+| **at least one contributing attempt is `live` or `durable-incomplete`** (§11.2.1) | unchanged | unchanged | at most `estimated` |
 | a contributing attempt carried no delta timestamp, or its shape is not anchored to a total | unchanged | unchanged | `estimated` |
 | no contributing attempt at all | `unavailable` | `unavailable` | `unavailable` |
 
 The third row and the first differ only in the phase mapping, and that is the independence Phase 7C.2 froze: an exact
 counted total beside an untrustworthy division of it. The final model must be able to express *exact total +
 untrustworthy phase mapping + reconstructed temporal curve* without collapsing any of the three into another.
+
+The seventh row is the Phase 9.4.5 row, and it is deliberately stated as an **upper bound** rather than a value: the
+transient timeline is real evidence, so the axis reads `estimated` (never `unavailable`), and it stays `estimated`
+however good the token counters are. Measured on `5ef2f0d`, the same fixture read `reconstructed` on this row — the
+defect the row now forbids.
 
 ### 11.4 UI rules
 
@@ -1058,7 +1093,11 @@ Three rules are normative:
 
 1. **A proven correlation obliges completion, not merely closure.** When the settlement is uniquely correlated to one existing attempt, that attempt's stream-derived evidence is replaced by one decode of the settlement's stream: `attempt.samples` (rebuilt with `sampleFromChunk` over `decoded.chunks`) and `attempt.phaseCuts` (rebuilt with `phaseCutsFromChunks` over the same decode). Recording the settlement while ignoring its stream leaves a completed card that disagrees with the same turn's full-evidence card on every stream-derived metric — a phase cut and every delta preceding the reload would be present live and absent after it.
 2. **Replacement, not union and not dedupe.** The transient and durable planes share no per-delta identity: a transient row is `(attemptId, index, revision)` from the client fold, a decoded durable delta is `(recordIndex, memberIndex)` from the compact record array. A union therefore double-counts every overlapped delta, and a dedupe keyed on `timeMs + text` collapses two genuinely distinct same-timestamp deltas and reorders what survives. Replacement is idempotent, cannot duplicate a cut and cannot reorder a same-timestamp pair, because the decoder already preserves logical stream order exactly. A boundary visible in both planes is recorded **exactly once**.
-3. **Only a complete decode is authoritative.** `decoded.complete` is `false` as soon as one record fails to decode. Replacing with such a stream would lose evidence the transient plane may still hold, so it is refused, the transient evidence stands, and the refusal is counted (`diagnostics().counters.settlementStreamsUncorrelated`).
+3. **Only a complete decode is authoritative.** `decoded.complete` is `false` as soon as one record fails to decode. Replacing with such a stream would lose evidence the transient plane may still hold, so it is refused, the transient evidence stands, and the refusal is counted as `diagnostics().counters.settlementStreamsRejected`.
+
+   Phase 9.4.5 states what the refusal means for the attempt's quality claim, because the refusal and the settlement used to be conflated. A refusal writes **nothing** — no sample is replaced, no cut is adopted, and `attempt.temporalEvidenceAuthority` is left where it was, which for a correlated transient attempt is `live`. A finite `settlementSeq` records that the durable settlement was observed; it does not record that its stream became the attempt's timeline. The settled card therefore reports `estimated` on the temporal axis, keeps the authoritative usage counter and the anchored integrals, and never claims `reconstructed` (§11.2.1).
+
+   The three outcomes a settlement with a decoded stream can have are distinct and are counted separately (§13.5).
 
 What the reconciliation preserves is as load-bearing as what it replaces. The attempt's process-local identity, its step and its start instant belong to the attempt the correlation proved, and are never rewritten — so the counter counts completions of an existing record rather than creations of a new one. `usage` and `usageSource` keep their existing precedence (§6, §13.1) and are never recomputed from the decode. A record built by the live path does not represent `chunks`, `decoded`, `streamQuality` or `issues`, and this step does not add them: it completes that record rather than converting it into a durable-restored one. An **unprovable** correlation is unchanged — the settlement is still restored as its own attempt under §13.2's identity policy rather than attached to a guess.
 
@@ -1067,3 +1106,19 @@ The turn's first-token fact is upgraded through the **one-way** rule of §4: an 
 The reconciliation edits the record only. It must **not** replay the historical stream through `LiveMeter`: re-feeding the decoded deltas would re-open episodes the live pill had already left, reset a frozen TTFT stage and restart a settled attempt, i.e. it would rewrite presentation history to agree with evidence the completed card already holds. The live observations remain historical presentation facts; `test/settlement-reconciliation.test.js` asserts the live snapshot is unchanged across the reconciliation.
 
 Finally, the mixed plane must be indistinguishable from the pure ones. `test/settlement-reconciliation.test.js` compares it against a full-evidence reference through the same wire, and against a `materializeReconstructedTurn` of the same durable rows, on samples, timestamps, phases, masses, cuts, TTFT fields, phase durations, rates, every curve vertex, visual runs, trace cuts, peaks, generated-token accounting and quality axes — with reconstruction-local attempt identity projected out explicitly, since a transient attempt is keyed by the fold's process-local `attemptId` and a restored one by its settlement sequence.
+
+#### 13.5 Settlement-outcome provenance (Phase 9.4.5)
+
+A durable settlement that carries a decoded stream ends in exactly one of three outcomes, and `diagnostics(sessionId).counters` reports each one separately:
+
+| Counter | Outcome | What it means |
+|---|---|---|
+| `settlementStreamsReconciled` | correlation proven **and** a complete decode adopted | the attempt's `samples`/`phaseCuts` are one decode of the durable stream |
+| `settlementStreamsRejected` | correlation proven, reconciliation refused | the decode was incomplete (or unusable), so the transient evidence stands unchanged |
+| `settlementStreamsUncorrelated` | no unique attempt proved | the durable-restoration policy of §13.2 restored the settlement as its own attempt |
+
+They are not three names for a failure count. `Rejected` and `Uncorrelated` describe different facts about different records: the first says an *existing* attempt's evidence was examined and declined, the second says no existing attempt was proved to own the settlement at all. Phase 9.4.4 counted both as `settlementStreamsUncorrelated`, which was semantically false for the rejected case — the settlement *was* correlated, and the attempt it was correlated to is exactly the record the refusal had to protect. Reading "the correlation failed" from a refused decode is how a regression that stopped adopting complete streams would have looked identical to a decode that lost a record.
+
+A settlement that never carried a decoded stream is counted by none of the three; the first two are conditional on `event.decoded !== undefined`.
+
+The restored attempt's own temporal authority follows the decode it was actually built from (§11.2.1): a malformed settlement stream restored as its own attempt is `durable-incomplete`, not `durable-complete`, so it can never make the turn read `reconstructed`.

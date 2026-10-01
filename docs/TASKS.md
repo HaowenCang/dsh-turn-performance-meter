@@ -1641,3 +1641,86 @@ tests; sanitization PASS; `git diff --check` clean; and no version, tag or publi
 
 **Status: source-level closure complete; a final narrowly scoped isolated-runtime smoke may be authorized only after
 independent GitHub audit of this reconciliation. No release-readiness claim is made in this phase.**
+
+---
+
+## Phase 9.4.5 — Durable shape authority / reconciliation outcome provenance (2026-10-01)
+
+**Starting state:** `HEAD == origin/main == 5ef2f0d02c19601fb678acc62498f43e3eccd55e`, divergence `0 0`, clean tree.
+
+**The residual defect.** Phase 9.4.4's reconciliation is accepted and is not redesigned. What it left behind is one
+source-level claim it could not support. The settled temporal-shape gate read
+
+```js
+durableShape = record.attempts.every(attempt => Number.isFinite(attempt.settlementSeq))
+```
+
+and `settlementSeq` proves only that a durable **settlement was observed**. It does not prove that the attempt's sample
+timeline came from a complete durable stream. When a decode was incomplete the reconciliation correctly refused and the
+attempt kept its transient tail — and `timestampsComplete` only checks that the *retained* timestamps are finite — so the
+card labelled that tail `temporalShapeQuality = reconstructed`, which is exactly what `reconstructed` is defined not to
+mean. `settlementStreamsUncorrelated` was also incremented for both a genuinely uncorrelated settlement and a **proven**
+correlation whose decode was refused.
+
+- [x] **Pre-fix reproduction through the real wire.** `SessionEventFeed` → live controller → `TurnTelemetryStore` →
+      `settle()` → `aggregateTurn` → `qualityAxes`, with an actual `SessionEventChange{kind:'replace'}` rebaseline for a
+      replacement window holding only the output samples at `300/350/400` and a correlated `assistant/message` carrying
+      `usage: { outputTokens: 600, reasoningTokens: 300 }` with a stream that loses one record. Measured on `5ef2f0d`:
+      reconciliation refused, `samples 300/350/400`, `phaseCuts []`, `settlementSeq 2`, usage authoritative and
+      `totalAnchored true`, `tokenTotalQuality exact`, and `quality.temporalShapeQuality =
+      curve.qualityAxes.temporalShapeQuality = reconstructed`.
+- [x] **Three facts kept separate.** Durable settlement observed (`settlementSeq`) ≠ durable stream decoded completely
+      (`decoded.complete`) ≠ durable stream adopted as authoritative temporal evidence.
+- [x] **Explicit temporal-evidence authority.** `TEMPORAL_EVIDENCE_AUTHORITY = { live, durable-incomplete,
+      durable-complete }` and `hasDurableTemporalAuthority()` in `src/core/types.js`; the value is written where the
+      decision is made (`TurnTelemetryStore.temporalEvidenceObserved`) and read by the settled gate. An unknown, absent
+      or unrecognised value ranks as `live`, and the rule is one-way upward, so a forgotten path can only understate.
+- [x] **The gate now means what it says.** `durableShape` = every **contributing** attempt
+      (`isContributingAttempt`, the same predicate `aggregateTurn` reduces with) is `durable-complete`; settlement
+      identity and lifecycle stay separate and are unchanged.
+- [x] **Incomplete decode semantics preserved and completed.** A refused reconciliation keeps the transient samples and
+      cuts, keeps the settlement metadata and the authoritative usage, and does **not** claim a reconstructed shape: the
+      axis reads `estimated`, never `unavailable`, because usable live temporal evidence exists.
+- [x] **Diagnostics corrected.** `settlementStreamsReconciled` (proved + complete decode adopted),
+      `settlementStreamsUncorrelated` (no unique/proven correlation; durable restoration) and the new
+      `settlementStreamsRejected` (proved correlation, reconciliation refused). The three outcomes are no longer
+      collapsed into a generic failure count.
+- [x] **Every attempt-construction path dispositioned**, and asserted by the §9 audit test: `beginAttempt` → `live`;
+      `acceptChunk`/live-built → `live`; `attemptFromDecoded` → from `decoded.complete`; `reconstructFromDurable` → from
+      `decoded.complete`; `materializeReconstructedTurn` → carried through; controller durable-only restoration → from
+      the decode it was built from; successful `reconcileAttemptStream` → `durable-complete`; refused
+      `reconcileAttemptStream` → nothing written; open attempt at `turn/end` → `live`; retry / `assistant/attempt` →
+      lifecycle only.
+- [x] **Regression matrix A–I** in `test/temporal-evidence-authority.test.js`: complete mixed reconciliation; incomplete
+      decode with authoritative usage; incomplete decode without usage; pure durable complete (and incomplete); pure
+      live; ambiguous correlation (`uncorrelated`, not `rejected`); correlated incomplete decode (`rejected`, not
+      `uncorrelated`); retry/mixed authority; and the token/split-axes-vs-temporal-axis independence proof.
+- [x] **Defect-specific tests red on `5ef2f0d`.** Run from a detached worktree at the baseline with only the new
+      vocabulary shimmed: **12 tests, 0 pass, 12 fail**, the principal case reporting
+      `actual: 'reconstructed', expected: 'estimated'`. Green on the repaired tree.
+- [x] **Phase 9.4.4 matrix intact.** `test/settlement-reconciliation.test.js` keeps all 15 cases; the single changed
+      assertion is the incomplete-decode diagnostics line, whose counter name was semantically wrong (the old
+      `settlementStreamsUncorrelated` assertion is replaced by `settlementStreamsRejected`, with the reconciliation
+      behaviour asserted unchanged).
+- [x] **Harnesses state their own plane.** `durableSettledView` carries the authority `reconstructFromDurable` derived,
+      `liveSettledView` declares none, and the live-vs-durable comparison no longer requires the two planes to agree on
+      `temporalShapeQuality` — it asserts the invariant "`reconstructed` ⇒ durable temporal authority" on both sides
+      instead, which is strictly stronger than the equality it replaces.
+- [x] **Phase 9.4–9.4.4 contracts preserved.** `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, phase-cut
+      arithmetic, episode origin, curve sampling, provider baseline policy, TTFT semantics, replacement semantics,
+      `LiveMeter` replay policy and usage precedence are all untouched. No clamp, smoothing, ceiling or new timestamp
+      dedupe.
+- [x] **Version frozen at `0.1.2`** with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No `npm publish`, no `npm version`, no
+      tag, no GitHub Release.
+- [x] **Deterministic/source-only.** No DSH profile was started, stopped, attached to, installed into, modified or
+      deleted; the retained isolated profile was not touched. No real-machine acceptance was run.
+- [x] **Ordinary commits only.** No `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`.
+
+Acceptance gate: `HEAD == origin/main`, divergence `0 0` and a clean tree after the push; the new suite red on `5ef2f0d`
+(12 of 12) and green on the fixed tree; the complete-decode mixed path unchanged and still `reconstructed`; an
+authoritative usage counter still `exact` beside an `estimated` temporal axis; `settlementStreamsRejected` distinct from
+`settlementStreamsUncorrelated`; 0 failing tests; sanitization PASS; `git diff --check` clean; `client.js` byte-identical
+to `lib/client.js`; and no version, tag or publication change.
+
+**Status: source-level closure complete; runtime acceptance remains blocked until independent GitHub audit. No
+release-readiness claim is made in this phase.**

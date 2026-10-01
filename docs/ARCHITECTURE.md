@@ -254,9 +254,12 @@ durable assistant/message or assistant/attempt
         │  correlation          -> the attempt whose (turn, step) it uniquely proves
         ▼
 TurnTelemetryStore.reconcileAttemptStream(record, attempt, { decoded })
+        ├── decoded.complete !== true  ->  refused; nothing is written, and the
+        │                                  refusal is counted as `rejected`
         ├── attempt.samples     := one sampleFromChunk pass over decoded.chunks
         ├── attempt.phaseCuts   := phaseCutsFromChunks(decoded.chunks)
         ├── record.firstTokenMs := one-way upgrade (earlier may replace, later may not)
+        ├── attempt.temporalEvidenceAuthority := durable-complete (Phase 9.4.5)
         └── everything else     preserved: attemptId, step, startedAtMs, usage, lifecycle
         ▼
 settleAttempt(...)   ->  endTurn()  ->  aggregateTurn -> curveSource -> attemptTraces
@@ -267,11 +270,60 @@ transient row is keyed by the fold's `(attemptId, index, revision)`, a decoded d
 `(recordIndex, memberIndex)`), so a union double-counts an overlap and a `timeMs + text` dedupe would reorder
 same-timestamp deltas. A decode with any malformed record is refused outright, because it is not the whole attempt.
 
+### Temporal-evidence authority (Phase 9.4.5)
+
+`settlementSeq` proves that a durable settlement was **observed**. It does not prove that the attempt's sample timeline
+came from a durable stream, and until Phase 9.4.5 the settled temporal-shape gate read exactly that:
+
+```js
+durableShape = record.attempts.every(attempt => Number.isFinite(attempt.settlementSeq))   // removed
+```
+
+A correlated settlement whose decode was incomplete was therefore refused by the reconciliation — correctly — and the
+card still labelled the retained transient tail `temporalShapeQuality: reconstructed`.
+
+The replacement is a field written where the decision is made, not inferred later:
+
+```
+src/core/types.js   TEMPORAL_EVIDENCE_AUTHORITY = { live, durable-incomplete, durable-complete }
+                    hasDurableTemporalAuthority(attempt) === (… === 'durable-complete')
+
+written by:
+  TurnTelemetryStore.beginAttempt        'live' (default; an undeclared source is never durable)
+  attemptFromDecoded                     from decoded.complete
+  reconstructFromDurable                 from decoded.complete
+  materializeReconstructedTurn           carried through to beginAttempt
+  reconcileAttemptStream (adopted)       'durable-complete'
+  reconcileAttemptStream (refused)       nothing — the samples were not replaced
+  open attempt at turn/end               'live'
+  acceptChunk / settleAttempt            nothing — appending a sample or observing a
+                                         settlement claims no new provenance
+
+read by:
+  TurnTelemetryStore.settle()
+        durableShape = every contributing attempt hasDurableTemporalAuthority
+        -> aggregateTurn({ durable }) -> temporalShapeQuality
+```
+
+`temporalEvidenceObserved` is **one-way upward**: a proven claim may be raised when better evidence replaces the
+samples, and is never withdrawn, because nothing in the store removes a sample once it is recorded. An unknown or
+unrecognised value ranks as `live`, so the failure mode of a forgotten path is an understated claim, never an
+overstated one.
+
+The population is the **contributing** attempts (`isContributingAttempt`, the predicate `aggregateTurn` already reduces
+with): an attempt with no generated sample draws no vertex, so it can neither support nor degrade the shape. An empty
+population cannot claim a durable shape.
+
 The call touches `LiveMeter` nowhere. The live observations already made are historical presentation facts, and
 re-feeding the decoded stream through `acceptSample`/`observeTokenBoundary` would re-open episodes the pill had left and
 reset its frozen TTFT stage; `test/settlement-reconciliation.test.js` asserts the live snapshot is byte-for-byte
 unchanged across the reconciliation, and that the completed card then equals the full-evidence card with only
 reconstruction-local attempt identity projected out.
+
+The live-vs-durable equivalence harness states the same distinction: `durableSettledView` carries the authority
+`reconstructFromDurable` derived, `liveSettledView` declares none, and `compareTuples` no longer requires the two planes
+to agree on `temporalShapeQuality` — it requires each side to satisfy the invariant that a `reconstructed` claim implies
+durable temporal authority.
 
 ### Curve magnitude provenance (frozen in Phase 7C)
 

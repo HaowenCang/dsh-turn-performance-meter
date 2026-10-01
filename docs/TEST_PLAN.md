@@ -1108,6 +1108,12 @@ controls — CASE E (pure durable, already correct after Phase 9.4.3) and CASE F
 where the decision is made. CASE H asserts `1 / 1` (one settlement proved its attempt by identity, one could not be
 proven and took the durable-restoration path); the incomplete-decode case asserts `0 / 1`.
 
+> **Superseded in part by Phase 9.4.5 (§16).** The incomplete-decode row is a **proved** correlation whose decode was
+> refused, so it is no longer counted as `uncorrelated`. That case now asserts
+> `settlementStreamsReconciled 0 / settlementStreamsUncorrelated 0 / settlementStreamsRejected 1`; CASE H's `1 / 1`
+> stands, with `rejected 0`. The reconciliation behaviour itself is unchanged — only the counter that names the outcome
+> is corrected, because the old name tested a mislabeled diagnostic.
+
 ### 15.4 Totals
 
 **853 tests, 853 pass, 0 fail, 0 skipped, 0 todo** (838 before this phase) — **15 new deterministic tests**, all in
@@ -1116,3 +1122,88 @@ Phase 9.4.3 regression set re-runs green at 78/78. `npm run verify` runs `script
 Node test runner over `test/*.test.js`; sanitization remains a separate gate (`node scripts/verify-sanitization.mjs`)
 and passes; `git diff --check` is clean. No runtime acceptance was performed: Phase 9.4.4 is deterministic/source-only,
 and no DSH profile was started, stopped, attached to, installed into, modified or deleted.
+
+---
+
+## 16. Phase 9.4.5 — durable shape authority / reconciliation outcome provenance
+
+Source-only, like Phase 9.4.4: no runtime interaction, no real-machine acceptance.
+
+### 16.1 The principal defect fixture
+
+Through the real wire — `SessionEventFeed` → live controller → `TurnTelemetryStore` → `settle()` → `aggregateTurn` →
+`qualityAxes` — with the actual `SessionEventChange{kind:'replace'}` rebaseline:
+
+| Input | Value |
+|---|---|
+| replacement window | only the output samples at `300 / 350 / 400` |
+| durable `assistant/message` | `settlementSeq` finite (2), `usage: { outputTokens: 600, reasoningTokens: 300 }` |
+| embedded stream | one malformed record (`dt` length 1 for 3 members) → `decoded.complete === false`, 4 chunks still decoded |
+
+| Measured | `5ef2f0d` | repaired |
+|---|---|---|
+| reconciliation | refused | refused |
+| `attempt.samples` | `300/350/400` (transient) | `300/350/400` (transient) |
+| `attempt.phaseCuts` | `[]` | `[]` |
+| `attempt.settlementSeq` | `2` | `2` |
+| `attempt.usage` / source | authoritative / `assistant-settlement` | authoritative / `assistant-settlement` |
+| `calibration.totalAnchored` | `true` | `true` |
+| `temporalEvidenceAuthority` | *(field absent)* | `live` |
+| `quality.tokenTotalQuality` | `exact` | `exact` |
+| `quality.temporalShapeQuality` | **`reconstructed`** | **`estimated`** |
+| `curve.qualityAxes.temporalShapeQuality` | **`reconstructed`** | **`estimated`** |
+| counters | reconciled `0`, uncorrelated `1` | reconciled `0`, uncorrelated `0`, rejected `1` |
+
+### 16.2 Case matrix
+
+Every wire-level case is driven through the real ingest path; the §9 case calls each construction path directly.
+
+| Case | Subject | Asserted | Red on `5ef2f0d` |
+|---|---|---|---|
+| B | incomplete decode + authoritative usage | refusal retained; not `reconstructed`; `estimated`; token axis `exact`; `rejected 1` | FAIL (`reconstructed`) |
+| G | correlated incomplete decode | `rejected`, not `uncorrelated`; the correlation really was proved (one attempt, same identity) | FAIL (counter absent) |
+| A | complete mixed reconciliation | 9.4.4 replacement unchanged; `durable-complete`; `reconstructed`; `reconciled 1` | FAIL (field absent) |
+| C | incomplete decode without usage | no fabricated total; `tokenTotalQuality unavailable`; shape `estimated`; `rejected 1` | FAIL (field absent) |
+| D | pure durable complete | reconstruction plane adopts its decode; `reconstructed` | FAIL (field absent) |
+| D2 | pure durable incomplete | restored from the surviving half; `durable-incomplete`; `estimated`, tokens `exact` | FAIL (field absent) |
+| E | pure live | ending a turn claims nothing; `estimated`; token axis `unavailable` | FAIL (field absent) |
+| F | ambiguous correlation | no guess; `durable:<seq>` restored under the existing policy; `uncorrelated 1`, `rejected 0` | FAIL (field absent) |
+| H | retry / mixed authority | one `durable-complete` + one `live` ⇒ turn not `reconstructed`; tokens still `exact` | FAIL |
+| I | axis independence | `['exact','estimated','estimated']` on the three axes; `displayTokenTotal exact` | FAIL (`reconstructed`) |
+| §9 | every construction path | 13 dispositions, matched name-for-name against the audit list | FAIL (field absent) |
+| §9 | one-way upward, unknown ≠ durable | unknown name, missing field, `null` all answer `false`; no downgrade | FAIL (field absent) |
+
+### 16.3 Defect-specific proof on the baseline
+
+`test/temporal-evidence-authority.test.js` was run from a detached `git worktree` at
+`5ef2f0d02c19601fb678acc62498f43e3eccd55e` with the two vocabulary names the baseline does not export declared locally
+(`TEMPORAL_EVIDENCE_AUTHORITY`, `hasDurableTemporalAuthority`); every assertion is otherwise identical. Result there:
+**12 tests, 0 pass, 12 fail**, the principal case reporting
+`actual: 'reconstructed', expected: 'estimated'`. On the repaired tree: 12/12 pass. The worktree was removed
+afterwards, so no baseline checkout remains in the workspace.
+
+### 16.4 Harness and regression updates
+
+- `test/settlement-reconciliation.test.js` keeps its 15 Phase 9.4.4 cases. One diagnostics assertion changed, because it
+  tested a **mislabeled** counter: the incomplete-decode case is a proved correlation, so it now asserts
+  `settlementStreamsRejected 1 / settlementStreamsUncorrelated 0` and additionally pins the unchanged reconciliation
+  outcome (`samples` still the transient tail, authority still `live`). CASE H gains `rejected 0`.
+- `test/helpers/equivalence.js` state their plane: `durableSettledView` carries the authority
+  `reconstructFromDurable` derived; `liveSettledView` declares none. `compareTuples` compares
+  `quality.temporalShapeQuality` only between tuples of the same plane and asserts the one-way invariant on both sides
+  regardless — stricter than the equality it replaces, which required one plane to misdescribe its own provenance.
+- `test/dsh-equivalence.test.js` asserts the live side is `estimated`, the durable side is `durable-complete`, and the
+  token axis still agrees across planes.
+- `test/dsh-017-terminal-tail-recovery.test.js` carries the parser's authority through its path-B reference;
+  `test/curve-quality.test.js` selects the temporal axis by authority rather than by `settlementSeq`;
+  `test/curve-calibration.test.js` declares its fixture's plane; `test/runtime-robustness.test.js` pins the live reading
+  at `estimated` beside the durable reading at `reconstructed`.
+
+### 16.5 Totals
+
+**865 tests, 865 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo** (853 before this phase) — **12 new deterministic tests**
+in `test/temporal-evidence-authority.test.js`. No test was skipped, todo'd or deleted and no tolerance was widened.
+`npm run verify` (structure + full runner) is green; `node scripts/verify-sanitization.mjs` passes;
+`git diff --check` is clean; `client.js` is byte-identical to `lib/client.js`. No runtime acceptance was performed: no
+DSH profile was started, stopped, attached to, installed into, modified or deleted, and the retained isolated profile
+was not touched.

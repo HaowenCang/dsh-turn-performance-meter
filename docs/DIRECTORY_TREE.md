@@ -47,7 +47,8 @@ dsh-turn-performance-meter/
 │
 ├── src/
 │   ├── core/                         Pure metric engine — zero @deepseek-ai/* imports
-│   │   ├── types.js                  JSDoc normalized domain records
+│   │   ├── types.js                  JSDoc normalized domain records + `TEMPORAL_EVIDENCE_AUTHORITY`
+│   │   │                              (where an attempt's timeline came from) and its gate predicate
 │   │   ├── metric-quality.js         exact/calibrated/estimated/unavailable + rateQuality
 │   │   ├── quality-model.js          tokenTotal / phaseSplit / temporalShape axes + ceilings
 │   │   ├── delta-accounting.js       Delta classification, strict compact-stream decoder, first-token evidence
@@ -175,6 +176,10 @@ dsh-turn-performance-meter/
 │   │                                  reference, the overlap/double-cut/pre-reload-restoration cases, the two
 │   │                                  pure-path controls, the retry and ambiguous-correlation cases, the live-meter
 │   │                                  non-replay proof and the real `replace` rebaseline regression
+│   ├── temporal-evidence-authority.test.js Phase 9.4.5: where an attempt's timeline came from — a refused
+│   │                                  reconciliation never labels a transient tail `reconstructed`; the
+│   │                                  complete/incomplete/pure-live/ambiguous/retry matrix, the quality-axis
+│   │                                  independence proof and the per-construction-path disposition audit
 │   ├── dsh-client-feed.test.js        SessionEventWindow wire -> normalized events
 │   ├── curve.test.js / curve-axis-endpoint / curve-stream-order /
 │   │   curve-calibration-coverage     Curve primitives: reduced arithmetic, endpoint retention, same-timestamp
@@ -206,7 +211,10 @@ test/          — landed in Phase 5 as curve-view-model.test.js and completed-i
                  Phase 9.4 added rate-publication, curve-rate-publication, ttft-boundary and
                  phase94-regressions; Phase 9.4.2 added boundary-episode-origin; Phase 9.4.3 added
                  phase-cut-parity and extended curve/phase-duration/delta-accounting/time-axis in place;
-                 Phase 9.4.4 added settlement-reconciliation
+                 Phase 9.4.4 added settlement-reconciliation; Phase 9.4.5 added
+                 temporal-evidence-authority and extended curve-quality/curve-calibration/
+                 dsh-equivalence/dsh-017-terminal-tail-recovery/runtime-robustness/settlement-reconciliation
+                 and the shared helpers/equivalence harness in place
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
                  JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
                  Phase 6 verified the *served* client bundle in the live page instead of taking
