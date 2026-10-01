@@ -135,6 +135,12 @@ A timestamped `StreamChunk` contributes to model-output telemetry only if it car
 - `tool-call-delta.argumentsDelta` → output phase;
 - empty deltas, `block-start`, `block-end`, `usage`, `finish` → no direct token sample.
 
+One chunk shape is deliberately neither: a name-bearing `tool-call-delta` whose `argumentsDelta` is still empty. DSH's
+first-token predicate accepts it and no magnitude can be attributed to it, so it is accounted as a **phase cut** — the
+evidence that the stream moved to another phase at that instant — and never as a sample
+(`src/core/delta-accounting.js` `phaseCutOf`; the rule and its consequences are in the next subsection and in
+`docs/METRICS_SPEC.md` §8.7).
+
 Tool execution results never enter this stream-accounting path.
 
 This rule means model-generated `pwsh` commands, write-file payloads and edit patches are naturally counted because they are generated inside tool-call argument deltas.
@@ -183,16 +189,56 @@ Within one attempt the estimator accumulates **every** generated sample, whateve
 Phase reaches the chart as a **label** on each vertex — `activePhase`, the phase of the latest generated sample at or before that instant, which is `streamingPhase` restated — and as the segmentation of the trace into phase-coloured runs by `visualRunsOf`. It is not a filter on the measurement:
 
 ```
-raw samples (all phases)
-  -> compressAttempts           attempt-local + compressed clocks
+raw samples (all phases) + the attempt's phase cuts
+  -> compressAttempts           attempt-local + compressed clocks, cuts mapped with the samples
   -> curveSource                calibrated magnitudes from aggregate.attemptBreakdown
   -> attemptTraces              one phase-cumulative trace per attempt, capped at 200 published points
-  -> visualRunsOf               phase-coloured cuts that share their seams
+  -> visualRunsOf               phase-coloured cuts that share their seams, except across a phase cut
   -> allocateRunBudgets         chart-wide 512-vertex bound
   -> downsampleRun              per run, seams reserved
 ```
 
-The rejected revision stopped at `perAttemptSeries(..., phase)`: two independent series, one per phase, neither of which equalled the live reading whenever both phases were active inside one measurement span. The episode cut that went with it — one drawn run per phase episode, with blank regions between them — stays removed: a silence inside a call is a value on that call's own trace, drawn at full width, and an episode is a *statistical* unit rather than a drawing unit.
+The rejected revision stopped at `perAttemptSeries(..., phase)`: two independent series, one per phase, neither of which equalled the live reading whenever both phases were active inside one measurement span. The episode cut that went with it — one drawn run per phase episode, with blank regions between them — stays removed: a silence inside a call is a value on that call's own trace, drawn at full width, and an episode is a *statistical* unit rather than a drawing unit. The one hole the chart does draw is the **phase cut** below, and it is not a silence inside a call: it is a stretch in which no episode was in force at all.
+
+### A non-magnitude phase cut is its own evidence (Phase 9.4.3)
+
+Until Phase 9.4.3 the boundary existed only in the live meter. `attempt.samples` holds magnitude-bearing deltas only, so
+the completed curve — which segmented its episodes from that array — never saw the boundary and continued the outgoing
+episode until the incoming phase's first magnitude sample, drawing a decay across a stretch the live pill had already
+left, and charging that stretch to the outgoing phase's summary denominator. The repair is a fourth concept rather than
+a new statistic:
+
+| Concept | Who establishes it |
+|---|---|
+| TTFT boundary | the first chunk DSH's predicate accepts (`tokenEvidence().countsAsToken`) |
+| phase identity transition | the phase that chunk declares |
+| TPS magnitude sample | a generated delta with a shape weight (`sampleFromChunk`) |
+| TPS episode origin | the first magnitude sample of the episode |
+
+```
+attempt.phaseCuts: [{ timeMs, phase }]      recorded by TurnTelemetryStore.phaseCutObserved
+        │
+        ├── transient plane   acceptChunk sees the boundary chunk  ─┐
+        └── durable plane     attemptFromDecoded / decodeStreamRecords decode the same member
+                                                                     │
+        compressAttempts (attempt-local + compressed clocks, pre-origin cuts counted, not clamped)
+                                                                     │
+        buildPhaseEpisodes (src/core/phase-duration.js)  ← one rule, two readers
+                    ├──────────────► cumulativePhaseTpsSeries   the curve, one episode at a time
+                    └──────────────► attributePhaseDurations     the summary denominators
+```
+
+The cut **closes** the episode in force at its own instant — the closing vertex carries that episode's own mass over
+its own elapsed clock — and **opens nothing**: the incoming episode still begins at its first magnitude sample, and the
+stretch between the two belongs to no phase. A cut that closes nothing (a same-phase boundary, or one with no episode
+in force) is inert, which is what keeps a same-phase boundary from splitting a valid episode. Neither the transient
+plane nor the durable plane may be the only one that knows this: both record it through the same store call, so a
+reloaded card recovers the identical cut, and `test/helpers/equivalence.js` compares the two planes' cut evidence on
+every recorded fixture.
+
+The one implementation of the episode boundary is `buildPhaseEpisodes`, because three consumers read it — the live
+estimator's rule, the completed curve and the printed phase rates. A second copy would be free to disagree about where
+a phase stopped, which is the defect class this closes.
 
 ### Curve magnitude provenance (frozen in Phase 7C)
 
@@ -235,7 +281,7 @@ Used for:
 
 ### Phase generation duration
 
-Used as TPS denominator. Tool waiting is excluded. Reasoning/output duration is derived from model-generated delta boundaries under one documented policy — the MiMo-style **phase episode** policy of `docs/METRICS_SPEC.md` §7: a non-terminal episode ends at the next episode's first sample, the terminal episode ends at the attempt's settlement instant, and a duration that is not measurable is `null` rather than `0`.
+Used as TPS denominator. Tool waiting is excluded. Reasoning/output duration is derived from model-generated delta boundaries under one documented policy — the MiMo-style **phase episode** policy of `docs/METRICS_SPEC.md` §7: a non-terminal episode ends at the next episode's first sample or at a **phase cut** declaring a different phase (§8.7), the terminal episode ends at the attempt's settlement instant, and a duration that is not measurable is `null` rather than `0`.
 
 ### Compressed curve clock
 
@@ -252,6 +298,8 @@ A model =====B model ===C model ======
 Thus tool execution and second-call pre-first-token wait consume zero chart width, while a real stall *inside* an active model stream remains visible as a local rate decay.
 
 Formally, the chart is equivalent to an active model-attempt coordinate, but implementation is safer as explicit attempt concatenation than subtracting arbitrary wall intervals from one global clock.
+
+A **phase cut** is an instant on that coordinate, never a width: `compressAttempts` places it by the same subtraction the samples use (so a cut and a sample at one wall-clock instant share a coordinate), and a cut that precedes its attempt's first generated delta owns no coordinate at all — an attempt's local zero is its first delta — so it is counted in `segments[].preOriginCutCount` instead of being clamped onto zero. Clamping would invent a pre-sample instant and give the attempt a width its evidence does not contain.
 
 The domain boundary is easy to get wrong in one direction only, and the wrong direction is the expensive one: the clock is continuous across an attempt boundary, so it is tempting to treat the episode clock as continuous too. It is not. See "The same rule applies to the completed curve" above for the two clocks and the terminal-tail rule.
 

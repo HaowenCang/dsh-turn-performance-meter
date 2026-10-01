@@ -935,3 +935,95 @@ CASE B (replacing an assertion that reduced to a fixture constant), the pill cal
 byte-identical, and `package.json` remains version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No test was
 skipped, todo'd or deleted, and no tolerance was widened, to reach that state. No real-machine run was performed in this
 phase, by design.
+
+## 14. Phase 9.4.3 �� non-magnitude phase boundary / completed-curve cut parity
+
+One defect, one missing record. The live meter closed the outgoing phase episode at a non-magnitude boundary
+(Phase 9.4.2) and the completed curve had no evidence of that boundary at all, so it continued the outgoing episode
+until the incoming phase's first magnitude sample. This section states what is deterministic, what was measured on
+which baseline, and which claims are cross-path rather than single-path.
+
+### 14.1 The principal fixture and the pre-fix measurement
+
+```text
+turn start  t = 0
+
+reasoning sample  t = 0     mass 100
+reasoning sample  t = 50    mass 100
+reasoning sample  t = 100   mass 100
+
+name-bearing empty-args tool-call boundary   t = 120   tokenEvidence.phase = output, contributesMagnitude = false
+
+output sample     t = 300   mass 100
+output sample     t = 350   mass 100
+output sample     t = 400   mass 100
+```
+
+Driven through `TurnTelemetryStore -> liveSnapshot -> settleAttempt -> endTurn -> completed curve` on baseline
+`68ba746` and on the fixed tree:
+
+| quantity | `68ba746` live | `68ba746` curve | fixed live | fixed curve |
+| --- | --- | --- | --- | --- |
+| state at `t = 120` / `t = 200` | `output`, `tps null`, no episode clock | reasoning episode still in force | `output`, `tps null`, no episode clock | no vertex at `200` at all |
+| vertex at `t = 200` | �� | `activePhase reasoning`, origin `0`, elapsed `200`, count `3`, mass `300`, `tps 1500` | �� | does not exist |
+| reasoning episode end | �� | `300` (the output episode's first sample) | �� | `120` (the cut) |
+| reasoning vertices | �� | `0 / 100 / 200 / 300` | �� | `0 / 100 / 120` (`tps 3000 / 2500` at the last two) |
+| output episode origin | `300` | `300` | `300` | `300` |
+| runs | �� | reasoning `[0..2]`, output `[2..4]` (shared seam) | �� | reasoning `[0..2]`, output `[3..4]` (a hole) |
+| summary | �� | `reasoningMs 300`, `reasoningTps 1000` | �� | `reasoningMs 120`, `reasoningTps 2500` |
+| peak | �� | `3000` | �� | `3000` |
+
+The pre-fix trace is a measurement, not an inference: `dev/scratch/phase943-probe.mjs` prints it and the output is
+recorded in the phase's implementation-log entry. `test/phase-cut-parity.test.js` was written and executed **before**
+any source change; 7 of its 8 cases fail on `68ba746`, and the eighth (CASE F, the provider baseline) is a labelled
+control that passes on both trees because Phase 9.4.2 already anchored it there.
+
+### 14.2 The matrix
+
+| case | fixture | proves | `68ba746` | fixed |
+| --- | --- | --- | --- | --- |
+| A | reasoning `0/50/100`, boundary `120`, output `300/350/400` | the cut closes reasoning at `120` and opens no output clock: no reasoning vertex after `120`, nothing sampled in `120 -> 300`, output origin `300`, disjoint runs, `reasoningMs 120` | FAIL | PASS |
+| B | boundary `100`, output `200/250/300` | a cut before the first magnitude sample owns no coordinate: `durationMs 100`, `trace.cuts []`, `segments[].preOriginCutCount 1`, TTFT `100`, output origin `200` | FAIL | PASS |
+| C | output `200/250/300`, same-phase boundary `350`, output `400/450` | the boundary is recorded evidence and cuts nothing: one run, one episode, origin `200`, count `5`, mass `700`, `tps 2800` | FAIL | PASS |
+| D | reasoning `0/50/100` -> output `150/200/250` | the ordinary magnitude transition is unchanged: the runs still share their seam, the outgoing episode still ends at the transition sample | FAIL (only the new `cuts` field) | PASS |
+| E | attempt `a1` with a boundary + tool + retry `a2` | no cut leaks across an attempt boundary: `a1.cuts` present, `a2.cuts []`, the retry opens its own episode | FAIL | PASS |
+| F | usage chunks around a boundary | the incoming episode takes its provider baseline at its **first magnitude sample**, not at the cut (`{phase: output, counter: 600}`, mass `30`, `tps 300`) | PASS (control) | PASS |
+| G | the principal fixture, encoded as a compact `AssistantStreamRecord[]` | the durable reconstruction recovers the identical cut, gap, vertices, runs and summary through `materializeReconstructedTurn` | FAIL | PASS |
+| H | the principal fixture | the publication gates are untouched (`MIN_RATE_SAMPLES 3`, `MIN_RATE_ELAPSED_MS 100`), every published vertex names its episode, no `0` is fabricated, no zero-token sample exists, the trace integral is the six real samples, and the peak-bearing vertex is inside a drawn run | FAIL | PASS |
+| I | reasoning `0/50/100`, boundary `120`, reasoning `150/200/250` | the phase-reversion class is **resolved** by the same evidence: the curve splits where the live meter splits and the two halves agree on origin, count, mass and rate | characterized (old divergence asserted) | PASS (new equalities asserted) |
+
+CASE I is the one behavioural change beyond the principal defect, and it is deliberate: the earlier record asserted
+`live.tps !== curve.tps` for that fixture (`3000` against the merged episode's `2400`) because the curve could not see
+the boundary. It can now, so both semantics are written into the same test �� the old measurement as the "before" half of
+its own record, the new equalities as the contract �� and the boundary's declared phase remains a documented fallback.
+The class was not deleted, renamed away or weakened.
+
+### 14.3 Cross-path (durable/reload) coverage
+
+`test/helpers/equivalence.js` now passes `compressed.cuts` into `attemptTraces` and compares `attempts.phaseCuts`
+between the two planes in `compareTuples`. The harness therefore models the shipped curve instead of the pre-fix
+geometry, and every recorded fixture is compared for cut evidence as well as for token totals, phase segmentation,
+chart coordinates and peak. Measured across `fixtures/dsh-turns/*` on the fixed tree:
+
+| fixture | live cuts | durable cuts | reasoning denominator (without -> with) |
+| --- | --- | --- | --- |
+| `t1-reasoning-tool-reasoning` | 2 | 2 | `null -> null` (the cuts sit in output-only attempts) |
+| `t2-pwsh-write-edit` | 3 | 3 | step 1: `1251 -> 1250` ms |
+| `t3-interrupted-mid-reasoning` | 0 | 0 | `4041 -> 4041` ms |
+| `t4-reasoning-tool-deepseek-official` | 1 | 1 | step 1: `1463 -> 1425` ms (`��50.6` -> `��51.9`) |
+| `t5-reasoning-text-deepseek-official` | 0 | 0 | `26296 -> 26296` ms |
+| `t6-tool-only-deepseek-official` | 3 | 3 | step 1: `533 -> 504` ms |
+| `t7-failing-pwsh-deepseek-official` | 1 | 1 | step 1: `473 -> 449` ms |
+| `t8-reasoning-no-retry-deepseek-official` | 0 | 0 | `697 -> 697` ms |
+
+The two planes agree on every row, and `reasoningTps` is identical between them for every fixture. Three fixtures
+contain no boundary at all and are bit-for-bit unchanged, which is the non-regression half of the same table.
+
+### 14.4 Totals
+
+**838 tests, 838 pass, 0 fail, 0 skipped, 0 todo** (821 before this phase). Baseline evidence: 7 of the 8 new cases
+fail on `68ba746` when the new suite alone is executed against it. `npm run verify` runs
+`scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
+(`node scripts/verify-sanitization.mjs`) and passes. `git diff --check` is clean. No test was skipped, todo'd or
+deleted, and no tolerance was widened, to reach that state. No runtime acceptance was performed: Phase 9.4.3 is
+deterministic/source-only, and no DSH profile was started, stopped, attached to, installed into, modified or deleted.

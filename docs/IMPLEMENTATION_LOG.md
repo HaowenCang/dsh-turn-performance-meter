@@ -5305,3 +5305,186 @@ baseline 6506bd0 (worktree)      15 tests · 6 pass · 9 fail  (the 6 are labell
 The review landed after the first change set was pushed, so this round is an ordinary follow-up commit on top of it —
 no `--amend`, no rebase, no force. Nothing was published, versioned, tagged or released, and no real-machine run
 happened.
+
+## Phase 9.4.3 — Non-magnitude phase boundary / completed-curve cut parity (2026-10-01)
+
+Starting state `68ba74663f5e5b1e154e22ff4b27be022260e32c`, `HEAD == origin/main`, divergence `0 0`, clean tree. Phase
+9.4.3 is deterministic/source-only: no DSH profile was started, stopped, attached to, installed into, modified or
+deleted, the retained isolated profile was not touched, and no real-machine acceptance was run.
+
+### 1. The defect, measured before any write
+
+The live half was already correct after Phase 9.4.2: `LiveMeter.observeTokenBoundary` clears the outgoing episode at a
+non-magnitude boundary and opens none. The **completed** half had no record of that boundary at all. The principal
+fixture — turn start `0`; reasoning samples at `0/50/100` (100 shape tokens each); a name-bearing empty-arguments
+`tool-call-delta` at `120` whose `tokenEvidence().phase` is `output`; output samples at `300/350/400`; settlement at
+`400` — driven through `TurnTelemetryStore -> liveSnapshot -> settleAttempt -> endTurn -> completed curve` on the
+baseline (`dev/scratch/phase943-probe.mjs`, output preserved in `dev/scratch/phase943-prefix-probe.txt`):
+
+```text
+attempt.samples          reasoning@0 reasoning@50 reasoning@100 output@300 output@350 output@400
+attempt.phaseCuts        (absent — the field did not exist)
+live at 120              activePhase output, tps null, episodeElapsedMs null, episodeSampleCount 0, fallback false
+live at 200              activePhase output, tps null, episodeElapsedMs null, episodeSampleCount 0
+
+completed vertices       localMs: activePhase, tps, episodeStartMs, episodeElapsedMs, sampleCount, mass
+    0   reasoning  null   start 0    elapsed 0    1 sample   100
+  100   reasoning  3000   start 0    elapsed 100  3 samples  300
+  200   reasoning  1500   start 0    elapsed 200  3 samples  300     <-- the defect
+  300   output     null   start 300  elapsed 0    1 sample   100
+  400   output     3000   start 300  elapsed 100  3 samples  300
+
+runs                     reasoning [0..2], output [2..4]   (a shared seam across the gap)
+peakTps                  3000
+phase durations          reasoningMs 300, outputMs 100, reasoningEpisodes [1 measured / 1]
+summary                  reasoningTps 1000, outputTps 3000
+```
+
+So the completed curve published a reasoning TPS point at `200` (`1500`), ran the reasoning episode to the output
+episode's first sample (`300`) instead of to the boundary (`120`), and charged the `120 -> 300` gap to the reasoning
+summary denominator (`300 ms` instead of `120 ms`, `1000` instead of `2500`). This is **not** CASE I: the boundary's
+declared phase is confirmed by the magnitude samples that follow it, so no provisional-phase semantics are involved.
+
+### 2. Root cause
+
+Two facts were true at once, and only their combination was wrong: `attempt.samples` holds **magnitude-bearing deltas
+only** (correct — a boundary has no magnitude), and the completed curve segmented its episodes from that array alone
+(correct only while every episode boundary is a magnitude sample). A non-magnitude boundary is therefore an episode
+boundary the curve could not see, so the outgoing episode was continued to the next sample of a different phase. The
+summary read the same array through `phaseEpisodes`, whose non-terminal end is "the next episode's first sample", and
+inherited the same gap.
+
+### 3. The chosen representation, and why
+
+A separate attempt-level record rather than a sample:
+
+```text
+attempt.phaseCuts: [{ timeMs, phase }, …]        in stream order, beside `samples`
+```
+
+- the classification lives once, in `phaseCutOf`/`phaseCutsFromChunks` (`src/core/delta-accounting.js`), on top of the
+  existing `tokenEvidence` verdict — the rule is "token evidence the sample builder could not turn into a magnitude";
+- `TurnTelemetryStore.phaseCutObserved` records it (and `beginAttempt` states the field), so both reconstruction planes
+  reach it through the same call;
+- it is **not** a sample: no `tokens`, no `weight`, no `sampleOrder`, no entry in `attempt.samples`, and therefore no
+  numerator, no sample count and no `0`-mass vertex;
+- it is **not** consumed as a phase-identity authority either: the episode walk decides what it closes, and a
+  same-phase cut is inert, exactly as it is inert in the live meter.
+
+**Clock mapping.** `compressAttempts` publishes `cuts` on the same two clocks the samples carry (`attemptTimeMs`,
+`activeTimeMs`), computed by the same subtraction from the attempt's first delta. A cut that precedes that delta owns no
+coordinate — an attempt's local zero is its first generated sample — so it is counted in `segments[].preOriginCutCount`
+and dropped from the axis rather than clamped onto zero. That is what keeps Phase 9.4.2's rule intact: TTFT is the
+boundary, the TPS episode origin is the first magnitude sample, and no negative local time, fake pre-sample width or
+fabricated vertex appears (`test/phase-cut-parity.test.js` CASE B asserts all four).
+
+**One episode rule, three readers.** `buildPhaseEpisodes` (`src/core/phase-duration.js`) is the only implementation of
+the episode boundary: maximal runs of consecutive same-phase samples, each closed by the next episode's opening sample,
+by a phase cut declaring a different phase, or by the attempt's own end. `cumulativePhaseTpsSeries` samples the curve's
+per-episode ladders from it, and `attributePhaseDurations` sums its durations for the printed phase rates. A second
+copy would be free to disagree about where a phase stopped — the defect class this closes.
+
+**Geometry.** Each vertex now carries `episodeEndMs` beside `episodeStartMs`, and `visualRunsOf` keys its stretches by
+**episode** rather than by label, sharing the seam only when the outgoing episode ends exactly where the incoming one
+begins. Across a cut the two are not adjacent, so the runs are disjoint (`runs[i].endIndex + 1 === runs[i+1].startIndex`)
+and no drawn segment crosses the gap; the rule reads the episodes rather than a marker on the cut vertex, so a capped
+series that drops the cut instant still leaves the hole. Keying by episode is also what lets two stretches of **one**
+phase stay separate, which is what the phase-reversion class needs.
+
+### 4. Files changed
+
+| File | Change |
+|---|---|
+| `src/core/delta-accounting.js` | `phaseCutOf`, `phaseCutsFromChunks` — the one non-magnitude boundary rule |
+| `src/core/phase-duration.js` | `buildPhaseEpisodes` (the shared episode walk, cut-aware), `phaseEpisodes(_, _, cuts)`, `attributePhaseDurations({ phaseCuts })` |
+| `src/core/time-axis.js` | `compressAttempts` publishes `cuts` and `segments[].{phaseCutCount, preOriginCutCount}` |
+| `src/core/curve.js` | `cumulativePhaseTpsSeries({ cuts })` and `episodeEndMs`; `visualRunsOf` episode-keyed with an adjacency seam rule; `attemptTrace`/`attemptTraces` accept and publish `cuts` |
+| `src/core/aggregate-turn.js` | `reduceAttempt` passes `attempt.phaseCuts` to the summary |
+| `src/host/telemetry-design.js` | `beginAttempt` states `phaseCuts`; `acceptChunk` records the cut; `settle()` passes `compressed.cuts` into `attemptTraces` and publishes each trace's `cuts` |
+| `src/dsh/adapter.js` | `attemptFromDecoded` publishes `phaseCuts` (the controller's reload-restore branch reads this attempt directly) |
+| `src/dsh/durable-path.js` | `reconstructFromDurable` publishes `phaseCuts` from the same decode |
+| `src/core/index.js` | exports the two new core functions |
+
+No renderer, stylesheet, locale or view-model file changed. No curve arithmetic other than the episode boundary changed:
+`MIN_RATE_SAMPLES`, `MIN_RATE_ELAPSED_MS`, `peakTps`, `capSeriesPoints`, `allocateRunBudgets`, `downsampleRun` and the
+calibration path are untouched.
+
+### 5. The matrix, and what changed beyond the principal defect
+
+`test/phase-cut-parity.test.js` (CASE A–H) was written **before** any source change and executed on `68ba746`: **7 of
+its 8 cases fail** there. The eighth, CASE F (the provider baseline at the incoming episode's first magnitude sample),
+passes on both trees and is labelled a control, because Phase 9.4.2 already anchored it. Post-fix the completed trace is
+`0 / 100 / 120` reasoning (`null / 3000 / 2500`) and `300 / 400` output (`null / 3000`), the runs are
+`reasoning [0..2]` and `output [3..4]`, nothing is sampled in `120 -> 300`, the peak is unchanged at `3000`, and the
+summary reads `reasoningMs 120 / reasoningTps 2500`.
+
+**CASE I is the one deliberate behaviour change beyond the principal fixture.** `test/boundary-episode-origin.test.js`
+recorded a divergence belonging to the boundary's phase fallback: after `reasoning -> boundary(output) -> reasoning`, the
+live meter reopened an episode at `150` (origin `150`, 3 samples, 300 tokens, `tps 3000` at `250`) while the curve merged
+the two reasoning runs into one episode (origin `0`, 6 samples, 600 tokens, `tps 2400`). Its assertions were
+`live.tps !== curve.tps` and `curve.samples[0].timeMs + curve.episodeStartMs !== liveOriginMs`. The architecture
+resolves the class rather than re-recording it — the curve now closes the outgoing episode at the cut and reopens at the
+next reasoning sample — so the test states both semantics: the old measurement as the "before" half of its own record,
+and the new equalities (`origin 150`, `3000`, 3 samples, and two reasoning runs with a hole between them). The declared
+phase is still `tokenEvidence`'s documented fallback, and that part is unchanged.
+
+### 6. Summary-rate audit (§10 of the brief)
+
+The `120 -> 300` gap **was** charged to reasoning. Measured across every recorded fixture, on both reconstruction
+planes (`dev/scratch/phase943-summary-audit.mjs`, output in `dev/scratch/phase943-summary-audit.txt`):
+
+| fixture | live cuts / durable cuts | reasoning denominator (without -> with) |
+|---|---|---|
+| `t1-reasoning-tool-reasoning` | 2 / 2 | `null -> null` (both cuts sit in output-only attempts) |
+| `t2-pwsh-write-edit` | 3 / 3 | step 1: `1251 -> 1250` ms |
+| `t3-interrupted-mid-reasoning` | 0 / 0 | `4041 -> 4041` ms |
+| `t4-reasoning-tool-deepseek-official` | 1 / 1 | step 1: `1463 -> 1425` ms (`≈50.6 -> ≈51.9`) |
+| `t5-reasoning-text-deepseek-official` | 0 / 0 | `26296 -> 26296` ms |
+| `t6-tool-only-deepseek-official` | 3 / 3 | step 1: `533 -> 504` ms |
+| `t7-failing-pwsh-deepseek-official` | 1 / 1 | step 1: `473 -> 449` ms |
+| `t8-reasoning-no-retry-deepseek-official` | 0 / 0 | `697 -> 697` ms |
+
+The two planes agree on every cut, denominator and `reasoningTps`; three fixtures contain no boundary and are unchanged.
+`test/completed-tree.test.js`'s rendered-card expectation for `t4` moves from `≈50.6` to `≈51.9` (the fixture bytes are
+untouched; only the interval the rate is divided by is), and its comment states the 38 ms boundary-to-first-argument
+stretch. Historical entries earlier in this log keep their recorded `≈50.6` — they are a record of what the tree printed
+then, not a claim about this tree.
+
+### 7. Cross-path coverage strengthened
+
+`test/helpers/equivalence.js`'s `chartView` now passes `compressed.cuts` into `attemptTraces` — the harness rebuilds the
+shipped geometry instead of the pre-fix one — and `metricTuple`/`compareTuples` compare `attempts.phaseCuts` between the
+two planes. A plane that lost or invented a cut now fails the harness for that fixture, alongside the existing exact
+comparisons of token totals, phase segmentation, chart coordinates and peak.
+
+### 8. Deliberately not changed
+
+- **No fake repair.** No zero-token sample, no fabricated mass, no sample-count increment at the boundary, no TPS
+  clamp, no winsorization, no EMA, no moving average, no hard ceiling, no renderer-only suppression of a source point
+  and no timestamp special case. The cut instant's own vertex is a real measurement of the episode it closes and is
+  published only if that episode passes the shared gates.
+- **No version, tag or publication change.** `package.json` stays `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`;
+  no `npm publish`, no `npm version`, no tag, no GitHub Release.
+- **The absent-duration rendering from `68ba746` is preserved**: an absent duration renders `—` and a measured zero
+  renders `0.00 s` (`test/boundary-episode-origin.test.js`, `test/live-format.test.js`).
+- **A capped series may still drop the cut vertex itself**, and that is reported rather than hidden: the hole is decided
+  by the episodes each vertex names, so the surviving outgoing vertex still closes the run. No attempt is made to
+  reserve cap slots for structural vertices, which would change the documented MiMo resampling policy.
+
+### 9. Gates
+
+```text
+npm run build:client             client.js rebuilt (585483 bytes, mirrored to lib/client.js)
+npm run verify                   structure OK (14 required files, 16 core modules, 71 test files, client bundle fresh,
+                                 lib/client.js mirrored); tests 838 · pass 838 · fail 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
+git diff --check                 clean
+client.js == lib/client.js       byte-identical (sha256 2A468D58FEF88E618BE5A603D20D98E7512ED3117F21B80C62CD0AC072C2D375)
+```
+
+Test totals rose from 821 to 838 — **17 new deterministic tests**: eight cases in `test/phase-cut-parity.test.js`, four
+in `test/phase-duration.test.js`, two in `test/curve.test.js`, two in `test/delta-accounting.test.js` and one in
+`test/time-axis.test.js`, plus the rewritten CASE I (a replacement, not an addition) and the extended cross-path
+comparison in `test/helpers/equivalence.js`. No test was skipped, todo'd or deleted, and no tolerance was widened.
+Ordinary commits only: no `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`. Nothing was
+published, versioned, tagged or released, and no real-machine run happened.

@@ -1478,3 +1478,104 @@ no version, tag or publication change.
 
 **Status: source-level closure complete; a separate narrowly scoped isolated-runtime smoke may be authorized after
 independent GitHub review. No release-readiness claim is made in this phase.**
+
+## Phase 9.4.3 �� Non-magnitude phase boundary / completed-curve cut parity (2026-10-01)
+
+**Starting state:** `HEAD == origin/main == 68ba74663f5e5b1e154e22ff4b27be022260e32c`, divergence `0 0`, clean tree.
+
+**The residual defect.** Phase 9.4.2 closed the *live* half: `LiveMeter.observeTokenBoundary` clears the outgoing
+episode at a non-magnitude boundary and opens none. The completed half had no record of that boundary at all �� the
+curve segmented episodes from `attempt.samples`, which hold magnitude-bearing deltas only �� so it continued the
+outgoing episode until the incoming phase's first magnitude sample. Measured on `68ba746` with the principal fixture
+(turn start `0`; reasoning `0/50/100`; a name-bearing empty-arguments `tool-call-delta` at `120` declaring `output`;
+output `300/350/400`):
+
+```text
+live at 120 and at 200   activePhase output, tps null, episodeElapsedMs null, episodeSampleCount 0
+curve at 200             activePhase reasoning, episodeStartMs 0, elapsed 200, count 3, mass 300, tps 1500
+curve reasoning episode  ran to 300 (the output episode's first sample)
+summary                  reasoningMs 300, reasoningTps 1000 (the 120 -> 300 gap charged to reasoning)
+```
+
+The defect is **not** CASE I: the boundary's declared phase is confirmed by the magnitude samples that follow it, so
+there is no ambiguity about the transition, and no provisional-phase semantics are needed to repair it.
+
+**The chosen representation �� a separate attempt-level phase cut.** `attempt.phaseCuts: [{timeMs, phase}]`, recorded by
+`TurnTelemetryStore.phaseCutObserved` from the same `tokenEvidence` verdict the live meter uses. It contributes no
+magnitude, no sample count and no `sampleOrder`; it is never stored in `attempt.samples` and never converted into a
+sample. It closes the episode in force at its own instant and **opens nothing**: the incoming episode still begins at
+its first magnitude sample, and the stretch between them belongs to no phase.
+
+- **Transient recording:** `acceptChunk` (the one path the host and the controller both use).
+- **Durable recovery:** `phaseCutsFromChunks` on the decoded compact stream, published by `attemptFromDecoded` and by
+  `reconstructFromDurable`, so the controller's reload-restore branch and `materializeReconstructedTurn` both carry it.
+- **Compressed-clock mapping:** `compressAttempts` subtracts the same attempt-local zero it uses for the samples and
+  publishes `attemptTimeMs`/`activeTimeMs` per cut; a cut before the attempt's first delta owns no coordinate and is
+  counted in `segments[].preOriginCutCount` rather than clamped onto zero.
+- **One episode rule, three readers:** `buildPhaseEpisodes` (`src/core/phase-duration.js`) is the single implementation,
+  read by `cumulativePhaseTpsSeries` (the curve) and by `attributePhaseDurations` (the summary).
+- **Geometry:** `visualRunsOf` keys its stretches by episode and shares the seam only when the outgoing episode ends
+  exactly where the incoming one begins, so a cut is a hole rather than a seam and no segment or fabricated point
+  crosses it.
+
+**Required outcome �� measured after the change.**
+
+```text
+live at 200              phase output, tps null, no episode clock
+curve                    reasoning 0 / 100 / 120 (tps 3000 / 2500), hole 120 -> 300, output 300 / 400 (origin 300)
+curve at 200             no vertex at all
+runs                     reasoning [0..2], output [3..4] �� disjoint, no shared seam
+peak                     3000 (unchanged), no fabricated peak, mass, sample or zero
+summary                  reasoningMs 120 / reasoningTps 2500, outputMs 100 / outputTps 3000
+```
+
+### Checklist
+
+- [x] **Baseline reproduction first.** `dev/scratch/phase943-probe.mjs` drives the principal fixture through
+      `TurnTelemetryStore -> liveSnapshot -> settleAttempt -> endTurn -> completed curve` on `68ba746` and prints the
+      live state, every vertex and the summary; the pre-fix trace above is that output, not an inference.
+- [x] **The defect-specific test fails on `68ba746`.** `test/phase-cut-parity.test.js` was written and executed before
+      any source change: **7 of 8 cases FAIL** on the baseline (CASE F, the provider-baseline control, passes on both
+      trees because Phase 9.4.2 already anchored it).
+- [x] **Regression matrix A�CI**, all deterministic and all driving the real path:
+      A principal phase cut; B boundary before the first magnitude sample (no fake pre-sample width, no negative local
+      time, no cut vertex); C same-phase boundary (recorded, inert); D ordinary magnitude transition (shared seam
+      unchanged); E retry/tool boundary (no cut leaks across attempts); F provider baseline at the incoming episode's
+      first magnitude sample; G durable reconstruction parity (identical cut, gap, vertices, runs and summary through
+      `materializeReconstructedTurn`); H publication gates (`MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`) and no
+      fabricated peak/mass/sample/zero; I the phase-reversion case, now **resolved** by the same evidence with both the
+      old and the new semantics asserted in `test/boundary-episode-origin.test.js`.
+- [x] **Summary-rate audit.** The `120 -> 300` gap *was* charged to reasoning. Measured across the recorded fixtures,
+      every fixture's live and durable planes agree on cuts and denominators, and four fixtures' reasoning
+      denominators move: `t2` 1251 -> 1250 ms, `t4` 1463 -> 1425 ms, `t6` 533 -> 504 ms, `t7` 473 -> 449 ms. `t3`,
+      `t5` and `t8` (no boundary at all) are unchanged. No summary arithmetic was changed beyond passing the cut
+      evidence to the one episode rule.
+- [x] **Both reconstruction planes compared on every fixture.** `test/helpers/equivalence.js` now passes
+      `compressed.cuts` to `attemptTraces` and compares `attempts.phaseCuts` in `compareTuples`, so the harness
+      models the shipped curve and a plane that lost or invented a cut fails.
+- [x] **`68ba746` preserved:** the TTFT repair, the rate-publication gates, the unavailable-peak `null` semantics, the
+      separation of the TTFT boundary from the magnitude origin, the provider-baseline rule, same-phase boundary
+      preservation, the first-output guard's anchor, the absent-duration rendering (`null` -> `��`, measured `0` ->
+      `0.00 s`) and the corrected provider-counter wording. No renderer-only suppression, no zero-token sample, no
+      sample-count increment at the boundary, no clamp, no winsorization, no EMA, no moving average, no hard ceiling,
+      no timestamp special case.
+- [x] `npm run build:client`, `npm run verify` (**838 pass, 0 fail, 0 skipped, 0 todo**, up from 821),
+      `node scripts/verify-sanitization.mjs`, `git diff --check`; `client.js` byte-identical to `lib/client.js`.
+- [x] `docs/METRICS_SPEC.md` (new ��8.7 with the normative statement, ��7 phase-duration policy, ��8.2.2 seam-vs-hole),
+      `docs/ARCHITECTURE.md` (��5 accounting, ��6 phase-cut evidence flow, ��7 compressed clock), `docs/IMPLEMENTATION_LOG.md`,
+      `docs/TEST_PLAN.md` ��14, `docs/TASKS.md` and `docs/DIRECTORY_TREE.md` updated; historical evidence not rewritten
+      and CASE I's earlier recorded divergence kept as the "before" half of its own record.
+- [x] **Version frozen at `0.1.2`** with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No `npm publish`, no `npm version`, no
+      tag, no GitHub Release.
+- [x] **Deterministic/source-only.** No DSH profile was started, stopped, attached to, installed into, modified or
+      deleted; the retained isolated profile was not touched. No real-machine acceptance was run.
+- [x] **Ordinary commits only.** No `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`.
+
+Acceptance gate: `HEAD == origin/main`, divergence `0 0` and a clean tree after the push; the new suite red on
+`68ba746` and green on the fixed tree; the completed curve publishing no reasoning vertex after the cut, no output
+vertex before the incoming episode's origin and no fabricated output point at the cut; the durable reconstruction
+recovering the identical cut and gap; the summary denominators charging the gap to neither phase; the publication gates
+unchanged; 0 failing tests; sanitization PASS; `git diff --check` clean; and no version, tag or publication change.
+
+**Status: source-level closure complete; a separate narrowly scoped isolated-runtime smoke may be authorized after
+independent GitHub review. No release-readiness claim is made in this phase.**

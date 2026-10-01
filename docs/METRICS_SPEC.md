@@ -359,6 +359,7 @@ generated deltas into contiguous **phase episodes** and measure each as `episode
 ```
 episodeStart = the episode's first generated sample
 episodeEnd   = the first generated sample of the next episode
+             | a non-magnitude phase cut declaring a different phase (§8.7)
              | the attempt's settlement instant, for the terminal episode
 ```
 
@@ -377,6 +378,14 @@ Three consequences are normative:
   is `null`, and a phase whose episodes are only partly measurable reports the measurable sum together with
   `reasoningMeasuredEpisodes`/`reasoningEpisodeCount` so the quality axis can state that the denominator is short.
   `null` plus non-zero tokens renders `—`, never a fabricated rate.
+
+**A phase cut ends an episode early (Phase 9.4.3).** A non-magnitude boundary — a name-bearing `tool-call-delta` whose
+`argumentsDelta` has not arrived — declares a phase and carries no magnitude, and the live meter closes the outgoing
+episode at that instant. The summary closes it at the same instant, so the silent stretch between the boundary and the
+incoming phase's first magnitude sample is charged to **neither** phase. Before Phase 9.4.3 that stretch was charged to
+the outgoing phase, and on the recorded `t4` fixture the reasoning denominator read 1 463 ms where the episode is
+1 425 ms — a printed rate of `≈50.6` where the evidence supports `≈51.9`. §8.7 states the rule; the single
+implementation is `buildPhaseEpisodes` (`src/core/phase-duration.js`), read by the curve and by this summary alike.
 
 TTFT is excluded because an episode begins at its first generated sample. Tool time and inter-attempt time are
 excluded because this policy only ever sees one attempt's own samples and that attempt's own settlement instant.
@@ -558,20 +567,30 @@ and the next vertex carries the new phase, so:
 - no run claims coordinates its own phase did not produce, because a silence inside one phase is a stretch of decaying
   vertices that all carry that phase and are drawn in its tone at full width.
 
-The invariants, asserted in `test/curve.test.js`, `test/curve-trace-matrix.test.js` and
-`test/curve-axis-endpoint.test.js`:
+The invariants, asserted in `test/curve.test.js`, `test/curve-trace-matrix.test.js`,
+`test/curve-axis-endpoint.test.js` and `test/phase-cut-parity.test.js`:
 
 ```
-runs[i].endIndex === runs[i + 1].startIndex
-sum(runs[i].pointCount) === points.length + (runs.length - 1)
+runs[i].endIndex === runs[i + 1].startIndex          for an adjacent pair (§8.2.2, a seam)
+runs[i].endIndex + 1 === runs[i + 1].startIndex      across a phase cut (§8.7, a hole)
+sum(runs[i].pointCount) === points.length + (seams)
 ```
+
+**A phase cut is not a seam (Phase 9.4.3).** The two rules above are one rule read off the episodes: a run opens on the
+previous run's closing vertex **only when the outgoing episode ends exactly where the incoming one begins**. At an
+ordinary phase transition the two episodes meet on one instant and the subpaths share that vertex; across a phase cut
+the outgoing episode ends at the cut while the incoming one opens at its own first magnitude sample, so sharing the
+vertex would draw the incoming tone through the outgoing episode's last measurement — a fabricated output rate at an
+instant where the output phase had produced nothing. The rule reads each vertex's `episodeEndMs`/`episodeStartMs`
+rather than a marker on the cut vertex alone, so a capped series that drops the cut instant still leaves the hole
+rather than closing it.
 
 An earlier revision described this cut as "the midpoint of the label change, rounded down", and computed it as
 `Math.floor((stretch.last + next.first) / 2)`. For a trace whose every vertex is labelled, `next.first` **is**
 `stretch.last + 1`, so that expression always evaluated to `stretch.last` — the same index. The formula was correct
 and its description was not: no real trace could produce the non-adjacent phase stretches the "midpoint of a long
 silence" wording presupposed. Phase 7C.1 removed the formula and states the rule directly. The seam itself is
-unchanged.
+unchanged for adjacent episodes.
 
 The shared vertex is one measurement, not two, and it is charged to both subpaths by the render budget of §8.5,
 because both do emit it. It is also the vertex at which the statistic resets: the outgoing run's last value belongs to
@@ -700,6 +719,74 @@ The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_
 **The printed peak and the placed peak dot are one measurement.** `curveViewModel.peak.value` is the published-series maximum, but `peak.x`/`peak.y` are taken only from a vertex that survived onto the chart *and* carries that same rate; when the peak-bearing run is not drawable they are `null`. The rejected behaviour took the position from whichever series led the *drawn* points, which after a starved peak printed `≈9,999` and placed the dot on a 400 tokens/s vertex — two different measurements one pixel apart. A missing dot is visibly missing; a dot on a weaker vertex is a false claim about where the chart's maximum was.
 
 **`peak.value` is `null` when no peak was published, and `0` means a measured zero.** Phase 9.4.1 closed the last place the two readings were conflated: the view model used to project a non-finite `curve.peakTps` onto `0`, so a caller reading `peak.value` could not tell "the publication policy withheld every vertex" from "the published series has a maximum of zero" — an assertion of evidence that did not exist. `peak.value` now carries `Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : null`, while the axis geometry takes the `null` at exactly one seam (`const axisPeak = peakValue ?? 0`) so no `null` ever reaches a quotient, a ratio or a comparison. `peak.display`, `peak.x`, `peak.y`, the axis ceiling and every rendered element are byte-for-byte unchanged: an absent peak and a zero peak both still print the em dash, and the split lives in the field rather than in the card. `test/phase94-regressions.test.js` §16b proves it by rendering one settled turn with only `curve.peakTps` moved between `null` and `0` and asserting the two element trees are deeply equal.
+
+### 8.7 A non-magnitude phase cut closes an episode without opening one (Phase 9.4.3)
+
+> **A non-magnitude phase boundary may close the outgoing TPS episode without opening the incoming TPS episode.**
+
+A **phase cut** is the evidence a boundary that carries no magnitude leaves behind. Exactly one chunk shape produces
+one, and it is the shape Phase 9.4 made the turn's first token: a name-bearing `tool-call-delta` whose
+`argumentsDelta` is still empty. DSH's `isTokenDelta` accepts it, `classifyDelta` attributes no argument text to it,
+and `sampleFromChunk` therefore returns `null` — it is token evidence without being a TPS-shape sample. The
+classification lives once, in `phaseCutOf`/`phaseCutsFromChunks` (`src/core/delta-accounting.js`), on top of the same
+`tokenEvidence` verdict the live meter uses.
+
+Four concepts are now distinct, and the cut is what keeps the first three from being collapsed into the fourth:
+
+| Concept | Evidence | Establishes |
+|---|---|---|
+| TTFT boundary | first chunk DSH's predicate accepts | turn TTFT |
+| phase identity transition | the phase the chunk declares | which phase the stream is in |
+| TPS magnitude sample | a generated delta with a shape weight | numerator, sample count, episode origin |
+| TPS episode origin | the **first magnitude sample** of an episode | the cumulative denominator |
+
+A cut therefore does all of this, and nothing else:
+
+- it **freezes TTFT** (if it is the turn's first token) and **changes the phase identity** immediately;
+- it **closes** the episode in force at its own instant: the closing vertex is the episode's last measurement, carrying
+  the episode's own mass over the episode's own elapsed clock;
+- it contributes **no magnitude**, **no sample count** and **no `sampleOrder`**, and it is never stored in
+  `attempt.samples`;
+- it does **not open** the incoming episode: that episode begins at its first magnitude sample, which may be hundreds of
+  milliseconds later, and the stretch between the two belongs to no episode and is drawn as a hole.
+
+**Where the evidence lives.** `attempt.phaseCuts` — a `{timeMs, phase}` entry per boundary, appended in stream order
+beside `samples` rather than inside them. It is recorded by `TurnTelemetryStore.phaseCutObserved`, which both
+reconstruction planes reach through the same `acceptChunk`/`attemptFromDecoded` call, so a reload cannot lose it. On
+the curve's clock each cut is mapped by the **same subtraction the samples use** (`compressAttempts` publishes
+`attemptTimeMs`/`activeTimeMs` per cut, and `attemptTrace` rebases it identically); a cut that precedes its attempt's
+first generated sample owns no coordinate — an attempt's local zero is its first delta — and is counted in
+`segments[].preOriginCutCount` rather than clamped onto zero, which would invent a pre-sample instant. A boundary the
+attempt never crossed is therefore never given a width, and no fake pre-sample curve width and no negative local time
+can appear.
+
+**The principal fixture.** Turn start `0`; reasoning deltas at `0/50/100` (100 shape tokens each); a name-bearing
+empty-arguments boundary at `120` declaring `output`; output deltas at `300/350/400`; settlement at `400`.
+
+| | live at `t = 200` | completed curve, before | completed curve, after |
+|---|---|---|---|
+| `activePhase` | `output` | `output` at the cut, then reasoning at the vertex | `output` |
+| episode clock | none (`null`) | reasoning origin `0`, elapsed `200` | none inside the gap |
+| vertex at `200` | — | `tps 1500` (3 samples, mass 300) | **does not exist** |
+| reasoning episode | closed at `120` | runs to `300` | runs to `120` |
+| output episode origin | `300` | `300` | `300` |
+| summary `reasoningMs` | — | `300` (`reasoningTps 1000`) | `120` (`reasoningTps 2500`) |
+
+After the fix the trace is `0, 100, 120` reasoning / `300, 400` output, the two runs are **disjoint** (no segment
+crosses `120 → 300`), no output vertex exists before `300`, no output point is fabricated at `120`, and the published
+peak is unchanged at `3000`. This is not CASE I: the boundary's declared phase is confirmed by the magnitude samples
+that follow it, so there is no ambiguity about the transition. A boundary whose declared phase a later sample
+contradicts (`reasoning → boundary(output) → reasoning`) is handled by the same rule from the same evidence — the
+outgoing episode closes at the cut and the next reasoning sample opens a fresh one — which is what makes the two halves
+agree about that class as well; the declared phase itself remains `tokenEvidence`'s documented fallback.
+
+**What a cut may never become.** It is not an ordinary TPS sample: a `{tokens: 0}` entry would enter the numerator and
+the sample count and would publish `0` as a measured rate. It is not a fabricated vertex: a cut that closes an episode
+is a real measurement of that episode, and a cut that closes nothing (a same-phase boundary, a boundary inside an
+already-open episode of the same phase, or a boundary with no episode in force) is inert. The eligibility gates of
+§8.2 are untouched — `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100` — and the cut instant's own vertex publishes
+only if the episode it closes passes both. No clamp, no smoothing, no zero-token placeholder and no renderer-side
+suppression is used anywhere in this mechanism; the vertex is truthful before the SVG sees it.
 
 ## 9. Peak TPS
 
