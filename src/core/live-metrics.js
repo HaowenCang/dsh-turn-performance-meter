@@ -39,13 +39,33 @@
  *     delivery granularity (§12);
  *   - the first output samples of a fresh output episode may reuse the last
  *     positive reasoning rate for at most `FIRST_OUTPUT_GUARD_MS`, and only while
- *     the output episode has no valid positive rate of its own (§15);
+ *     the output episode has no valid positive rate of its own (§15). The window
+ *     is the episode's own — it starts at the first output magnitude sample — so
+ *     a boundary-only instant neither opens it nor extends the reasoning rate
+ *     across a phase that has produced nothing;
  *   - TTFT is measured once per turn, from turn start to the first chunk DSH's
  *     own `isTokenDelta` accepts — `tokenEvidence().countsAsToken` in
  *     `src/core/delta-accounting.js`, which includes a name-bearing
  *     `tool-call-delta` whose argument fragment has not arrived yet — and is
  *     never redefined by a later call (docs/METRICS_SPEC.md §4). A boundary-only
  *     delta freezes TTFT and contributes no token mass.
+ *
+ * ## Three instants that are deliberately not one instant (Phase 9.4.2)
+ *
+ *   - the **TTFT boundary**: the first chunk DSH's first-token predicate accepts;
+ *   - the **magnitude sample**: a generated delta that carries a TPS-shape weight;
+ *   - the **TPS episode origin**: the first magnitude sample of the active phase
+ *     episode, which is the only origin the phase-cumulative denominator may use.
+ *
+ * Exactly one chunk shape separates the first from the second: a name-bearing
+ * `tool-call-delta` with an empty `argumentsDelta`. It establishes the TTFT
+ * boundary and the streaming phase identity, and it establishes **neither** a
+ * magnitude nor an episode origin. `acceptSample` is the only method that opens
+ * an episode, so `episodeStartMs` is never a boundary instant — which is what
+ * keeps the live denominator origin identical to the origin the completed curve
+ * uses (`cumulativePhaseTpsSeries` opens an episode at its first sample), and
+ * what keeps `episodeUsageBaseline` describing the same interval as the
+ * provider-counter numerator it is subtracted from.
  *
  * ## Token evidence priority (§6)
  *
@@ -138,6 +158,11 @@ export class LiveMeter {
      * of the episode and is the origin of the cumulative clock; the numerator is
      * the episode's token mass, accumulated from accepted samples or from the
      * provider counter when one is usable.
+     *
+     * It is `null` while the phase is known but no magnitude has arrived yet —
+     * after a boundary-only first token, or after any attempt/phase boundary —
+     * and in that state there is no episode: no clock, no numerator, no
+     * denominator and no publishable rate. Only `acceptSample` opens one.
      */
     this.episodeStartMs = null
     this.episodeTokenMass = 0
@@ -272,9 +297,12 @@ export class LiveMeter {
     }
     if (phase !== this.streamingPhase || this.episodeStartMs === null) {
       /**
-       * A phase change — or the attempt's very first generated sample — opens a
-       * fresh episode. The previous phase's elapsed time and numerator are
-       * discarded rather than carried forward (§14).
+       * A phase change — or the first magnitude sample of the attempt, or the
+       * first magnitude sample after a boundary-only delta already announced the
+       * phase — opens a fresh episode **at this sample's instant**. The previous
+       * phase's elapsed time and numerator are discarded rather than carried
+       * forward (§14), and the phase identity a boundary established is now
+       * backed by the sample that gives it a clock.
        */
       this.streamingPhase = phase
       this.episodeStartMs = sample.timeMs
@@ -296,14 +324,32 @@ export class LiveMeter {
    * `tool-call-delta` whose `argumentsDelta` is still empty. DSH's `isTokenDelta`
    * accepts it — the model has begun emitting a call, and the name is the
    * evidence — while `classifyDelta` cannot attribute any argument text to it. It
-   * therefore freezes the turn's TTFT and opens the phase episode it starts, and
-   * it does neither of the things that would corrupt the numbers: it adds no
-   * token mass, and it does not increment `episodeSampleCount`, so a rate can
-   * never be published from boundary evidence alone.
+   * therefore freezes the turn's TTFT and establishes the streaming phase
+   * identity, and it does none of the things that would corrupt the numbers: it
+   * adds no token mass, it does not increment `episodeSampleCount`, and it does
+   * **not open the TPS episode**, so no rate can ever be published from boundary
+   * evidence alone.
    *
    * Before this method existed, `firstTokenMs` could only be frozen by an
    * accepted sample, so a turn whose first token was a tool-call boundary kept
    * rendering the first-response stopwatch after the boundary had passed.
+   *
+   * ## Why the boundary is not an episode origin (Phase 9.4.2)
+   *
+   * The phase-cumulative denominator is measured from the first **magnitude**
+   * sample of the episode, and so is the completed curve's: `acceptSample` (and
+   * `cumulativePhaseTpsSeries`) open an episode at a sample's own instant, and a
+   * boundary-only delta produces no sample, so the curve never sees this instant
+   * at all. Opening the episode here gave the live pill a denominator origin the
+   * completed trace could not reproduce — the same fixture read `1500` live and
+   * `3000` on the card — and it attached `episodeUsageBaseline` to that instant,
+   * making the provider-counter numerator an interval the denominator did not
+   * describe.
+   *
+   * A **same-phase** boundary inside an already magnitude-open episode therefore
+   * changes nothing here: the boundary is TTFT/state evidence, not a magnitude
+   * boundary, so an origin, a numerator and a sample count that real samples
+   * established are left intact.
    *
    * @param {{attemptId?:string|null, timeMs:number, phase?:string|null}} input
    * @returns {boolean} whether the boundary was recorded
@@ -317,17 +363,19 @@ export class LiveMeter {
     this.phase = LivePhase.STREAMING
     const nextPhase = phase ?? null
     /**
-     * The boundary opens the episode whose clock it starts. It is a *clock*
-     * origin, not a measurement: mass stays at zero and the sample count stays at
-     * zero until a magnitude-bearing delta arrives, so the first publishable rate
-     * of that episode still needs `MIN_RATE_SAMPLES` real samples.
+     * A genuine phase transition is established **immediately** — the identity
+     * changes and the previous phase's episode is discarded rather than bridged —
+     * but the new episode stays *unopened*: `episodeStartMs` is `null`, mass and
+     * sample count are zero and no provider baseline is taken. The first
+     * magnitude sample of that phase opens the episode at its own instant and
+     * takes the baseline there, so numerator and denominator share one origin.
      */
-    if (nextPhase !== null && (nextPhase !== this.streamingPhase || this.episodeStartMs === null)) {
+    if (nextPhase !== null && nextPhase !== this.streamingPhase) {
       this.streamingPhase = nextPhase
-      this.episodeStartMs = timeMs
+      this.episodeStartMs = null
       this.episodeTokenMass = 0
       this.episodeSampleCount = 0
-      this.episodeUsageBaseline = this.usageBaselineFor(nextPhase)
+      this.episodeUsageBaseline = null
     }
     return true
   }
@@ -499,6 +547,11 @@ export class LiveMeter {
    * of a fresh output episode that has no valid positive rate yet — the last
    * positive reasoning rate (§15). A valid positive output estimate is never
    * overwritten.
+   *
+   * The fallback is measured on the output episode's own clock, which exists only
+   * once a magnitude sample opened it. Before that, `episodeStartMs` is `null`
+   * and neither the episode's rate nor the stand-in is published: a phase that has
+   * produced nothing yet has nothing to stand in for.
    */
   publishedRate(nowMs) {
     const rate = this.episodeRate(nowMs)
