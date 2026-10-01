@@ -23,6 +23,26 @@
  *     (`docs/MIMO_RUNTIME_METRICS.md` §5.4: `settlementTime - outputStartTime`),
  *     and charging it is the deliberate Phase 9.2 change from the old
  *     inter-delta contract.
+ *
+ *  3b. **A non-magnitude phase cut ends the outgoing episode early (Phase
+ *     9.4.3).** A name-bearing `tool-call-delta` with an empty `argumentsDelta`
+ *     carries no magnitude but does declare a phase (`tokenEvidence()`), and the
+ *     live meter closes the outgoing episode at that instant. The summary must
+ *     close it at the same instant, or the silent stretch between the boundary and
+ *     the incoming phase's first magnitude sample is charged to a phase that had
+ *     already stopped producing — the principal fixture of `docs/METRICS_SPEC.md`
+ *     §8.7 read `reasoningMs 300 / reasoningTps 1000` where the episode is 120 ms
+ *     of reasoning and a 180 ms stretch that belongs to no phase at all.
+ *
+ *     The cut closes the episode and opens nothing: the incoming episode still
+ *     begins at its first magnitude sample, and the stretch between the two is
+ *     charged to neither phase. A cut that declares the phase already in force
+ *     changes nothing, exactly as it changes nothing live.
+ *
+ *     The rule is implemented once, in {@link buildPhaseEpisodes}, because three
+ *     consumers read it — the live estimator, the completed curve and this
+ *     summary — and a second copy of the episode boundary would be free to drift
+ *     from the one the chart draws.
  *  4. Reasoning and output never double-count: the episodes are disjoint and
  *     ordered, so a reasoning -> output -> reasoning interleave produces three
  *     disjoint durations rather than overlapping `[first,last]` spans.
@@ -50,49 +70,165 @@ function toSamples(samples) {
     .sort((a, b) => a.timeMs - b.timeMs)
 }
 
+/** One attempt's non-magnitude phase boundaries, ascending, finite and phase-bearing. */
+function toCuts(cuts) {
+  if (!Array.isArray(cuts)) return []
+  return cuts
+    .filter(cut => cut && Number.isFinite(cut.timeMs) && (cut.phase === PHASE.REASONING || cut.phase === PHASE.OUTPUT))
+    .map(cut => ({ timeMs: cut.timeMs, phase: cut.phase }))
+    .sort((a, b) => a.timeMs - b.timeMs)
+}
+
+/**
+ * Cut one attempt's ordered samples into phase episodes, honouring its phase cuts.
+ *
+ * This is the **one** implementation of the episode boundary, and it is shared by
+ * the completed curve (`src/core/curve.js` samples its ladder from the returned
+ * episodes) and by the summary (`attributePhaseDurations` sums their durations).
+ * Two copies of this walk would be free to disagree about where a phase stopped,
+ * which is exactly the class of defect the cut exists to remove.
+ *
+ * An episode opens at a generated sample whose phase differs from the open
+ * episode's — or at any sample when no episode is open — and ends at the earliest
+ * of
+ *
+ *   - the next episode's opening sample,
+ *   - a **phase cut** declaring a different phase (a non-magnitude boundary),
+ *   - the attempt's own end (`endMs`, i.e. its settlement instant).
+ *
+ * A cut contributes no sample, no sample count and no magnitude: it closes the
+ * outgoing episode and opens nothing, so the stretch that follows it belongs to no
+ * episode until a magnitude sample opens one. A cut declaring the phase already in
+ * force is inert, which is what keeps a same-phase boundary from splitting a valid
+ * episode.
+ *
+ * @param {readonly {timeMs:number, phase?:string|null}[]} samples ascending stream order
+ * @param {{cuts?:readonly {timeMs:number, phase?:string|null}[], endMs?:number|null}} [options]
+ * @returns {{
+ *   episodes: {
+ *     phase:string|null, startMs:number, startIndex:number, lastSampleMs:number,
+ *     boundMs:number|null, closedByCut:boolean, sampleCount:number, mass:number,
+ *   }[],
+ *   episodeIndexBySample: number[],
+ * }}
+ *   `boundMs` is the episode's own end instant, or `null` for a terminal episode
+ *   whose attempt end is unknown. `episodeIndexBySample[i]` is the episode sample
+ *   `i` belongs to, so a caller can accumulate an episode's mass incrementally.
+ */
+export function buildPhaseEpisodes(samples, options = {}) {
+  const ordered = Array.isArray(samples) ? samples : []
+  const cuts = toCuts(options.cuts)
+  const endMs = Number.isFinite(options.endMs) ? options.endMs : null
+
+  /**
+   * Samples and cuts merged on one clock, **cut first** at a shared instant.
+   *
+   * The order is the stream's own: DSH delivers the boundary delta before the
+   * delta that confirms its phase, so at one millisecond the cut is the earlier
+   * fact. `Array.prototype.sort` is stable, so the samples keep the ascending
+   * order (and the stream ordinal) they arrived in.
+   */
+  const events = []
+  for (let index = 0; index < ordered.length; index += 1) {
+    if (Number.isFinite(ordered[index]?.timeMs)) events.push({ at: ordered[index].timeMs, sampleIndex: index, cut: null })
+  }
+  for (const cut of cuts) events.push({ at: cut.timeMs, sampleIndex: -1, cut })
+  events.sort((left, right) => (
+    left.at - right.at || (left.cut === null ? 1 : 0) - (right.cut === null ? 1 : 0)
+  ))
+
+  const episodes = []
+  const episodeIndexBySample = ordered.map(() => -1)
+  let current = null
+  for (const event of events) {
+    if (event.cut !== null) {
+      const declared = event.cut.phase
+      if (current !== null && declared !== current.phase && event.cut.timeMs >= current.startMs) {
+        current.boundMs = event.cut.timeMs
+        current.closedByCut = true
+        current = null
+      }
+      continue
+    }
+    const sample = ordered[event.sampleIndex]
+    if (sample === null || sample === undefined) continue
+    const phase = sample.phase ?? null
+    if (current !== null && phase !== current.phase) {
+      current.boundMs = sample.timeMs
+      current = null
+    }
+    if (current === null) {
+      current = {
+        phase,
+        startMs: sample.timeMs,
+        startIndex: event.sampleIndex,
+        lastSampleMs: sample.timeMs,
+        boundMs: null,
+        closedByCut: false,
+        sampleCount: 0,
+        mass: 0,
+      }
+      episodes.push(current)
+    }
+    current.lastSampleMs = sample.timeMs
+    current.sampleCount += 1
+    current.mass += sample.tokens ?? sample.weight ?? 0
+    episodeIndexBySample[event.sampleIndex] = episodes.length - 1
+  }
+
+  /**
+   * The terminal episode's own end. A settlement stamped *before* the attempt's
+   * last delta is clock skew and is refused rather than allowed to shrink real
+   * generation time — the same rule `compressAttempts` applies to the attempt's
+   * width. A cut-closed terminal episode keeps its cut: the attempt's later clock
+   * belongs to no episode, and charging it to the phase that already stopped is
+   * the defect this whole mechanism removes.
+   */
+  const terminal = episodes[episodes.length - 1]
+  if (terminal !== undefined && terminal.boundMs === null && endMs !== null) {
+    terminal.boundMs = Math.max(endMs, terminal.lastSampleMs)
+  }
+  return { episodes, episodeIndexBySample }
+}
+
 /**
  * Cut one attempt's ordered samples into contiguous phase episodes and measure each.
  *
  * The episode list is the shared vocabulary of the live estimator, the completed
  * summary and the curve: all three read "the phase of the newest sample at or
- * before an instant" and "the first sample of that episode" from the same rule.
+ * before an instant" and "the first sample of that episode" from the same rule —
+ * `buildPhaseEpisodes` above, which is the only place the boundary is computed.
  *
  * @param {readonly {timeMs:number, phase?:string|null}[]} ordered samples, ascending
  * @param {number|null} settledAtMs the attempt's settlement instant, or `null`
+ * @param {readonly {timeMs:number, phase?:string|null}[]} [cuts] the attempt's
+ *   non-magnitude phase boundaries; each one ends the episode in force without
+ *   opening a new one (`docs/METRICS_SPEC.md` §8.7)
  * @returns {{
  *   phase:string|null, startMs:number, lastSampleMs:number,
  *   endMs:number|null, durationMs:number|null, sampleCount:number,
  * }[]}
  */
-export function phaseEpisodes(ordered, settledAtMs = null) {
-  const episodes = []
-  for (const sample of ordered) {
-    const phase = sample.phase ?? null
-    const last = episodes[episodes.length - 1]
-    if (last !== undefined && last.phase === phase) {
-      last.lastSampleMs = sample.timeMs
-      last.sampleCount += 1
-      continue
-    }
-    episodes.push({ phase, startMs: sample.timeMs, lastSampleMs: sample.timeMs, sampleCount: 1 })
-  }
-
-  const terminal = Number.isFinite(settledAtMs) ? settledAtMs : null
-  return episodes.map((episode, index) => {
-    const next = episodes[index + 1]
+export function phaseEpisodes(ordered, settledAtMs = null, cuts = []) {
+  /**
+   * Only samples with a finite instant take part, exactly as before: an attempt's
+   * malformed timestamp cannot create an episode, and it cannot shift one either.
+   */
+  const timed = Array.isArray(ordered) ? ordered.filter(sample => sample && Number.isFinite(sample.timeMs)) : []
+  const { episodes } = buildPhaseEpisodes(timed, {
+    cuts,
+    endMs: Number.isFinite(settledAtMs) ? settledAtMs : null,
+  })
+  return episodes.map(episode => {
     /**
      * A non-terminal episode ends where the next one begins — which is *after*
      * its own last sample whenever the stream fell silent across the boundary,
-     * and at the same instant when the two phases interleave with no gap. The
-     * terminal episode ends at the attempt's settlement instant, and never
-     * before its own last sample: a settlement stamped earlier than a delta that
-     * followed it is clock skew, and shrinking a measured episode below the
-     * evidence it contains would make the summary rate exceed the chart's own
-     * peak for the same attempt (`compressAttempts` refuses the same skew).
+     * and at the same instant when the two phases interleave with no gap. A
+     * cut-closed episode ends at the cut instead, and the stretch after it is
+     * charged to no phase. The terminal episode ends at the attempt's settlement
+     * instant, never before its own last sample (see `buildPhaseEpisodes`).
      */
-    const endMs = next !== undefined
-      ? next.startMs
-      : (terminal === null ? null : Math.max(terminal, episode.lastSampleMs))
+    const endMs = episode.boundMs
     return {
       phase: episode.phase,
       startMs: episode.startMs,
@@ -133,9 +269,11 @@ function phaseDuration(episodes, phase) {
  * Attribute one attempt's phase-episode durations.
  *
  * @param {readonly {timeMs:number, phase:'reasoning'|'output'}[]} samples
- * @param {{settledAtMs?:number|null}} [options] the attempt's settlement instant,
- *   which ends the terminal episode. Without it the terminal episode is
- *   unmeasurable (`null`), never zero.
+ * @param {{settledAtMs?:number|null, phaseCuts?:readonly {timeMs:number, phase:string}[]}} [options]
+ *   `settledAtMs` ends the terminal episode; without it the terminal episode is
+ *   unmeasurable (`null`), never zero. `phaseCuts` are the attempt's
+ *   non-magnitude phase boundaries: each one ends the episode in force at its own
+ *   instant and opens nothing, so the stretch that follows belongs to no phase.
  * @returns {{
  *   reasoningMs:number|null,
  *   outputMs:number|null,
@@ -152,7 +290,7 @@ function phaseDuration(episodes, phase) {
 export function attributePhaseDurations(samples, options = {}) {
   const ordered = toSamples(samples)
   const settledAtMs = Number.isFinite(options?.settledAtMs) ? options.settledAtMs : null
-  const episodes = phaseEpisodes(ordered, settledAtMs)
+  const episodes = phaseEpisodes(ordered, settledAtMs, options?.phaseCuts)
   const reasoning = phaseDuration(episodes, PHASE.REASONING)
   const output = phaseDuration(episodes, PHASE.OUTPUT)
 

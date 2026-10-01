@@ -64,8 +64,17 @@ export function reduceAttempt(attempt) {
    * terminal episode, so the final generated-delta → settlement tail is charged to
    * that episode — the MiMo definition — while tool and inter-attempt time is not
    * reachable from this call at all.
+   *
+   * The attempt's non-magnitude phase cuts travel with the samples (Phase 9.4.3):
+   * each one ends the episode in force at its own instant, so the silent stretch
+   * between a boundary and the incoming phase's first magnitude sample is charged
+   * to **neither** phase. Without them the outgoing phase's denominator absorbed
+   * that stretch and the printed rate disagreed with the curve the card draws.
    */
-  const durations = attributePhaseDurations(samples, { settledAtMs: attempt?.settledAtMs })
+  const durations = attributePhaseDurations(samples, {
+    settledAtMs: attempt?.settledAtMs,
+    phaseCuts: attempt?.phaseCuts,
+  })
   const usage = normalizeUsage(attempt?.usage)
   const calibration = calibrateAttemptSamples(samples, usage ?? undefined)
 

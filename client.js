@@ -105,6 +105,26 @@ function rateQuality({ measuredRatio = 1, tokensExact = true, phaseSplitExact = 
  *     (`docs/MIMO_RUNTIME_METRICS.md` §5.4: `settlementTime - outputStartTime`),
  *     and charging it is the deliberate Phase 9.2 change from the old
  *     inter-delta contract.
+ *
+ *  3b. **A non-magnitude phase cut ends the outgoing episode early (Phase
+ *     9.4.3).** A name-bearing `tool-call-delta` with an empty `argumentsDelta`
+ *     carries no magnitude but does declare a phase (`tokenEvidence()`), and the
+ *     live meter closes the outgoing episode at that instant. The summary must
+ *     close it at the same instant, or the silent stretch between the boundary and
+ *     the incoming phase's first magnitude sample is charged to a phase that had
+ *     already stopped producing — the principal fixture of `docs/METRICS_SPEC.md`
+ *     §8.7 read `reasoningMs 300 / reasoningTps 1000` where the episode is 120 ms
+ *     of reasoning and a 180 ms stretch that belongs to no phase at all.
+ *
+ *     The cut closes the episode and opens nothing: the incoming episode still
+ *     begins at its first magnitude sample, and the stretch between the two is
+ *     charged to neither phase. A cut that declares the phase already in force
+ *     changes nothing, exactly as it changes nothing live.
+ *
+ *     The rule is implemented once, in {@link buildPhaseEpisodes}, because three
+ *     consumers read it — the live estimator, the completed curve and this
+ *     summary — and a second copy of the episode boundary would be free to drift
+ *     from the one the chart draws.
  *  4. Reasoning and output never double-count: the episodes are disjoint and
  *     ordered, so a reasoning -> output -> reasoning interleave produces three
  *     disjoint durations rather than overlapping `[first,last]` spans.
@@ -132,49 +152,165 @@ function toSamples(samples) {
     .sort((a, b) => a.timeMs - b.timeMs)
 }
 
+/** One attempt's non-magnitude phase boundaries, ascending, finite and phase-bearing. */
+function toCuts(cuts) {
+  if (!Array.isArray(cuts)) return []
+  return cuts
+    .filter(cut => cut && Number.isFinite(cut.timeMs) && (cut.phase === PHASE.REASONING || cut.phase === PHASE.OUTPUT))
+    .map(cut => ({ timeMs: cut.timeMs, phase: cut.phase }))
+    .sort((a, b) => a.timeMs - b.timeMs)
+}
+
+/**
+ * Cut one attempt's ordered samples into phase episodes, honouring its phase cuts.
+ *
+ * This is the **one** implementation of the episode boundary, and it is shared by
+ * the completed curve (`src/core/curve.js` samples its ladder from the returned
+ * episodes) and by the summary (`attributePhaseDurations` sums their durations).
+ * Two copies of this walk would be free to disagree about where a phase stopped,
+ * which is exactly the class of defect the cut exists to remove.
+ *
+ * An episode opens at a generated sample whose phase differs from the open
+ * episode's — or at any sample when no episode is open — and ends at the earliest
+ * of
+ *
+ *   - the next episode's opening sample,
+ *   - a **phase cut** declaring a different phase (a non-magnitude boundary),
+ *   - the attempt's own end (`endMs`, i.e. its settlement instant).
+ *
+ * A cut contributes no sample, no sample count and no magnitude: it closes the
+ * outgoing episode and opens nothing, so the stretch that follows it belongs to no
+ * episode until a magnitude sample opens one. A cut declaring the phase already in
+ * force is inert, which is what keeps a same-phase boundary from splitting a valid
+ * episode.
+ *
+ * @param {readonly {timeMs:number, phase?:string|null}[]} samples ascending stream order
+ * @param {{cuts?:readonly {timeMs:number, phase?:string|null}[], endMs?:number|null}} [options]
+ * @returns {{
+ *   episodes: {
+ *     phase:string|null, startMs:number, startIndex:number, lastSampleMs:number,
+ *     boundMs:number|null, closedByCut:boolean, sampleCount:number, mass:number,
+ *   }[],
+ *   episodeIndexBySample: number[],
+ * }}
+ *   `boundMs` is the episode's own end instant, or `null` for a terminal episode
+ *   whose attempt end is unknown. `episodeIndexBySample[i]` is the episode sample
+ *   `i` belongs to, so a caller can accumulate an episode's mass incrementally.
+ */
+function buildPhaseEpisodes(samples, options = {}) {
+  const ordered = Array.isArray(samples) ? samples : []
+  const cuts = toCuts(options.cuts)
+  const endMs = Number.isFinite(options.endMs) ? options.endMs : null
+
+  /**
+   * Samples and cuts merged on one clock, **cut first** at a shared instant.
+   *
+   * The order is the stream's own: DSH delivers the boundary delta before the
+   * delta that confirms its phase, so at one millisecond the cut is the earlier
+   * fact. `Array.prototype.sort` is stable, so the samples keep the ascending
+   * order (and the stream ordinal) they arrived in.
+   */
+  const events = []
+  for (let index = 0; index < ordered.length; index += 1) {
+    if (Number.isFinite(ordered[index]?.timeMs)) events.push({ at: ordered[index].timeMs, sampleIndex: index, cut: null })
+  }
+  for (const cut of cuts) events.push({ at: cut.timeMs, sampleIndex: -1, cut })
+  events.sort((left, right) => (
+    left.at - right.at || (left.cut === null ? 1 : 0) - (right.cut === null ? 1 : 0)
+  ))
+
+  const episodes = []
+  const episodeIndexBySample = ordered.map(() => -1)
+  let current = null
+  for (const event of events) {
+    if (event.cut !== null) {
+      const declared = event.cut.phase
+      if (current !== null && declared !== current.phase && event.cut.timeMs >= current.startMs) {
+        current.boundMs = event.cut.timeMs
+        current.closedByCut = true
+        current = null
+      }
+      continue
+    }
+    const sample = ordered[event.sampleIndex]
+    if (sample === null || sample === undefined) continue
+    const phase = sample.phase ?? null
+    if (current !== null && phase !== current.phase) {
+      current.boundMs = sample.timeMs
+      current = null
+    }
+    if (current === null) {
+      current = {
+        phase,
+        startMs: sample.timeMs,
+        startIndex: event.sampleIndex,
+        lastSampleMs: sample.timeMs,
+        boundMs: null,
+        closedByCut: false,
+        sampleCount: 0,
+        mass: 0,
+      }
+      episodes.push(current)
+    }
+    current.lastSampleMs = sample.timeMs
+    current.sampleCount += 1
+    current.mass += sample.tokens ?? sample.weight ?? 0
+    episodeIndexBySample[event.sampleIndex] = episodes.length - 1
+  }
+
+  /**
+   * The terminal episode's own end. A settlement stamped *before* the attempt's
+   * last delta is clock skew and is refused rather than allowed to shrink real
+   * generation time — the same rule `compressAttempts` applies to the attempt's
+   * width. A cut-closed terminal episode keeps its cut: the attempt's later clock
+   * belongs to no episode, and charging it to the phase that already stopped is
+   * the defect this whole mechanism removes.
+   */
+  const terminal = episodes[episodes.length - 1]
+  if (terminal !== undefined && terminal.boundMs === null && endMs !== null) {
+    terminal.boundMs = Math.max(endMs, terminal.lastSampleMs)
+  }
+  return { episodes, episodeIndexBySample }
+}
+
 /**
  * Cut one attempt's ordered samples into contiguous phase episodes and measure each.
  *
  * The episode list is the shared vocabulary of the live estimator, the completed
  * summary and the curve: all three read "the phase of the newest sample at or
- * before an instant" and "the first sample of that episode" from the same rule.
+ * before an instant" and "the first sample of that episode" from the same rule —
+ * `buildPhaseEpisodes` above, which is the only place the boundary is computed.
  *
  * @param {readonly {timeMs:number, phase?:string|null}[]} ordered samples, ascending
  * @param {number|null} settledAtMs the attempt's settlement instant, or `null`
+ * @param {readonly {timeMs:number, phase?:string|null}[]} [cuts] the attempt's
+ *   non-magnitude phase boundaries; each one ends the episode in force without
+ *   opening a new one (`docs/METRICS_SPEC.md` §8.7)
  * @returns {{
  *   phase:string|null, startMs:number, lastSampleMs:number,
  *   endMs:number|null, durationMs:number|null, sampleCount:number,
  * }[]}
  */
-function phaseEpisodes(ordered, settledAtMs = null) {
-  const episodes = []
-  for (const sample of ordered) {
-    const phase = sample.phase ?? null
-    const last = episodes[episodes.length - 1]
-    if (last !== undefined && last.phase === phase) {
-      last.lastSampleMs = sample.timeMs
-      last.sampleCount += 1
-      continue
-    }
-    episodes.push({ phase, startMs: sample.timeMs, lastSampleMs: sample.timeMs, sampleCount: 1 })
-  }
-
-  const terminal = Number.isFinite(settledAtMs) ? settledAtMs : null
-  return episodes.map((episode, index) => {
-    const next = episodes[index + 1]
+function phaseEpisodes(ordered, settledAtMs = null, cuts = []) {
+  /**
+   * Only samples with a finite instant take part, exactly as before: an attempt's
+   * malformed timestamp cannot create an episode, and it cannot shift one either.
+   */
+  const timed = Array.isArray(ordered) ? ordered.filter(sample => sample && Number.isFinite(sample.timeMs)) : []
+  const { episodes } = buildPhaseEpisodes(timed, {
+    cuts,
+    endMs: Number.isFinite(settledAtMs) ? settledAtMs : null,
+  })
+  return episodes.map(episode => {
     /**
      * A non-terminal episode ends where the next one begins — which is *after*
      * its own last sample whenever the stream fell silent across the boundary,
-     * and at the same instant when the two phases interleave with no gap. The
-     * terminal episode ends at the attempt's settlement instant, and never
-     * before its own last sample: a settlement stamped earlier than a delta that
-     * followed it is clock skew, and shrinking a measured episode below the
-     * evidence it contains would make the summary rate exceed the chart's own
-     * peak for the same attempt (`compressAttempts` refuses the same skew).
+     * and at the same instant when the two phases interleave with no gap. A
+     * cut-closed episode ends at the cut instead, and the stretch after it is
+     * charged to no phase. The terminal episode ends at the attempt's settlement
+     * instant, never before its own last sample (see `buildPhaseEpisodes`).
      */
-    const endMs = next !== undefined
-      ? next.startMs
-      : (terminal === null ? null : Math.max(terminal, episode.lastSampleMs))
+    const endMs = episode.boundMs
     return {
       phase: episode.phase,
       startMs: episode.startMs,
@@ -215,9 +351,11 @@ function phaseDuration(episodes, phase) {
  * Attribute one attempt's phase-episode durations.
  *
  * @param {readonly {timeMs:number, phase:'reasoning'|'output'}[]} samples
- * @param {{settledAtMs?:number|null}} [options] the attempt's settlement instant,
- *   which ends the terminal episode. Without it the terminal episode is
- *   unmeasurable (`null`), never zero.
+ * @param {{settledAtMs?:number|null, phaseCuts?:readonly {timeMs:number, phase:string}[]}} [options]
+ *   `settledAtMs` ends the terminal episode; without it the terminal episode is
+ *   unmeasurable (`null`), never zero. `phaseCuts` are the attempt's
+ *   non-magnitude phase boundaries: each one ends the episode in force at its own
+ *   instant and opens nothing, so the stretch that follows belongs to no phase.
  * @returns {{
  *   reasoningMs:number|null,
  *   outputMs:number|null,
@@ -234,7 +372,7 @@ function phaseDuration(episodes, phase) {
 function attributePhaseDurations(samples, options = {}) {
   const ordered = toSamples(samples)
   const settledAtMs = Number.isFinite(options?.settledAtMs) ? options.settledAtMs : null
-  const episodes = phaseEpisodes(ordered, settledAtMs)
+  const episodes = phaseEpisodes(ordered, settledAtMs, options?.phaseCuts)
   const reasoning = phaseDuration(episodes, PHASE.REASONING)
   const output = phaseDuration(episodes, PHASE.OUTPUT)
 
@@ -254,7 +392,7 @@ function attributePhaseDurations(samples, options = {}) {
   }
 }
 
-;Object.assign(__exports, { PHASE, phaseEpisodes, attributePhaseDurations })
+;Object.assign(__exports, { PHASE, buildPhaseEpisodes, phaseEpisodes, attributePhaseDurations })
 			},
 			"src/core/phase-evidence.js": function (__exports) {
 /**
@@ -1416,6 +1554,50 @@ function tokenEvidence(chunk) {
   }
 }
 
+/**
+ * The **phase cut** one timed chunk records, or `null` when it records none.
+ *
+ * A cut is the evidence a non-magnitude boundary leaves behind: the chunk is
+ * DSH's first-token evidence (`countsAsToken`) and it carries no attributable
+ * magnitude (`contributesMagnitude === false`), which is exactly the name-bearing
+ * `tool-call-delta` whose `argumentsDelta` is still empty. It declares the phase
+ * the stream moved to and it is **not** a TPS-shape sample — turning it into one
+ * would fabricate a magnitude and a sample count, and dropping it would leave the
+ * completed curve bridging an episode the live meter had already closed
+ * (`docs/METRICS_SPEC.md` §8.7).
+ *
+ * @param {{timeMs:number, chunk:unknown}} timedChunk
+ * @returns {{timeMs:number, phase:'reasoning'|'output'}|null}
+ */
+function phaseCutOf(timedChunk) {
+  if (!timedChunk || !Number.isFinite(timedChunk.timeMs)) return null
+  const evidence = tokenEvidence(timedChunk.chunk)
+  if (!evidence.countsAsToken || evidence.contributesMagnitude) return null
+  return { timeMs: timedChunk.timeMs, phase: evidence.phase }
+}
+
+/**
+ * Every phase cut a decoded chunk sequence carries, in stream order.
+ *
+ * This is the bulk form of {@link phaseCutOf}, and it is the rule the **durable**
+ * reconstruction uses: a compact settlement's decoded stream reaches the store
+ * either one `acceptChunk` at a time (`materializeReconstructedTurn`) or as a
+ * whole attempt record (`attemptFromDecoded`, which the live controller's reload
+ * branch restores directly), and both must publish the same cuts or a reloaded
+ * card would disagree with the card the live session showed.
+ *
+ * @param {readonly {timeMs:number, chunk:unknown}[]} timedChunks
+ * @returns {{timeMs:number, phase:'reasoning'|'output'}[]}
+ */
+function phaseCutsFromChunks(timedChunks) {
+  const cuts = []
+  for (const entry of Array.isArray(timedChunks) ? timedChunks : []) {
+    const cut = phaseCutOf(entry)
+    if (cut !== null) cuts.push(cut)
+  }
+  return cuts
+}
+
 /** Generated text of one chunk, or the empty string for non-generated chunks. */
 function deltaText(chunk) {
   if (!chunk || typeof chunk !== 'object') return ''
@@ -1746,7 +1928,7 @@ function toolCallChunk(record, argumentsDelta) {
   return chunk
 }
 
-;Object.assign(__exports, { MODEL_PHASE, isTokenDelta, classifyDelta, tokenEvidence, deltaText, usageFromChunk, expandAssistantStream, firstTokenTime, DECODE_ISSUE, decodeAssistantStream })
+;Object.assign(__exports, { MODEL_PHASE, isTokenDelta, classifyDelta, tokenEvidence, phaseCutOf, phaseCutsFromChunks, deltaText, usageFromChunk, expandAssistantStream, firstTokenTime, DECODE_ISSUE, decodeAssistantStream })
 			},
 			"src/core/token-allocation.js": function (__exports) {
 const { MetricQuality } = __req("src/core/metric-quality.js")
@@ -2124,21 +2306,32 @@ function calibrateTotally(samples, exactTokens) {
  */
 
 /**
- * @param {readonly {attemptId?:string, samples?:readonly object[], settledAtMs?:number|null}[]} attempts
+ * @param {readonly {
+ *   attemptId?:string, samples?:readonly object[], settledAtMs?:number|null,
+ *   phaseCuts?:readonly {timeMs:number, phase:string}[],
+ * }[]} attempts
  * @returns {{
  *   samples: object[],
+ *   cuts: object[],
  *   durationMs: number,
  *   segments: {
  *     attemptId:string|null, startMs:number, endMs:number, localEndMs:number,
- *     sampleCount:number,
+ *     sampleCount:number, phaseCutCount:number, preOriginCutCount:number,
  *   }[],
  * }}
+ *   `cuts` are the attempts' **non-magnitude phase boundaries** on the same two
+ *   clocks the samples carry. A cut that precedes its attempt's first generated
+ *   sample has no coordinate on this axis — an attempt's local zero is its first
+ *   delta, so a boundary before it lies outside the axis entirely — and is counted
+ *   in `segments[].preOriginCutCount` rather than clamped onto zero, which would
+ *   invent a pre-sample instant the evidence does not contain.
  */
 function compressAttempts(attempts) {
   const out = []
+  const cuts = []
   const segments = []
   let offsetMs = 0
-  if (!Array.isArray(attempts)) return { samples: out, durationMs: 0, segments }
+  if (!Array.isArray(attempts)) return { samples: out, cuts, durationMs: 0, segments }
 
   for (const attempt of attempts) {
     if (!attempt) continue
@@ -2197,6 +2390,34 @@ function compressAttempts(attempts) {
       last - first,
       settledAtMs === null ? 0 : Math.max(0, settledAtMs - first),
     )
+    /**
+     * The attempt's phase cuts, on the attempt-local and turn-compressed clocks.
+     * They are mapped by the **same** subtraction the samples use, so a cut and a
+     * sample that share an absolute instant share a coordinate, and a cut is never
+     * given a width of its own: the axis is model-attempt time, and a boundary is
+     * an instant on it rather than a stretch of it.
+     */
+    const attemptCuts = []
+    let preOriginCutCount = 0
+    for (const cut of Array.isArray(attempt.phaseCuts) ? attempt.phaseCuts : []) {
+      if (!cut || !Number.isFinite(cut.timeMs)) continue
+      const localMs = cut.timeMs - first
+      if (localMs < 0) {
+        preOriginCutCount += 1
+        continue
+      }
+      attemptCuts.push({
+        attemptId,
+        timeMs: cut.timeMs,
+        phase: cut.phase ?? null,
+        /** Attempt-local instant: the clock an episode is measured on. */
+        attemptTimeMs: localMs,
+        /** Turn-compressed coordinate: the clock the chart is drawn against. */
+        activeTimeMs: offsetMs + localMs,
+      })
+    }
+    attemptCuts.sort((a, b) => a.attemptTimeMs - b.attemptTimeMs)
+    cuts.push(...attemptCuts)
     segments.push({
       attemptId,
       startMs: offsetMs,
@@ -2204,6 +2425,10 @@ function compressAttempts(attempts) {
       /** The attempt's own width, so a caller need not re-derive it. */
       localEndMs: span,
       sampleCount: samples.length,
+      /** Boundaries that closed an episode inside this attempt's own width. */
+      phaseCutCount: attemptCuts.length,
+      /** Boundaries that precede the attempt's first delta and own no coordinate here. */
+      preOriginCutCount,
     })
     offsetMs += span
   }
@@ -2223,7 +2448,7 @@ function compressAttempts(attempts) {
    * the last delta would silently drop the decay that tail produces.
    */
 
-  return { samples: out, durationMs: offsetMs, segments }
+  return { samples: out, cuts, durationMs: offsetMs, segments }
 }
 
 ;Object.assign(__exports, { compressAttempts })
@@ -2635,8 +2860,17 @@ function reduceAttempt(attempt) {
    * terminal episode, so the final generated-delta → settlement tail is charged to
    * that episode — the MiMo definition — while tool and inter-attempt time is not
    * reachable from this call at all.
+   *
+   * The attempt's non-magnitude phase cuts travel with the samples (Phase 9.4.3):
+   * each one ends the episode in force at its own instant, so the silent stretch
+   * between a boundary and the incoming phase's first magnitude sample is charged
+   * to **neither** phase. Without them the outgoing phase's denominator absorbed
+   * that stretch and the printed rate disagreed with the curve the card draws.
    */
-  const durations = attributePhaseDurations(samples, { settledAtMs: attempt?.settledAtMs })
+  const durations = attributePhaseDurations(samples, {
+    settledAtMs: attempt?.settledAtMs,
+    phaseCuts: attempt?.phaseCuts,
+  })
   const usage = normalizeUsage(attempt?.usage)
   const calibration = calibrateAttemptSamples(samples, usage ?? undefined)
 
@@ -3457,6 +3691,7 @@ function curveSource(attempts, breakdown) {
  */
 
 const { MetricQuality } = __req("src/core/metric-quality.js")
+const { buildPhaseEpisodes } = __req("src/core/phase-duration.js")
 const { RateUnavailable, rateAvailability } = __req("src/core/rate-publication.js")
 
 const DEFAULT_SAMPLE_EVERY_MS = 100
@@ -3602,12 +3837,18 @@ function ordinalOf(sample, index) {
  *   toMs?:number,
  *   offsetMs?:number,
  *   sampleEndMs?:number,
+ *   cuts?:readonly {activeTimeMs:number, phase:string|null}[],
  * }} [options]
+ *   `cuts` are the attempt's **non-magnitude phase boundaries** on the same
+ *   coordinate the samples carry. Each one ends the episode in force at its own
+ *   instant and opens nothing, so the stretch that follows it belongs to no
+ *   episode and is drawn as a hole rather than as a decay of the phase that had
+ *   already stopped (`docs/METRICS_SPEC.md` §8.7).
  * @returns {{
  *   timeMs:number, localMs:number, tps:number|null,
  *   publishable:boolean, rateUnavailableReason:string|null,
  *   activePhase:string|null, attemptId:string|null,
- *   episodeStartMs:number|null, episodeElapsedMs:number,
+ *   episodeStartMs:number|null, episodeEndMs:number|null, episodeElapsedMs:number,
  *   episodeSampleCount:number, episodeMass:number,
  * }[]}
  */
@@ -3632,6 +3873,16 @@ function cumulativePhaseTpsSeries(samples, options = {}) {
      */
     .sort((a, b) => a.activeTimeMs - b.activeTimeMs || a.sampleOrder - b.sampleOrder)
 
+  /**
+   * The attempt's phase cuts on this call's own coordinate. A cut without a finite
+   * instant cannot bound anything and is dropped rather than given a default clock;
+   * a cut that declares no phase is likewise inert, because "which phase started"
+   * is not evidence it carries.
+   */
+  const cuts = (Array.isArray(options.cuts) ? options.cuts : [])
+    .filter(cut => cut && Number.isFinite(cut.activeTimeMs))
+    .map(cut => ({ timeMs: cut.activeTimeMs, phase: cut.phase ?? null }))
+
   const offsetMs = Number.isFinite(options.offsetMs) ? options.offsetMs : 0
   const sampleEnd = Math.max(0, filtered.length > 0 ? filtered[filtered.length - 1].activeTimeMs : 0)
   const toMs = Number.isFinite(options.toMs) ? Math.max(0, options.toMs)
@@ -3649,37 +3900,44 @@ function cumulativePhaseTpsSeries(samples, options = {}) {
   const bodyEndMs = Math.max(fromMs, Math.min(sampleEndMs, toMs))
 
   /**
-   * The episodes, as the maximal runs of consecutive same-phase samples. Only the
-   * first instant of each run is needed here: the per-instant walk below advances
-   * the episode cursors in one monotone pass.
+   * The episodes, from the shared rule (`src/core/phase-duration.js`): maximal runs
+   * of consecutive same-phase samples, each closed by the next episode's opening
+   * sample, by a **phase cut** that declares a different phase, or — for the
+   * terminal episode — by the attempt's own end instant. The summary that prints
+   * the phase rates reads the same function, so the chart and the numbers beside it
+   * cannot disagree about where a phase stopped.
    */
-  const episodes = []
-  for (let index = 0; index < filtered.length; index += 1) {
-    const phase = filtered[index].phase ?? null
-    const last = episodes[episodes.length - 1]
-    if (last === undefined || last.phase !== phase) {
-      episodes.push({ phase, startIndex: index, startMs: filtered[index].activeTimeMs })
-    }
-  }
+  const { episodes, episodeIndexBySample } = buildPhaseEpisodes(
+    filtered.map(sample => ({
+      timeMs: sample.activeTimeMs,
+      phase: sample.phase ?? null,
+      tokens: sample.tokens,
+      weight: sample.weight,
+    })),
+    { cuts, endMs: bodyEndMs },
+  )
 
   /**
    * **Each episode's own ladder**, from its own origin. A non-terminal episode is
-   * sampled up to the instant the next episode opens; the terminal one runs to the
-   * attempt's end instant. Instants are built by multiplication rather than by
-   * accumulating `+=`, so floating-point error over a ten-minute turn cannot put the
-   * last vertex off the grid it claims to be on.
+   * sampled up to the instant it ends — the next episode's opening sample, or the
+   * cut that closed it — and the terminal one runs to the attempt's end instant.
+   * The closing instant is emitted explicitly, so a cut that falls off the cadence
+   * (an episode ending at 120 ms on a 100 ms ladder) is still a vertex: it is the
+   * instant the phase stopped, and the curve's own endpoint guarantee is exactly
+   * that promise. Instants are built by multiplication rather than by accumulating
+   * `+=`, so floating-point error over a ten-minute turn cannot put the last vertex
+   * off the grid it claims to be on.
    */
   const instants = []
-  for (let index = 0; index < episodes.length; index += 1) {
-    const episode = episodes[index]
-    const next = episodes[index + 1]
-    const boundMs = next === undefined ? bodyEndMs : Math.min(next.startMs, bodyEndMs)
+  for (const episode of episodes) {
+    const boundMs = episode.boundMs === null ? bodyEndMs : Math.min(episode.boundMs, bodyEndMs)
     if (!(episode.startMs <= boundMs + 1e-9)) continue
     for (let step = 0; ; step += 1) {
       const at = episode.startMs + step * sampleEveryMs
       if (at > boundMs + 1e-9) break
       if (at >= fromMs - 1e-9 && at <= toMs + 1e-9) instants.push(at)
     }
+    if (episode.closedByCut && boundMs >= fromMs - 1e-9 && boundMs <= toMs + 1e-9) instants.push(boundMs)
   }
   instants.sort((a, b) => a - b)
   const vertices = []
@@ -3687,24 +3945,35 @@ function cumulativePhaseTpsSeries(samples, options = {}) {
     if (vertices.length === 0 || at > vertices[vertices.length - 1] + 1e-9) vertices.push(at)
   }
   /**
-   * The attempt's own end instant is unconditional: an attempt settling at 510 ms
-   * is sampled at its own `…, 500, 510`, so the instant its clock stopped is always
-   * drawn and the trace cannot end short of the axis it is drawn against.
+   * The attempt's own end instant is unconditional **while an episode is still in
+   * force there**: an attempt settling at 510 ms is sampled at its own
+   * `…, 500, 510`, so the instant its clock stopped is always drawn and the trace
+   * cannot end short of the axis it is drawn against. A cut-closed terminal episode
+   * is the one exception, and it is not a special case but the same rule: the
+   * attempt's end belongs to no episode, so there is no phase to label a vertex
+   * there with and nothing is emitted for it.
    */
-  if ((vertices.length === 0 || bodyEndMs > vertices[vertices.length - 1] + 1e-9) && bodyEndMs >= fromMs - 1e-9) {
+  const terminal = episodes.length > 0 ? episodes[episodes.length - 1] : null
+  const terminalBoundMs = terminal === null
+    ? null
+    : (terminal.boundMs === null ? bodyEndMs : Math.min(terminal.boundMs, bodyEndMs))
+  const endIsInForce = terminal === null || Math.abs(terminalBoundMs - bodyEndMs) <= 1e-9
+  if (endIsInForce
+    && (vertices.length === 0 || bodyEndMs > vertices[vertices.length - 1] + 1e-9)
+    && bodyEndMs >= fromMs - 1e-9) {
     vertices.push(bodyEndMs)
   }
 
   /**
    * The episode cursors. `newest` is the index of the newest sample at or before the
-   * current instant; the pair (`episodeStartIndex`, `episodePhase`) describes the
-   * maximal same-phase run that contains it, and `episodeMass` is that run's token
-   * mass so far. Both advance monotonically with `newest`, so the trace is linear in
-   * the sample count.
+   * current instant and `episodePos` the index of the episode in force there; the
+   * pair advance monotonically with the instant, so the trace is linear in the
+   * sample count. `episodeMass` and `episodeSampleCount` accumulate the episode in
+   * force and reset the moment a sample belonging to another one arrives.
    */
   let newest = -1
-  let episodeStartIndex = -1
-  let episodePhase = null
+  let episodePos = -1
+  let massCursor = -1
   let episodeMass = 0
   let episodeSampleCount = 0
 
@@ -3714,29 +3983,36 @@ function cumulativePhaseTpsSeries(samples, options = {}) {
       newest += 1
       const sample = filtered[newest]
       const weight = sample.tokens ?? sample.weight ?? 0
-      const phase = sample.phase ?? null
+      const owner = episodeIndexBySample[newest]
       /**
        * A sample whose phase differs from the episode in force **opens** a new
        * episode at its own instant: the previous phase's elapsed time and mass are
-       * not carried into it.
+       * not carried into it. So does a sample of the *same* phase when a cut has
+       * closed the previous episode in between — the boundary, not the phase name,
+       * is what ended that episode.
        */
-      if (episodeStartIndex === -1 || phase !== episodePhase) {
-        episodeStartIndex = newest
-        episodePhase = phase
-        episodeMass = weight
-        episodeSampleCount = 1
-      } else {
-        episodeMass += weight
-        episodeSampleCount += 1
+      if (owner !== massCursor) {
+        massCursor = owner
+        episodeMass = 0
+        episodeSampleCount = 0
       }
+      episodeMass += weight
+      episodeSampleCount += 1
     }
-    if (newest < 0) {
-      /**
-       * No sample at or before this instant. With per-episode ladders the first
-       * vertex *is* the first sample, so this is reachable only for a bounded call
-       * whose `fromMs` precedes all evidence — and then the honest answer is that
-       * no episode exists, not that the rate is zero.
-       */
+    while (episodePos + 1 < episodes.length && episodes[episodePos + 1].startMs <= localMs + 1e-9) {
+      episodePos += 1
+    }
+    const episode = episodePos >= 0 ? episodes[episodePos] : null
+    const boundMs = episode === null
+      ? null
+      : (episode.boundMs === null ? bodyEndMs : Math.min(episode.boundMs, bodyEndMs))
+    /**
+     * No episode is in force at this instant. With a per-episode ladder the only
+     * instants emitted outside every episode are a bounded call's `fromMs`… and
+     * none exist at all while no sample has arrived — and then the honest answer is
+     * that no episode exists, not that the rate is zero.
+     */
+    if (episode === null || localMs < episode.startMs - 1e-9 || localMs > boundMs + 1e-9) {
       result.push({
         timeMs: offsetMs + localMs,
         localMs,
@@ -3746,13 +4022,14 @@ function cumulativePhaseTpsSeries(samples, options = {}) {
         activePhase: null,
         attemptId: null,
         episodeStartMs: null,
+        episodeEndMs: null,
         episodeElapsedMs: 0,
         episodeSampleCount: 0,
         episodeMass: 0,
       })
       continue
     }
-    const startMs = filtered[episodeStartIndex].activeTimeMs
+    const startMs = episode.startMs
     const elapsed = localMs - startMs
     const gate = rateAvailability({ sampleCount: episodeSampleCount, elapsedMs: elapsed })
     result.push({
@@ -3767,9 +4044,21 @@ function cumulativePhaseTpsSeries(samples, options = {}) {
       tps: gate.publishable ? Math.round(episodeMass * 1000 / elapsed) : null,
       publishable: gate.publishable,
       rateUnavailableReason: gate.reason,
-      activePhase: filtered[newest].phase ?? null,
-      attemptId: filtered[newest].attemptId ?? null,
+      /**
+       * The label is the phase of the **episode in force**, which for a vertex
+       * shared with the next episode is that episode's phase — the same answer
+       * `filtered[newest].phase` gave before cuts existed, since an episode's own
+       * vertices and its newest sample carry one phase.
+       */
+      activePhase: episode.phase,
+      attemptId: filtered[newest]?.attemptId ?? null,
       episodeStartMs: startMs,
+      /**
+       * The instant this episode ends: the next episode's opening sample, the cut
+       * that closed it, or the attempt's own end. It is what tells two neighbouring
+       * stretches whether they meet on one vertex — see `visualRunsOf`.
+       */
+      episodeEndMs: boundMs,
       episodeElapsedMs: elapsed,
       episodeSampleCount,
       episodeMass,
@@ -3872,11 +4161,15 @@ function capSeriesPoints(series, maxPoints = MAX_SERIES_POINTS) {
  * @param {{
  *   sampleEveryMs?:number, attemptId?:string|null, calibrated?:boolean, maxPoints?:number,
  *   temporalAllocationMode?:string|null,
+ *   cuts?:readonly {attemptId?:string|null, attemptTimeMs:number, phase:string|null}[],
  * }} [options]
+ *   `cuts` are the turn's non-magnitude phase boundaries on the compressed clock
+ *   (`compressAttempts`); this attempt's own are selected by `attemptId` and
+ *   rebased onto its local clock exactly as its samples are.
  * @returns {{
  *   attemptId:string|null, startMs:number, endMs:number, localEndMs:number,
  *   durationMs:number, sampleCount:number, tokens:number, calibratedTokens:number|null,
- *   calibrated:boolean, samples:object[], points:object[], visualRuns:object[],
+ *   calibrated:boolean, samples:object[], cuts:object[], points:object[], visualRuns:object[],
  *   peakProvenance:object|null,
  * }}
  */
@@ -3912,6 +4205,23 @@ function attemptTrace(segment, samples, options = {}) {
      */
     .sort((a, b) => a.activeTimeMs - b.activeTimeMs || a.sampleOrder - b.sampleOrder)
 
+  /**
+   * The attempt's own phase cuts, rebased like its samples. A cut before the
+   * attempt's local zero has no coordinate on this axis and is dropped here as it
+   * was dropped by `compressAttempts`, which counts it on the segment.
+   */
+  const perAttemptCuts = (Array.isArray(options.cuts) ? options.cuts : [])
+    .filter(cut => cut && (cut.attemptId ?? null) === attemptId)
+    .map((cut) => {
+      const localMs = Number.isFinite(cut.attemptTimeMs)
+        ? cut.attemptTimeMs
+        : (Number.isFinite(cut.activeTimeMs) ? cut.activeTimeMs - startMs : Number.NaN)
+      return { localMs, phase: cut.phase ?? null }
+    })
+    .filter(cut => Number.isFinite(cut.localMs) && cut.localMs >= 0)
+    .sort((a, b) => a.localMs - b.localMs)
+    .map(cut => ({ timeMs: startMs + cut.localMs, localMs: cut.localMs, phase: cut.phase }))
+
   let tokens = 0
   let calibratedTokens = null
   for (const sample of perAttempt) {
@@ -3932,6 +4242,7 @@ function attemptTrace(segment, samples, options = {}) {
       calibratedTokens,
       calibrated: options.calibrated === true,
       samples: [],
+      cuts: [],
       points: [],
       visualRuns: [],
       peakProvenance: null,
@@ -3967,6 +4278,7 @@ function attemptTrace(segment, samples, options = {}) {
     fromMs: 0,
     toMs,
     sampleEndMs: bodyEndMs,
+    cuts: perAttemptCuts.map(cut => ({ activeTimeMs: cut.localMs, phase: cut.phase })),
   }), maxPoints)
 
   return {
@@ -3980,6 +4292,13 @@ function attemptTrace(segment, samples, options = {}) {
     calibratedTokens,
     calibrated: options.calibrated === true,
     samples: perAttempt,
+    /**
+     * The attempt's non-magnitude phase boundaries on its own clock, exactly as the
+     * estimator read them. Published rather than left implicit because they are
+     * evidence the card's geometry depends on: a gap the reader sees is one of
+     * these, and a diagnostic that cannot name it cannot explain the chart.
+     */
+    cuts: perAttemptCuts,
     points,
     visualRuns: visualRunsOf(points),
     /**
@@ -4014,10 +4333,33 @@ function attemptTrace(segment, samples, options = {}) {
  * seam rather than a hole: the two subpaths meet at one instant, one measured rate, one object.
  * The next vertex then carries the new phase.
  *
- * A long silence is **not** divided between the two tones, and no rule here could divide it: a
- * silence inside one phase is simply a stretch of zero-valued vertices that all carry that
- * phase, and it is drawn in that phase's tone at full width, because a stall inside a model call
- * is a throughput fact the chart exists to show (`docs/METRICS_SPEC.md` §8.2.1). An earlier
+ * ## A phase cut is not a seam (Phase 9.4.3)
+ *
+ * A **non-magnitude phase boundary** ends the outgoing episode and opens nothing
+ * (`src/core/phase-duration.js`): the incoming episode begins at its own first magnitude
+ * sample, which may be far later. The two stretches are then *not* adjacent — the outgoing
+ * one ends at the cut, the incoming one opens at its first sample — and sharing the seam
+ * would draw the incoming tone through the outgoing episode's last measurement, publishing
+ * an output rate at an instant where the output phase had produced nothing. The stretch
+ * boundary is therefore stated by the episodes themselves: a run opens on the previous run's
+ * closing vertex only when the outgoing episode ends exactly where the incoming one begins.
+ *
+ * The stretches are keyed by **episode**, not by label, for the same reason: a cut between
+ * two runs of one phase (`reasoning -> output boundary -> reasoning`) leaves two episodes with
+ * one label, and a label-keyed walk would merge them back across the hole.
+ *
+ * ## Losing the closing vertex does not reopen the hole
+ *
+ * The adjacency test reads `episodeEndMs` and `episodeStartMs`, which every vertex carries,
+ * rather than a marker on the cut vertex alone. A capped series (`capSeriesPoints`) may drop
+ * the cut instant itself, and the rule must still hold: the surviving last vertex of the
+ * outgoing episode still reports the instant that episode ended, and it still does not equal
+ * the incoming episode's origin.
+ *
+ * A long silence **is** divided between two tones when the episodes are adjacent: a silence
+ * inside one phase is a stretch of zero-valued vertices that all carry that phase, and it is
+ * drawn in that phase's tone at full width, because a stall inside a model call is a
+ * throughput fact the chart exists to show (`docs/METRICS_SPEC.md` §8.2.1). An earlier
  * revision described the cut as "the midpoint of the label change"; for a trace whose every
  * vertex is labelled, the midpoint of two adjacent indices is `floor((last + last + 1) / 2)`,
  * which is `last` — the same index. The formula was correct and its description was not, so the
@@ -4025,41 +4367,57 @@ function attemptTrace(segment, samples, options = {}) {
  *
  * The invariants this produces, and the ones the renderer and its tests rely on:
  *
- *     runs[i].endIndex === runs[i + 1].startIndex
- *     sum(runs[i].pointCount) === points.length + (runs.length - 1)
+ *     runs[i].endIndex === runs[i + 1].startIndex          for an adjacent pair (a seam)
+ *     runs[i].endIndex + 1 === runs[i + 1].startIndex      across a cut (a hole)
+ *     sum(runs[i].pointCount) === points.length + (seams)
  *
  * Statistics come first; colour segmentation is applied to them afterwards, and a vertex with
  * no sample at or before it (`activePhase === null`, which cannot occur for a non-empty trace)
  * opens a run of its own rather than being merged away.
  *
- * @param {readonly {activePhase?:string|null}[]} points
+ * @param {readonly {activePhase?:string|null, episodeStartMs?:number|null,
+ *   episodeEndMs?:number|null}[]} points
  * @returns {{phase:string|null, startIndex:number, endIndex:number, pointCount:number}[]}
  */
 function visualRunsOf(points) {
   const list = Array.isArray(points) ? points : []
   if (list.length === 0) return []
   const labelAt = index => list[index]?.activePhase ?? null
+  /**
+   * The stretch key. A trace built by `cumulativePhaseTpsSeries` publishes the
+   * episode in force on every vertex, and the episode — not the phase name — is
+   * what a stretch is a stretch of. A hand-built or pre-Phase-9.4.3 point list
+   * carries no episode identity, and for it the label remains the whole of the
+   * available structure, exactly as before.
+   */
+  const keyAt = index => {
+    const startMs = list[index]?.episodeStartMs
+    return Number.isFinite(startMs) ? `episode:${startMs}` : `phase:${String(labelAt(index))}`
+  }
 
-  /** Maximal stretches of one label, before any boundary is shared. */
+  /** Maximal stretches of one episode, before any boundary is shared. */
   const stretches = []
   let start = 0
   while (start < list.length) {
-    const phase = labelAt(start)
+    const key = keyAt(start)
     let last = start
-    while (last + 1 < list.length && labelAt(last + 1) === phase) last += 1
-    stretches.push({ phase, first: start, last })
+    while (last + 1 < list.length && keyAt(last + 1) === key) last += 1
+    stretches.push({ phase: labelAt(start), first: start, last })
     start = last + 1
   }
 
   const runs = []
-  for (const [index, stretch] of stretches.entries()) {
+  for (const stretch of stretches) {
     const previous = runs[runs.length - 1]
     /**
      * A run opens on the vertex the previous one closed on, so a tone change is a seam rather
      * than a blank horizontal gap. That vertex is shared, not duplicated: it is one index in
      * the trace's own grid, emitted by both paths and charged to both by the render budget.
+     * It is shared only when the two episodes really are adjacent — see `episodesMeet`.
      */
-    const from = previous === undefined ? stretch.first : previous.endIndex
+    const from = previous === undefined
+      ? stretch.first
+      : (episodesMeet(list[previous.endIndex], list[stretch.first]) ? previous.endIndex : stretch.first)
     /**
      * The shared vertex: the final vertex carrying this stretch's phase, which is also the
      * vertex in front of the next stretch. It is one index either way, which is what makes the
@@ -4069,6 +4427,26 @@ function visualRunsOf(points) {
     runs.push({ phase: stretch.phase, startIndex: from, endIndex: to, pointCount: to - from + 1 })
   }
   return runs
+}
+
+/**
+ * Whether two neighbouring stretches belong to episodes that meet on one instant.
+ *
+ * The outgoing episode ends exactly where the incoming one opens at an ordinary
+ * phase transition, and then the two runs share their boundary vertex. A phase cut
+ * separates them — the outgoing episode ends at the cut, the incoming one opens at
+ * its own first magnitude sample — and then they must not: the vertex the outgoing
+ * run closed on carries the outgoing episode's measurement and is not the incoming
+ * episode's opening anchor.
+ *
+ * A point list that predates this evidence carries neither instant, and keeps the
+ * long-standing shared-seam drawing rather than losing its tone change.
+ */
+function episodesMeet(previousLast, nextFirst) {
+  const endMs = previousLast?.episodeEndMs
+  const startMs = nextFirst?.episodeStartMs
+  if (!Number.isFinite(endMs) || !Number.isFinite(startMs)) return true
+  return Math.abs(endMs - startMs) <= 1e-9
 }
 
 /**
@@ -4083,6 +4461,7 @@ function visualRunsOf(points) {
  * @param {readonly object[]} segments `compressAttempts` segments, in turn order
  * @param {readonly object[]} samples `compressAttempts` samples
  * @param {{sampleEveryMs?:number, maxPoints?:number,
+ *   cuts?:readonly object[],
  *   calibratedAttemptIds?:ReadonlySet<string|null>,
  *   temporalAllocationModeByAttemptId?:Map<string|null, string|null>}} [options]
  * @returns {object[]} one trace per segment that produced evidence
@@ -4100,6 +4479,7 @@ function attemptTraces(segments, samples, options = {}) {
     const trace = attemptTrace(segment, samples, {
       sampleEveryMs: options.sampleEveryMs,
       maxPoints: options.maxPoints,
+      cuts: options.cuts,
       calibrated: calibrated instanceof Set ? calibrated.has(segment.attemptId ?? null) : false,
       temporalAllocationMode: allocationModes === null
         ? null
@@ -4797,7 +5177,7 @@ function turnKey(sessionId, turn) {
 
 const { LiveMeter, LivePhase } = __req("src/core/live-metrics.js")
 const { sampleFromChunk, heuristicTokenWeight } = __req("src/core/token-allocation.js")
-const { tokenEvidence } = __req("src/core/delta-accounting.js")
+const { MODEL_PHASE, tokenEvidence } = __req("src/core/delta-accounting.js")
 const { compressAttempts } = __req("src/core/time-axis.js")
 const { curveSource } = __req("src/core/curve-source.js")
 const { DEFAULT_SAMPLE_EVERY_MS: CURVE_SAMPLE_EVERY_MS, MAX_RENDER_POINTS_TOTAL, MAX_SERIES_POINTS, MIN_MAX_POINTS, allocateRunBudgets, attemptTraces, downsampleRun, peakTps, phaseRuns, visualRunsOf } = __req("src/core/curve.js")
@@ -4945,6 +5325,24 @@ class TurnTelemetryStore {
         turn: record.turn,
         step,
         samples: [],
+        /**
+         * The attempt's **non-magnitude phase boundaries**, in stream order.
+         *
+         * A name-bearing `tool-call-delta` whose `argumentsDelta` is still empty is
+         * DSH's first-token evidence and declares a phase, and it carries no
+         * magnitude: `sampleFromChunk` returns `null` for it, so it can never be a
+         * sample and must not be turned into one. Until Phase 9.4.3 the boundary
+         * existed only in the live meter, and the completed curve — which segments
+         * its episodes from `samples` alone — continued the outgoing phase until the
+         * new phase's first magnitude sample, drawing a decay across a stretch the
+         * live pill had already left.
+         *
+         * This array is that evidence, kept beside the samples rather than inside
+         * them: `{timeMs, phase}` per boundary, appended in arrival order, never
+         * deduplicated (a replayed frame is the same duplicate a replayed sample is)
+         * and never given a magnitude, a sample count or a `sampleOrder`.
+         */
+        phaseCuts: [],
         usage: null,
         /** No durable settlement observed yet — an open attempt is not "abandoned". */
         settlementKind: 'none',
@@ -4990,6 +5388,37 @@ class TurnTelemetryStore {
       return true
     }
     return false
+  }
+
+  /**
+   * Record a non-magnitude **phase cut** on the attempt it happened in.
+   *
+   * The one chunk shape that reaches here is a name-bearing `tool-call-delta`
+   * whose `argumentsDelta` is still empty: DSH's `isTokenDelta` accepts it while
+   * `classifyDelta` attributes no argument text to it, so it is the model's first
+   * token and not a TPS-shape sample. `tokenEvidence().phase` is the phase the
+   * boundary declares, and it is never `null` for a chunk the predicate accepts.
+   *
+   * Two things this method deliberately does **not** do:
+   *
+   *   - it does not turn the boundary into a sample. A `{tokens: 0}` entry would
+   *     enter the episode's numerator and its sample count, which is exactly the
+   *     fabricated evidence the contract forbids;
+   *   - it does not decide whether the cut closes anything. That question depends on
+   *     the phase in force at the instant, which is the episode walk's answer
+   *     (`src/core/phase-duration.js`), read identically by the completed curve and
+   *     by the summary so the two cannot disagree. A same-phase boundary is
+   *     therefore stored here and closes nothing.
+   *
+   * @returns {boolean} whether the cut was recorded
+   */
+  phaseCutObserved(attempt, { timeMs, phase }) {
+    if (attempt === null || attempt === undefined) return false
+    if (!Number.isFinite(timeMs)) return false
+    if (phase !== MODEL_PHASE.REASONING && phase !== MODEL_PHASE.OUTPUT) return false
+    if (!Array.isArray(attempt.phaseCuts)) attempt.phaseCuts = []
+    attempt.phaseCuts.push({ timeMs, phase })
+    return true
   }
 
   /**
@@ -5039,6 +5468,23 @@ class TurnTelemetryStore {
       const evidence = tokenEvidence(chunk)
       if (!evidence.countsAsToken) return null
       this.firstTokenObserved(record, { timeMs })
+      /**
+       * The boundary is also a **phase statement**, and Phase 9.4.3 records it as
+       * one. It is not converted into a sample — that would fabricate a magnitude
+       * and a sample count — and it is not discarded — that would leave the
+       * completed curve bridging an episode the live meter had already closed. It
+       * is stored as its own fact, on the attempt it belongs to, on the same clock
+       * the samples carry.
+       *
+       * The predicate is the one `phaseCutOf` states for a decoded chunk: token
+       * evidence the sample builder could not turn into a magnitude. The two forms
+       * exist because this plane delivers one chunk at a time while a durable
+       * settlement delivers a whole decoded stream, and both must publish the same
+       * cut or a reloaded card would disagree with the live one.
+       */
+      if (!evidence.contributesMagnitude) {
+        this.phaseCutObserved(attempt, { timeMs, phase: evidence.phase })
+      }
       this.live(record.sessionId).observeTokenBoundary({
         attemptId: attempt.attemptId ?? null,
         timeMs,
@@ -5197,6 +5643,9 @@ class TurnTelemetryStore {
 
     // The curve is built from the same compressed clock the live meter used, so
     // a point read off it means the same thing the pill showed at that instant.
+    // The attempt's non-magnitude phase cuts are mapped onto that clock with the
+    // samples, so a boundary the live half closed an episode at is a coordinate the
+    // completed half can close it at too (`src/core/time-axis.js`).
     const compressed = compressAttempts(source.attempts)
 
     /**
@@ -5223,6 +5672,7 @@ class TurnTelemetryStore {
       maxPoints: MAX_SERIES_POINTS,
       calibratedAttemptIds: calibratedIds,
       temporalAllocationModeByAttemptId: allocationModes,
+      cuts: compressed.cuts,
     })
 
     /**
@@ -5355,6 +5805,13 @@ class TurnTelemetryStore {
          * rather than left to be reassembled from the runs.
          */
         samples: trace.samples,
+        /**
+         * The attempt's non-magnitude phase boundaries, on the same clock as
+         * `samples`. A gap in the drawn runs is one of these and the reason for it;
+         * publishing the evidence is what lets a reader, a test or a diagnostic say
+         * which boundary produced the hole instead of inferring it from geometry.
+         */
+        cuts: trace.cuts,
         /** The attempt's budgeted phase-coloured subruns, in ascending time order. */
         runs,
       }
@@ -5927,7 +6384,7 @@ function firstTokenTimeOf(chunks) {
  * obtained from `src/core/token-allocation.js`.
  */
 
-const { classifyDelta, deltaText, firstTokenTime, isTokenDelta, usageFromChunk } = __req("src/core/delta-accounting.js")
+const { classifyDelta, deltaText, firstTokenTime, isTokenDelta, phaseCutsFromChunks, usageFromChunk } = __req("src/core/delta-accounting.js")
 const { MetricQuality, weakestQuality } = __req("src/core/metric-quality.js")
 const { heuristicTokenWeight, sampleFromChunk } = __req("src/core/token-allocation.js")
 const { decodeStreamRecords, SETTLEMENT_EVENT_TYPES } = __req("src/dsh/stream-decoder.js")
@@ -6434,6 +6891,19 @@ function attemptFromDecoded({
     surfaceCommitted,
     attemptOutcome,
     samples,
+    /**
+     * The attempt's **non-magnitude phase boundaries** (`phaseCutsFromChunks`),
+     * beside `samples` rather than inside them.
+     *
+     * A card restored from a durable settlement must carry the same phase cuts the
+     * live session recorded, or the reload path silently loses a boundary the live
+     * path published — the completed curve would then bridge an episode the live
+     * meter had closed, and the summary would charge the silent stretch to a phase
+     * that had already stopped (`docs/METRICS_SPEC.md` §8.7). The rule is the
+     * decoder's own `tokenEvidence` verdict, so a boundary the durable stream
+     * contains is recovered exactly, and one it does not contain is not invented.
+     */
+    phaseCuts: phaseCutsFromChunks(decoded.chunks),
     chunks: decoded.chunks,
     decoded,
     /**
@@ -6935,7 +7405,7 @@ function accumulateLive({
  * evidence.
  */
 
-const { isTokenDelta } = __req("src/core/delta-accounting.js")
+const { isTokenDelta, phaseCutsFromChunks } = __req("src/core/delta-accounting.js")
 const { heuristicTokenWeight, sampleFromChunk } = __req("src/core/token-allocation.js")
 const { applyRetryOutcomes, settlementClassification, toolResultOutcome, turnEndStatus } = __req("src/dsh/adapter.js")
 const { decodeStreamRecords } = __req("src/dsh/stream-decoder.js")
@@ -7021,6 +7491,14 @@ function reconstructFromDurable({ sessionId, turn, events = [], estimate }) {
           step: data.step ?? null,
           ...settlementClassification(event.type, data),
           samples: [],
+          /**
+           * The stream's non-magnitude phase boundaries, recovered from the same
+           * decode as the samples (`phaseCutsFromChunks`). They are evidence about
+           * *where a phase stopped*, not magnitude, so they travel beside the
+           * samples and never inside them — and they are what makes a reconstructed
+           * card close an episode the live meter closed.
+           */
+          phaseCuts: phaseCutsFromChunks(decoded.chunks),
           chunks: decoded.chunks,
           decoded,
           usage: durableUsage ?? inStreamUsage,

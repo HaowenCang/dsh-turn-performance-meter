@@ -773,26 +773,39 @@ test('the pill never coerces an absent stopwatch duration to zero', async () => 
     'the stopwatch slots pass the duration straight through')
 })
 
-/* ------------------------- Case I — a recorded, deliberately unrepaired class */
+/* ------------------------- Case I — a phase reversion after a boundary-only delta */
 
-test('CASE I (recorded limitation) — a phase reversion after a boundary-only delta still splits the live episode', () => {
+test('CASE I — a phase reversion after a boundary-only delta now splits the curve where the live meter splits', () => {
   /**
-   * §5 of the brief requires a boundary-only event to establish the phase identity
-   * immediately, and `tokenEvidence` falls back to `output` for a chunk it cannot
-   * attribute. If the attempt then emits deltas of the *previous* phase, the live
-   * meter has already moved on: it opens a fresh episode at the first such sample,
-   * while the completed curve — which segments by sample phase only and never sees
-   * the boundary — merges the two same-phase runs into one episode. The two halves
-   * then report different episodes for the same stretch of stream.
+   * ## What this case used to record, and why it changed
    *
-   * This belongs to the boundary's **phase fallback** (Phase 9.4), not to the
-   * episode clock (Phase 9.4.2), and it is pre-existing: baseline `6506bd0` split
-   * the episode as well, only from the boundary instant (120 ms) rather than from
-   * the next sample (150 ms). It is recorded rather than repaired, because
-   * repairing it would require the declared phase to be provisional until a sample
-   * confirms it, which §2 and §5 do not provide for. This test is therefore a
-   * **characterization**: it passes on both trees, and it exists so that a future
-   * change to the fallback class is deliberate.
+   * Baseline `6506bd0` and `68ba746` recorded a **divergence**. The live meter
+   * cleared its episode at the boundary and re-opened one at the first reasoning
+   * sample after it, while the completed curve segmented episodes from
+   * `attempt.samples` alone, never saw the boundary, and merged the two same-phase
+   * runs into one episode. Measured on `68ba746`, for the fixture below:
+   *
+   *     live    origin 150 ms, 3 samples, 300 tokens, tps 3000 at 250 ms
+   *     curve   origin   0 ms, 6 samples, 600 tokens, tps 2400 at 250 ms
+   *
+   *     live.tps !== curve.tps        the recorded divergence
+   *     curve.samples[0].timeMs + curve.episodeStartMs !== live origin
+   *
+   * Phase 9.4.3 stores the boundary as attempt-level phase-cut evidence
+   * (`attempt.phaseCuts`) and both halves read one episode rule
+   * (`src/core/phase-duration.js`), so the class is **resolved** rather than
+   * merely re-recorded: the outgoing episode closes at the cut, the incoming one
+   * opens at its first magnitude sample, and the two halves agree on the origin,
+   * the sample count, the mass and the rate. The assertions that used to be
+   * `notEqual` are now equalities, and both readings are stated here so the change
+   * is deliberate and reversible in review.
+   *
+   * What is **not** resolved, and is deliberately unchanged: the boundary's
+   * declared phase is still `tokenEvidence`'s fallback (`output` for a chunk whose
+   * argument text has not arrived). The curve now acts on that declaration exactly
+   * as the live meter acts on it — which is the invariant — but the declaration
+   * itself remains a fallback, and a magnitude sample that contradicts it is what
+   * re-opens the episode.
    */
   const SESSION = 's-942-i'
   const { store, record, attempt } = openTurn({ sessionId: SESSION, turnStartMs: 0 })
@@ -812,20 +825,47 @@ test('CASE I (recorded limitation) — a phase reversion after a boundary-only d
   assert.equal(live.episodeSampleCount, 3)
   assert.equal(live.tps, 3000, '300 tokens over the live episode\'s own 100 ms')
 
+  /** The boundary the curve now sees, on the attempt's own clock. */
+  assert.deepEqual(attempt.phaseCuts, [{ timeMs: 120, phase: 'output' }],
+    'the boundary is stored as a phase cut, never as a sample')
+  assert.equal(attempt.samples.length, 6, 'and all six reasoning deltas stay real samples')
+
   store.settleAttempt(attempt, settle(250))
   const settled = close(store, record, 250)
   const trace = settled.curve.attempts.find(entry => entry.attemptId === 'a1')
-  const vertex = trace.points.find(point => point.localMs === 250)
-  assert.equal(trace.samples.length, 6, 'the curve streams all six reasoning samples as one run')
-  assert.equal(vertex.episodeStartMs, 0, 'and merges them into a single episode from the first sample')
-  assert.equal(vertex.episodeElapsedMs, 250)
-  assert.equal(vertex.episodeSampleCount, 6)
-  assert.equal(vertex.episodeMass, 600)
-  assert.equal(vertex.tps, 2400, '600 tokens over the merged episode\'s 250 ms')
+  assert.deepEqual(trace.cuts, [{ timeMs: 120, localMs: 120, phase: 'output' }])
+  assert.deepEqual(trace.points.map(point => [point.localMs, point.episodeStartMs]), [
+    [0, 0], [100, 0], [120, 0], [150, 150], [250, 150],
+  ], 'two reasoning episodes, split at the cut and re-opened at the first sample after it')
 
-  /** The divergence, stated as one fact rather than left implicit. */
-  assert.notEqual(trace.samples[0].timeMs + vertex.episodeStartMs, liveOriginMs,
-    'the boundary\'s declared phase, not the boundary instant, is what still splits this class')
-  assert.notEqual(live.tps, vertex.tps,
-    'so the two halves publish different rates for this stretch until the phase fallback is revisited')
+  const closing = trace.points.find(point => point.localMs === 120)
+  assert.equal(closing.tps, 2500, 'the outgoing episode closes at the cut with its own 300 tokens over 120 ms')
+  assert.equal(closing.episodeEndMs, 120)
+  assert.equal(closing.episodeSampleCount, 3, 'the cut contributes no sample')
+
+  const vertex = trace.points.find(point => point.localMs === 250)
+  assert.equal(vertex.episodeStartMs, 150, 'and the incoming episode opens at its own first magnitude sample')
+  assert.equal(vertex.episodeElapsedMs, 100)
+  assert.equal(vertex.episodeSampleCount, 3)
+  assert.equal(vertex.episodeMass, 300)
+  assert.equal(vertex.tps, 3000, '600 tokens merged over 250 ms was 2400; the episode\'s own 300 over 100 ms is 3000')
+
+  /**
+   * The parity itself, stated as equalities: the curve's episode origin is the
+   * instant the live meter opened its episode at, on the turn clock.
+   */
+  assert.equal(trace.samples[0].timeMs + vertex.episodeStartMs, liveOriginMs)
+  assert.equal(vertex.tps, live.tps)
+  assert.equal(vertex.episodeSampleCount, live.episodeSampleCount)
+
+  /** The hole is real geometry: the two reasoning stretches no longer share a vertex. */
+  assert.deepEqual(trace.runs.map(run => [run.phase, run.startIndex, run.endIndex]), [
+    ['reasoning', 0, 2],
+    ['reasoning', 3, 4],
+  ], 'one tone, two stretches: the cut is a hole and not a seam')
+
+  /** The summary reads the same two episodes the chart draws. */
+  assert.equal(settled.reasoningMs, 220, '120 ms + 100 ms: the 120 -> 150 stretch belongs to no phase')
+  assert.ok(Math.abs(settled.reasoningTps - 600 / 0.220) < 1e-9,
+    '600 shape tokens over the two measurable reasoning episodes')
 })

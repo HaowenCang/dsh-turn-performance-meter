@@ -255,3 +255,125 @@ test('an attempt with no samples reports nothing measurable', () => {
   assert.equal(d.sampleCount, 0)
   assert.deepEqual(d.episodes, [])
 })
+
+/* ------------------------------------------- phase cuts (Phase 9.4.3, §8.7) */
+
+test('a phase cut ends the outgoing episode and charges the stretch to neither phase', () => {
+  /**
+   * The principal fixture: reasoning deltas at 0/50/100, a non-magnitude boundary
+   * at 120, and the first output magnitude sample at 300. Without the cut the
+   * reasoning denominator ran to 300 — the silent stretch included — and printed
+   * `300 / 300 ms`; with it the reasoning episode is its own 120 ms and the
+   * 120 -> 300 stretch belongs to no phase at all.
+   */
+  const samples = [
+    { timeMs: 0, phase: 'reasoning' },
+    { timeMs: 50, phase: 'reasoning' },
+    { timeMs: 100, phase: 'reasoning' },
+    { timeMs: 300, phase: 'output' },
+    { timeMs: 350, phase: 'output' },
+    { timeMs: 400, phase: 'output' },
+  ]
+  const cuts = [{ timeMs: 120, phase: 'output' }]
+
+  const without = attributePhaseDurations(samples, { settledAtMs: 400 })
+  assert.equal(without.reasoningMs, 300, 'the pre-9.4.3 reading: the gap is charged to reasoning')
+  assert.equal(without.outputMs, 100)
+
+  const withCuts = attributePhaseDurations(samples, { settledAtMs: 400, phaseCuts: cuts })
+  assert.equal(withCuts.reasoningMs, 120, 'the reasoning episode ends at the cut')
+  assert.equal(withCuts.outputMs, 100, 'and the output episode still ends at the settlement')
+  assert.deepEqual(
+    withCuts.episodes.map(episode => [episode.phase, episode.startMs, episode.endMs, episode.durationMs]),
+    [['reasoning', 0, 120, 120], ['output', 300, 400, 100]],
+    'nothing owns the 120 -> 300 stretch: it is neither an episode nor a hidden extension',
+  )
+  assert.equal(withCuts.reasoningEpisodeCount, 1)
+  assert.equal(withCuts.reasoningMeasuredEpisodes, 1)
+  assert.equal(withCuts.sampleCount, 6, 'the cut is not a sample and does not change the roster')
+})
+
+test('a same-phase cut is inert, and a cut before the first sample cannot end anything', () => {
+  const samples = [
+    { timeMs: 200, phase: 'output' },
+    { timeMs: 250, phase: 'output' },
+    { timeMs: 300, phase: 'output' },
+  ]
+  const samePhase = attributePhaseDurations(samples, {
+    settledAtMs: 300,
+    phaseCuts: [{ timeMs: 210, phase: 'output' }],
+  })
+  assert.equal(samePhase.outputMs, 100, 'a boundary declaring the phase in force closes nothing')
+  assert.equal(samePhase.outputEpisodeCount, 1)
+
+  const beforeStart = attributePhaseDurations(samples, {
+    settledAtMs: 300,
+    phaseCuts: [{ timeMs: 100, phase: 'reasoning' }],
+  })
+  assert.equal(beforeStart.outputMs, 100, 'a cut that precedes every sample owns no episode to close')
+  assert.equal(beforeStart.outputEpisodeCount, 1)
+
+  const malformed = attributePhaseDurations(samples, {
+    settledAtMs: 300,
+    phaseCuts: [
+      { timeMs: 210, phase: 'sideways' },
+      { timeMs: Number.NaN, phase: 'reasoning' },
+      null,
+    ],
+  })
+  assert.equal(malformed.outputMs, 100, 'a cut with no usable phase or instant bounds nothing')
+})
+
+test('a cut-closed terminal episode is not extended to the settlement', () => {
+  /**
+   * The attempt keeps settling long after the phase stopped, and the tail is
+   * model-attempt elapsed time only while an episode is still in force. A cut
+   * closes the terminal episode, so the tail after it is measurable for neither
+   * phase — reporting it as a reasoning denominator would be the very defect this
+   * closes, one attempt later.
+   */
+  const d = attributePhaseDurations([
+    { timeMs: 0, phase: 'reasoning' },
+    { timeMs: 50, phase: 'reasoning' },
+    { timeMs: 100, phase: 'reasoning' },
+  ], { settledAtMs: 900, phaseCuts: [{ timeMs: 150, phase: 'output' }] })
+
+  assert.equal(d.reasoningMs, 150, '0 -> 150 at the cut, not 0 -> 900 at the settlement')
+  assert.equal(d.outputMs, null, 'and the output phase has no episode at all')
+  assert.deepEqual(d.episodes.map(episode => [episode.phase, episode.endMs, episode.durationMs]),
+    [['reasoning', 150, 150]])
+
+  /**
+   * A cut at the very instant the episode opens cannot close it: the boundary is
+   * processed before the sample that opens the episode (a boundary frame precedes
+   * the delta that confirms its phase), so it finds no episode in force. The
+   * episode then still runs to the settlement: 900 - 100.
+   */
+  const unextended = attributePhaseDurations([
+    { timeMs: 100, phase: 'reasoning' },
+  ], { settledAtMs: 900, phaseCuts: [{ timeMs: 100, phase: 'reasoning' }] })
+  assert.equal(unextended.reasoningMs, 800, 'the same-phase cut at the opening instant closes nothing')
+  assert.equal(unextended.episodes[0].endMs, 900)
+})
+
+test('a cut between two episodes of one phase splits them into two measured episodes', () => {
+  /**
+   * The phase-reversion shape: reasoning, a boundary declaring output, then
+   * reasoning again. The live meter cleared its episode at the boundary and
+   * re-opened one at the next reasoning sample, so the summary must read two
+   * reasoning episodes — not one merged stretch across the boundary.
+   */
+  const samples = [0, 50, 100, 150, 200, 250].map(timeMs => ({ timeMs, phase: 'reasoning' }))
+  const d = attributePhaseDurations(samples, {
+    settledAtMs: 250,
+    phaseCuts: [{ timeMs: 120, phase: 'output' }],
+  })
+  assert.deepEqual(
+    d.episodes.map(episode => [episode.startMs, episode.endMs, episode.durationMs, episode.sampleCount]),
+    [[0, 120, 120, 3], [150, 250, 100, 3]],
+    'each episode owns the samples that were actually in it',
+  )
+  assert.equal(d.reasoningEpisodeCount, 2)
+  assert.equal(d.reasoningMeasuredEpisodes, 2)
+  assert.equal(d.reasoningMs, 220, '120 + 100: the 120 -> 150 stretch belongs to neither episode')
+})

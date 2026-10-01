@@ -39,6 +39,7 @@ import {
   deltaText,
   firstTokenTime,
   isTokenDelta,
+  phaseCutsFromChunks,
   usageFromChunk,
 } from '../core/delta-accounting.js'
 import { MetricQuality, weakestQuality } from '../core/metric-quality.js'
@@ -547,6 +548,19 @@ export function attemptFromDecoded({
     surfaceCommitted,
     attemptOutcome,
     samples,
+    /**
+     * The attempt's **non-magnitude phase boundaries** (`phaseCutsFromChunks`),
+     * beside `samples` rather than inside them.
+     *
+     * A card restored from a durable settlement must carry the same phase cuts the
+     * live session recorded, or the reload path silently loses a boundary the live
+     * path published — the completed curve would then bridge an episode the live
+     * meter had closed, and the summary would charge the silent stretch to a phase
+     * that had already stopped (`docs/METRICS_SPEC.md` §8.7). The rule is the
+     * decoder's own `tokenEvidence` verdict, so a boundary the durable stream
+     * contains is recovered exactly, and one it does not contain is not invented.
+     */
+    phaseCuts: phaseCutsFromChunks(decoded.chunks),
     chunks: decoded.chunks,
     decoded,
     /**

@@ -17,7 +17,7 @@
 
 import { LiveMeter, LivePhase } from '../core/live-metrics.js'
 import { sampleFromChunk, heuristicTokenWeight } from '../core/token-allocation.js'
-import { tokenEvidence } from '../core/delta-accounting.js'
+import { MODEL_PHASE, tokenEvidence } from '../core/delta-accounting.js'
 import { compressAttempts } from '../core/time-axis.js'
 import { curveSource } from '../core/curve-source.js'
 import {
@@ -176,6 +176,24 @@ export class TurnTelemetryStore {
         turn: record.turn,
         step,
         samples: [],
+        /**
+         * The attempt's **non-magnitude phase boundaries**, in stream order.
+         *
+         * A name-bearing `tool-call-delta` whose `argumentsDelta` is still empty is
+         * DSH's first-token evidence and declares a phase, and it carries no
+         * magnitude: `sampleFromChunk` returns `null` for it, so it can never be a
+         * sample and must not be turned into one. Until Phase 9.4.3 the boundary
+         * existed only in the live meter, and the completed curve — which segments
+         * its episodes from `samples` alone — continued the outgoing phase until the
+         * new phase's first magnitude sample, drawing a decay across a stretch the
+         * live pill had already left.
+         *
+         * This array is that evidence, kept beside the samples rather than inside
+         * them: `{timeMs, phase}` per boundary, appended in arrival order, never
+         * deduplicated (a replayed frame is the same duplicate a replayed sample is)
+         * and never given a magnitude, a sample count or a `sampleOrder`.
+         */
+        phaseCuts: [],
         usage: null,
         /** No durable settlement observed yet — an open attempt is not "abandoned". */
         settlementKind: 'none',
@@ -221,6 +239,37 @@ export class TurnTelemetryStore {
       return true
     }
     return false
+  }
+
+  /**
+   * Record a non-magnitude **phase cut** on the attempt it happened in.
+   *
+   * The one chunk shape that reaches here is a name-bearing `tool-call-delta`
+   * whose `argumentsDelta` is still empty: DSH's `isTokenDelta` accepts it while
+   * `classifyDelta` attributes no argument text to it, so it is the model's first
+   * token and not a TPS-shape sample. `tokenEvidence().phase` is the phase the
+   * boundary declares, and it is never `null` for a chunk the predicate accepts.
+   *
+   * Two things this method deliberately does **not** do:
+   *
+   *   - it does not turn the boundary into a sample. A `{tokens: 0}` entry would
+   *     enter the episode's numerator and its sample count, which is exactly the
+   *     fabricated evidence the contract forbids;
+   *   - it does not decide whether the cut closes anything. That question depends on
+   *     the phase in force at the instant, which is the episode walk's answer
+   *     (`src/core/phase-duration.js`), read identically by the completed curve and
+   *     by the summary so the two cannot disagree. A same-phase boundary is
+   *     therefore stored here and closes nothing.
+   *
+   * @returns {boolean} whether the cut was recorded
+   */
+  phaseCutObserved(attempt, { timeMs, phase }) {
+    if (attempt === null || attempt === undefined) return false
+    if (!Number.isFinite(timeMs)) return false
+    if (phase !== MODEL_PHASE.REASONING && phase !== MODEL_PHASE.OUTPUT) return false
+    if (!Array.isArray(attempt.phaseCuts)) attempt.phaseCuts = []
+    attempt.phaseCuts.push({ timeMs, phase })
+    return true
   }
 
   /**
@@ -270,6 +319,23 @@ export class TurnTelemetryStore {
       const evidence = tokenEvidence(chunk)
       if (!evidence.countsAsToken) return null
       this.firstTokenObserved(record, { timeMs })
+      /**
+       * The boundary is also a **phase statement**, and Phase 9.4.3 records it as
+       * one. It is not converted into a sample — that would fabricate a magnitude
+       * and a sample count — and it is not discarded — that would leave the
+       * completed curve bridging an episode the live meter had already closed. It
+       * is stored as its own fact, on the attempt it belongs to, on the same clock
+       * the samples carry.
+       *
+       * The predicate is the one `phaseCutOf` states for a decoded chunk: token
+       * evidence the sample builder could not turn into a magnitude. The two forms
+       * exist because this plane delivers one chunk at a time while a durable
+       * settlement delivers a whole decoded stream, and both must publish the same
+       * cut or a reloaded card would disagree with the live one.
+       */
+      if (!evidence.contributesMagnitude) {
+        this.phaseCutObserved(attempt, { timeMs, phase: evidence.phase })
+      }
       this.live(record.sessionId).observeTokenBoundary({
         attemptId: attempt.attemptId ?? null,
         timeMs,
@@ -428,6 +494,9 @@ export class TurnTelemetryStore {
 
     // The curve is built from the same compressed clock the live meter used, so
     // a point read off it means the same thing the pill showed at that instant.
+    // The attempt's non-magnitude phase cuts are mapped onto that clock with the
+    // samples, so a boundary the live half closed an episode at is a coordinate the
+    // completed half can close it at too (`src/core/time-axis.js`).
     const compressed = compressAttempts(source.attempts)
 
     /**
@@ -454,6 +523,7 @@ export class TurnTelemetryStore {
       maxPoints: MAX_SERIES_POINTS,
       calibratedAttemptIds: calibratedIds,
       temporalAllocationModeByAttemptId: allocationModes,
+      cuts: compressed.cuts,
     })
 
     /**
@@ -586,6 +656,13 @@ export class TurnTelemetryStore {
          * rather than left to be reassembled from the runs.
          */
         samples: trace.samples,
+        /**
+         * The attempt's non-magnitude phase boundaries, on the same clock as
+         * `samples`. A gap in the drawn runs is one of these and the reason for it;
+         * publishing the evidence is what lets a reader, a test or a diagnostic say
+         * which boundary produced the hole instead of inferring it from geometry.
+         */
+        cuts: trace.cuts,
         /** The attempt's budgeted phase-coloured subruns, in ascending time order. */
         runs,
       }

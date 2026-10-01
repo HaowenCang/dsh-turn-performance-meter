@@ -6,6 +6,8 @@ import {
   expandAssistantStream,
   firstTokenTime,
   isTokenDelta,
+  phaseCutOf,
+  phaseCutsFromChunks,
   usageFromChunk,
 } from '../src/core/delta-accounting.js'
 
@@ -109,4 +111,56 @@ test('firstTokenTime ignores leading empty and non-generated chunks', () => {
   ]), 1000)
   assert.equal(firstTokenTime([{ timeMs: 900, chunk: { type: 'finish', reason: 'stop' } }]), null)
   assert.equal(firstTokenTime([]), null)
+})
+
+test('a non-magnitude boundary is a phase cut and never a sample', () => {
+  /**
+   * The one chunk shape that is token evidence without being a TPS-shape sample.
+   * `phaseCutOf` states the predicate once, for the transient plane (one chunk at
+   * a time) and for a decoded durable stream (a whole attempt at a time).
+   */
+  assert.deepEqual(
+    phaseCutOf({ timeMs: 120, chunk: { type: 'tool-call-delta', index: 0, id: 'c', name: 'pwsh', argumentsDelta: '' } }),
+    { timeMs: 120, phase: 'output' },
+    'DSH accepts the name-bearing delta; it carries no argument text to attribute',
+  )
+  /** The same shape with a degraded, empty name is still name-bearing. */
+  assert.deepEqual(
+    phaseCutOf({ timeMs: 130, chunk: { type: 'tool-call-delta', index: 0, id: 'c', name: '', argumentsDelta: '' } }),
+    { timeMs: 130, phase: 'output' },
+  )
+  /** Everything else is either a magnitude sample or not token evidence at all. */
+  assert.equal(
+    phaseCutOf({ timeMs: 140, chunk: { type: 'tool-call-delta', index: 0, id: 'c', argumentsDelta: '{"a"' } }),
+    null,
+    'an argument-bearing delta is a sample, so it is not a cut',
+  )
+  assert.equal(phaseCutOf({ timeMs: 150, chunk: { type: 'reasoning-delta', text: 'think' } }), null)
+  assert.equal(phaseCutOf({ timeMs: 160, chunk: { type: 'tool-call-delta', index: 0, id: 'c', argumentsDelta: '' } }), null,
+    'no name and no arguments is not token evidence under any reading')
+  assert.equal(phaseCutOf({ timeMs: 170, chunk: { type: 'finish', reason: 'stop' } }), null)
+  assert.equal(phaseCutOf({ timeMs: Number.NaN, chunk: { type: 'tool-call-delta', name: 'pwsh', argumentsDelta: '' } }), null,
+    'a boundary with no instant owns no coordinate')
+  assert.equal(phaseCutOf(null), null)
+  assert.equal(phaseCutOf(undefined), null)
+})
+
+test('phaseCutsFromChunks keeps only the boundaries, in stream order', () => {
+  const chunks = [
+    { timeMs: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } },
+    { timeMs: 120, chunk: { type: 'tool-call-delta', index: 0, id: 'c', name: 'pwsh', argumentsDelta: '' } },
+    { timeMs: 300, chunk: { type: 'text-delta', index: 0, text: 'answer' } },
+    { timeMs: 310, chunk: { type: 'tool-call-delta', index: 0, id: 'c', name: 'pwsh', argumentsDelta: '{"a"' } },
+  ]
+  assert.deepEqual(phaseCutsFromChunks(chunks), [{ timeMs: 120, phase: 'output' }])
+  assert.deepEqual(phaseCutsFromChunks([]), [])
+  assert.deepEqual(phaseCutsFromChunks(null), [])
+  /**
+   * A cut is an instant on the stream's own clock, so the decoded member order is
+   * preserved rather than re-sorted: the caller's array is already the stream.
+   */
+  assert.deepEqual(phaseCutsFromChunks([
+    { timeMs: 500, chunk: { type: 'tool-call-delta', id: 'c', name: 'pwsh', argumentsDelta: '' } },
+    { timeMs: 400, chunk: { type: 'tool-call-delta', id: 'c', name: 'pwsh', argumentsDelta: '' } },
+  ]).map(cut => cut.timeMs), [500, 400])
 })

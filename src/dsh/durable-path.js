@@ -12,7 +12,7 @@
  * evidence.
  */
 
-import { isTokenDelta } from '../core/delta-accounting.js'
+import { isTokenDelta, phaseCutsFromChunks } from '../core/delta-accounting.js'
 import { heuristicTokenWeight, sampleFromChunk } from '../core/token-allocation.js'
 import { applyRetryOutcomes, settlementClassification, toolResultOutcome, turnEndStatus } from './adapter.js'
 import { decodeStreamRecords } from './stream-decoder.js'
@@ -98,6 +98,14 @@ export function reconstructFromDurable({ sessionId, turn, events = [], estimate 
           step: data.step ?? null,
           ...settlementClassification(event.type, data),
           samples: [],
+          /**
+           * The stream's non-magnitude phase boundaries, recovered from the same
+           * decode as the samples (`phaseCutsFromChunks`). They are evidence about
+           * *where a phase stopped*, not magnitude, so they travel beside the
+           * samples and never inside them — and they are what makes a reconstructed
+           * card close an episode the live meter closed.
+           */
+          phaseCuts: phaseCutsFromChunks(decoded.chunks),
           chunks: decoded.chunks,
           decoded,
           usage: durableUsage ?? inStreamUsage,

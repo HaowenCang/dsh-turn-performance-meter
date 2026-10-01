@@ -33,6 +33,8 @@ export {
   expandAssistantStream,
   firstTokenTime,
   isTokenDelta,
+  phaseCutOf,
+  phaseCutsFromChunks,
   tokenEvidence,
   usageFromChunk,
 } from './delta-accounting.js'
@@ -45,7 +47,7 @@ export {
   rateIsPublishable,
 } from './rate-publication.js'
 
-export { PHASE, attributePhaseDurations, phaseEpisodes } from './phase-duration.js'
+export { PHASE, attributePhaseDurations, buildPhaseEpisodes, phaseEpisodes } from './phase-duration.js'
 
 export {
   calibrateAttemptSamples,

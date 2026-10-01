@@ -275,6 +275,13 @@ export function chartView(attempts) {
   const compressed = compressAttempts(attempts)
   const traces = attemptTraces(compressed.segments, compressed.samples, {
     sampleEveryMs: DEFAULT_SAMPLE_EVERY_MS,
+    /**
+     * The attempt's non-magnitude phase cuts travel with the samples, exactly as
+     * the shipped curve receives them: a harness that omitted them would rebuild
+     * the pre-Phase-9.4.3 geometry and agree with itself while disagreeing with
+     * the product.
+     */
+    cuts: compressed.cuts,
   })
   const runsOf = phase => traces.flatMap(trace => (
     trace.visualRuns
@@ -375,6 +382,13 @@ export function metricTuple(view) {
       outputMs: attempt.outputMs,
       phases: phaseSegments(attempt),
       usage: attempt.usage,
+      /**
+       * The attempt's non-magnitude phase boundaries, on the attempt's own clock.
+       * The transient plane records one per boundary frame and the durable plane
+       * decodes the same member out of the compact stream, so a boundary either
+       * plane lost — or invented — is a cross-path divergence, not a detail.
+       */
+      cuts: (attempt.phaseCuts ?? []).map(cut => `${cut.timeMs}:${cut.phase}`).join(','),
     })),
     chart: chartView(attempts),
   }
@@ -458,6 +472,7 @@ export function compareTuples(a, b) {
   same('attempts.sampleCounts', a.attempts.map(x => x.sampleCount).join(','), b.attempts.map(x => x.sampleCount).join(','))
   same('attempts.settlements', a.attempts.map(x => x.settlement).join(','), b.attempts.map(x => x.settlement).join(','))
   same('attempts.usage', describeUsage(a.attempts), describeUsage(b.attempts))
+  same('attempts.phaseCuts', a.attempts.map(x => x.cuts).join('|'), b.attempts.map(x => x.cuts).join('|'))
   same('attempts.reasoningMs', a.attempts.map(x => x.reasoningMs).join(','), b.attempts.map(x => x.reasoningMs).join(','))
   same('attempts.outputMs', a.attempts.map(x => x.outputMs).join(','), b.attempts.map(x => x.outputMs).join(','))
 

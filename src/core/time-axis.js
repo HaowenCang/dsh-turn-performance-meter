@@ -51,21 +51,32 @@
  */
 
 /**
- * @param {readonly {attemptId?:string, samples?:readonly object[], settledAtMs?:number|null}[]} attempts
+ * @param {readonly {
+ *   attemptId?:string, samples?:readonly object[], settledAtMs?:number|null,
+ *   phaseCuts?:readonly {timeMs:number, phase:string}[],
+ * }[]} attempts
  * @returns {{
  *   samples: object[],
+ *   cuts: object[],
  *   durationMs: number,
  *   segments: {
  *     attemptId:string|null, startMs:number, endMs:number, localEndMs:number,
- *     sampleCount:number,
+ *     sampleCount:number, phaseCutCount:number, preOriginCutCount:number,
  *   }[],
  * }}
+ *   `cuts` are the attempts' **non-magnitude phase boundaries** on the same two
+ *   clocks the samples carry. A cut that precedes its attempt's first generated
+ *   sample has no coordinate on this axis — an attempt's local zero is its first
+ *   delta, so a boundary before it lies outside the axis entirely — and is counted
+ *   in `segments[].preOriginCutCount` rather than clamped onto zero, which would
+ *   invent a pre-sample instant the evidence does not contain.
  */
 export function compressAttempts(attempts) {
   const out = []
+  const cuts = []
   const segments = []
   let offsetMs = 0
-  if (!Array.isArray(attempts)) return { samples: out, durationMs: 0, segments }
+  if (!Array.isArray(attempts)) return { samples: out, cuts, durationMs: 0, segments }
 
   for (const attempt of attempts) {
     if (!attempt) continue
@@ -124,6 +135,34 @@ export function compressAttempts(attempts) {
       last - first,
       settledAtMs === null ? 0 : Math.max(0, settledAtMs - first),
     )
+    /**
+     * The attempt's phase cuts, on the attempt-local and turn-compressed clocks.
+     * They are mapped by the **same** subtraction the samples use, so a cut and a
+     * sample that share an absolute instant share a coordinate, and a cut is never
+     * given a width of its own: the axis is model-attempt time, and a boundary is
+     * an instant on it rather than a stretch of it.
+     */
+    const attemptCuts = []
+    let preOriginCutCount = 0
+    for (const cut of Array.isArray(attempt.phaseCuts) ? attempt.phaseCuts : []) {
+      if (!cut || !Number.isFinite(cut.timeMs)) continue
+      const localMs = cut.timeMs - first
+      if (localMs < 0) {
+        preOriginCutCount += 1
+        continue
+      }
+      attemptCuts.push({
+        attemptId,
+        timeMs: cut.timeMs,
+        phase: cut.phase ?? null,
+        /** Attempt-local instant: the clock an episode is measured on. */
+        attemptTimeMs: localMs,
+        /** Turn-compressed coordinate: the clock the chart is drawn against. */
+        activeTimeMs: offsetMs + localMs,
+      })
+    }
+    attemptCuts.sort((a, b) => a.attemptTimeMs - b.attemptTimeMs)
+    cuts.push(...attemptCuts)
     segments.push({
       attemptId,
       startMs: offsetMs,
@@ -131,6 +170,10 @@ export function compressAttempts(attempts) {
       /** The attempt's own width, so a caller need not re-derive it. */
       localEndMs: span,
       sampleCount: samples.length,
+      /** Boundaries that closed an episode inside this attempt's own width. */
+      phaseCutCount: attemptCuts.length,
+      /** Boundaries that precede the attempt's first delta and own no coordinate here. */
+      preOriginCutCount,
     })
     offsetMs += span
   }
@@ -150,5 +193,5 @@ export function compressAttempts(attempts) {
    * the last delta would silently drop the decay that tail produces.
    */
 
-  return { samples: out, durationMs: offsetMs, segments }
+  return { samples: out, cuts, durationMs: offsetMs, segments }
 }

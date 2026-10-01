@@ -707,17 +707,26 @@ test('the plugin keeps exactly one style tag id for both views', async () => {
 })
 
 test('a real fixture renders a collapsed row and a complete expanded card', () => {
+  /**
+   * The fixture's step 1 crosses its reasoning → tool-call boundary 38 ms before
+   * the first argument-bearing output delta. Phase 9.4.3 ends the reasoning
+   * episode at that boundary, so the reasoning denominator is 1 425 ms rather
+   * than the 1 463 ms it read while the post-boundary stretch was still charged to
+   * it: `74 / 1.425 s` is `≈51.9`, and `74 / 1.463 s` was `≈50.6`. The fixture
+   * bytes are unchanged; only the interval the rate is divided by is (see
+   * `docs/METRICS_SPEC.md` §8.7).
+   */
   const view = completedViewModel(durableSettledView(loadFixture('t4-reasoning-tool-deepseek-official')).settled)
 
   const row = texts(one(cardOfView(view, en, { collapsed: true }), 'dsh-tpm-card-progress')).join('')
-  assert.equal(row, 'completed · thinking ≈50.6 tokens/s · output 124 tokens/s · 151 tokens · TTFT 7.58 s')
+  assert.equal(row, 'completed · thinking ≈51.9 tokens/s · output 124 tokens/s · 151 tokens · TTFT 7.58 s')
 
   const tree = cardOfView(view, en)
   const cells = one(layer(tree, 'summary'), 'dsh-tpm-cells').children
   assert.equal(cells.length, 4)
   assert.deepEqual(cells.map(cell => texts(cell.children[0])[0]),
     ['Reasoning TPS', 'Output TPS', 'Generated Tokens', 'TTFT'])
-  assert.deepEqual(cells.map(cell => texts(cell.children[1].children[0])[0]), ['≈50.6', '124', '151', '7.58'])
+  assert.deepEqual(cells.map(cell => texts(cell.children[1].children[0])[0]), ['≈51.9', '124', '151', '7.58'])
   assert.deepEqual(cells.map(cell => texts(cell.children[1].children[1])[0]), ['tokens/s', 'tokens/s', 'tokens', 's'])
   assert.deepEqual(cells.map(cell => cell.props['data-approximate']), ['true', 'false', 'false', 'false'],
     'the reasoning rate is estimated, the exact split and total are not')

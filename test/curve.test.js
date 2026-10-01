@@ -294,6 +294,112 @@ test('a phase with no run is absent, never a flat zero line', () => {
   assert.deepEqual(phaseSpans([]), { reasoning: null, output: null })
 })
 
+/* ------------------------------------------- phase cuts (Phase 9.4.3, §8.7) */
+
+test('a phase cut closes the episode in force and opens no new one', () => {
+  /**
+   * The principal shape at the estimator level: three reasoning samples, a
+   * non-magnitude boundary at 120, and the first output sample at 300. The
+   * estimator is told about the cut on the same coordinate the samples carry, and
+   * it publishes the outgoing episode's closing vertex at the cut, nothing across
+   * the 120 -> 300 gap, and the incoming episode from its own first sample.
+   */
+  const samples = [
+    { activeTimeMs: 0, phase: 'reasoning', tokens: 100 },
+    { activeTimeMs: 50, phase: 'reasoning', tokens: 100 },
+    { activeTimeMs: 100, phase: 'reasoning', tokens: 100 },
+    { activeTimeMs: 300, phase: 'output', tokens: 100 },
+    { activeTimeMs: 350, phase: 'output', tokens: 100 },
+    { activeTimeMs: 400, phase: 'output', tokens: 100 },
+  ]
+  const withoutCut = cumulativePhaseTpsSeries(samples, { sampleEveryMs: 100, durationMs: 400 })
+  assert.deepEqual(withoutCut.map(point => [point.localMs, point.activePhase, point.tps]),
+    [[0, 'reasoning', null], [100, 'reasoning', 3000], [200, 'reasoning', 1500], [300, 'output', null], [400, 'output', 3000]],
+    'without the cut the reasoning episode decays across the gap and is published at 200')
+
+  const series = cumulativePhaseTpsSeries(samples, {
+    sampleEveryMs: 100,
+    durationMs: 400,
+    cuts: [{ activeTimeMs: 120, phase: 'output' }],
+  })
+  assert.deepEqual(series.map(point => [point.localMs, point.activePhase, point.tps]), [
+    [0, 'reasoning', null],
+    [100, 'reasoning', 3000],
+    [120, 'reasoning', 2500],
+    [300, 'output', null],
+    [400, 'output', 3000],
+  ], 'the cut is the outgoing episode\'s closing vertex, and the gap is sampled at nothing at all')
+  assert.deepEqual(series.map(point => point.episodeEndMs), [120, 120, 120, 400, 400])
+  assert.deepEqual(series.map(point => point.episodeSampleCount), [1, 3, 3, 1, 3])
+  assert.deepEqual(series.map(point => point.episodeMass), [100, 300, 300, 100, 300])
+
+  /** A cut is not a sample: no vertex is attributed to it and no count is raised by it. */
+  assert.equal(series.filter(point => Number.isFinite(point.tps)).length, 3)
+  assert.equal(series.some(point => point.tps === 0), false)
+
+  /**
+   * A same-phase cut is inert, and a cut after the attempt's own end cannot move a
+   * vertex the attempt does not own.
+   */
+  const inert = cumulativePhaseTpsSeries(samples, {
+    sampleEveryMs: 100,
+    durationMs: 400,
+    cuts: [{ activeTimeMs: 300, phase: 'reasoning' }, { activeTimeMs: 900, phase: 'output' }],
+  })
+  assert.deepEqual(inert.map(point => [point.localMs, point.tps]),
+    [[0, null], [100, 3000], [200, 1500], [300, null], [400, 3000]],
+    'a cut declaring the phase already in force, and one beyond the attempt, change nothing')
+})
+
+test('a cut leaves a hole between two stretches instead of a shared seam', () => {
+  const gapped = visualRunsOf([
+    { timeMs: 0, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 100, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 120, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 300, activePhase: 'output', episodeStartMs: 300, episodeEndMs: 400 },
+    { timeMs: 400, activePhase: 'output', episodeStartMs: 300, episodeEndMs: 400 },
+  ])
+  assert.deepEqual(gapped.map(run => [run.phase, run.startIndex, run.endIndex]), [
+    ['reasoning', 0, 2],
+    ['output', 3, 4],
+  ], 'the outgoing episode ends at the cut and the incoming one opens at its own first sample, '
+    + 'so the vertex the reasoning run closed on is not the output run\'s anchor')
+  assert.equal(gapped[0].endIndex + 1, gapped[1].startIndex,
+    'a hole, not a seam: no drawn segment crosses the gap')
+
+  /**
+   * Two stretches of **one** phase are split the same way, which is what a
+   * label-keyed walk cannot express: a phase reversion after a boundary is two
+   * episodes of one tone with a hole between them.
+   */
+  const reverted = visualRunsOf([
+    { timeMs: 0, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 100, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 120, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 150, activePhase: 'reasoning', episodeStartMs: 150, episodeEndMs: 250 },
+    { timeMs: 250, activePhase: 'reasoning', episodeStartMs: 150, episodeEndMs: 250 },
+  ])
+  assert.deepEqual(reverted.map(run => [run.phase, run.startIndex, run.endIndex]), [
+    ['reasoning', 0, 2],
+    ['reasoning', 3, 4],
+  ])
+
+  /**
+   * A capped series may drop the cut vertex itself; the rule reads the episodes,
+   * not a marker on that one vertex, so the hole survives the drop.
+   */
+  const capped = visualRunsOf([
+    { timeMs: 0, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 100, activePhase: 'reasoning', episodeStartMs: 0, episodeEndMs: 120 },
+    { timeMs: 300, activePhase: 'output', episodeStartMs: 300, episodeEndMs: 400 },
+    { timeMs: 400, activePhase: 'output', episodeStartMs: 300, episodeEndMs: 400 },
+  ])
+  assert.deepEqual(capped.map(run => [run.phase, run.startIndex, run.endIndex]), [
+    ['reasoning', 0, 1],
+    ['output', 2, 3],
+  ], 'the surviving reasoning vertex still reports its episode\'s end, which is not the output origin')
+})
+
 test('downsampling bounds the rendered point count and keeps extrema and endpoints', () => {
   const series = []
   for (let i = 0; i <= 5000; i += 1) series.push({ timeMs: i * 250, tps: 100 })

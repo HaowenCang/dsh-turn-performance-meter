@@ -24,6 +24,9 @@ test('compressed chart removes tool/inter-attempt wall gaps and next-call TTFT',
       endMs: 2000,
       localEndMs: 2000,
       sampleCount: 2,
+      /** No non-magnitude phase boundary was recorded in either attempt. */
+      phaseCutCount: 0,
+      preOriginCutCount: 0,
     },
     {
       attemptId: 'b',
@@ -31,8 +34,46 @@ test('compressed chart removes tool/inter-attempt wall gaps and next-call TTFT',
       endMs: 3000,
       localEndMs: 1000,
       sampleCount: 2,
+      phaseCutCount: 0,
+      preOriginCutCount: 0,
     },
   ])
+  assert.deepEqual(result.cuts, [], 'no boundary means no cut on the compressed clock')
+})
+
+test('a phase cut is mapped onto the same two clocks the samples carry', () => {
+  /**
+   * The non-magnitude boundary is an **instant**, not a width: it is placed by the
+   * same subtraction the samples use, so a cut and a sample that share an absolute
+   * instant share a coordinate, and the attempt's own axis is unchanged by it.
+   * A cut that precedes the attempt's first delta owns no coordinate at all — an
+   * attempt's local zero is its first generated sample — so it is counted rather
+   * than clamped onto zero, which would invent a pre-sample instant.
+   */
+  const result = compressAttempts([
+    {
+      attemptId: 'a',
+      samples: [{ timeMs: 1000 }, { timeMs: 2000 }],
+      settledAtMs: 3000,
+      phaseCuts: [{ timeMs: 900, phase: 'output' }, { timeMs: 1500, phase: 'output' }],
+    },
+    { attemptId: 'b', samples: [{ timeMs: 33_000 }, { timeMs: 34_000 }], phaseCuts: [] },
+  ])
+
+  assert.deepEqual(result.cuts, [{
+    attemptId: 'a',
+    timeMs: 1500,
+    phase: 'output',
+    attemptTimeMs: 500,
+    activeTimeMs: 500,
+  }], 'the in-attempt cut keeps its absolute instant, its local one and its axis coordinate')
+  assert.deepEqual(result.segments.map(segment => [
+    segment.startMs, segment.endMs, segment.localEndMs, segment.phaseCutCount, segment.preOriginCutCount,
+  ]), [
+    [0, 2000, 2000, 1, 1],
+    [2000, 3000, 1000, 0, 0],
+  ], 'the attempt width is untouched, and the pre-origin boundary is counted rather than placed')
+  assert.equal(result.durationMs, 3000)
 })
 
 test('every sample carries both clocks, and only the first attempt\'s coincide', () => {

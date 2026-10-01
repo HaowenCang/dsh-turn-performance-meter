@@ -113,6 +113,50 @@ export function tokenEvidence(chunk) {
   }
 }
 
+/**
+ * The **phase cut** one timed chunk records, or `null` when it records none.
+ *
+ * A cut is the evidence a non-magnitude boundary leaves behind: the chunk is
+ * DSH's first-token evidence (`countsAsToken`) and it carries no attributable
+ * magnitude (`contributesMagnitude === false`), which is exactly the name-bearing
+ * `tool-call-delta` whose `argumentsDelta` is still empty. It declares the phase
+ * the stream moved to and it is **not** a TPS-shape sample — turning it into one
+ * would fabricate a magnitude and a sample count, and dropping it would leave the
+ * completed curve bridging an episode the live meter had already closed
+ * (`docs/METRICS_SPEC.md` §8.7).
+ *
+ * @param {{timeMs:number, chunk:unknown}} timedChunk
+ * @returns {{timeMs:number, phase:'reasoning'|'output'}|null}
+ */
+export function phaseCutOf(timedChunk) {
+  if (!timedChunk || !Number.isFinite(timedChunk.timeMs)) return null
+  const evidence = tokenEvidence(timedChunk.chunk)
+  if (!evidence.countsAsToken || evidence.contributesMagnitude) return null
+  return { timeMs: timedChunk.timeMs, phase: evidence.phase }
+}
+
+/**
+ * Every phase cut a decoded chunk sequence carries, in stream order.
+ *
+ * This is the bulk form of {@link phaseCutOf}, and it is the rule the **durable**
+ * reconstruction uses: a compact settlement's decoded stream reaches the store
+ * either one `acceptChunk` at a time (`materializeReconstructedTurn`) or as a
+ * whole attempt record (`attemptFromDecoded`, which the live controller's reload
+ * branch restores directly), and both must publish the same cuts or a reloaded
+ * card would disagree with the card the live session showed.
+ *
+ * @param {readonly {timeMs:number, chunk:unknown}[]} timedChunks
+ * @returns {{timeMs:number, phase:'reasoning'|'output'}[]}
+ */
+export function phaseCutsFromChunks(timedChunks) {
+  const cuts = []
+  for (const entry of Array.isArray(timedChunks) ? timedChunks : []) {
+    const cut = phaseCutOf(entry)
+    if (cut !== null) cuts.push(cut)
+  }
+  return cuts
+}
+
 /** Generated text of one chunk, or the empty string for non-generated chunks. */
 export function deltaText(chunk) {
   if (!chunk || typeof chunk !== 'object') return ''
