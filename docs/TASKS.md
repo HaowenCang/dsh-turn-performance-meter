@@ -1581,3 +1581,63 @@ unchanged; 0 failing tests; sanitization PASS; `git diff --check` clean; and no 
 
 **Status: source-level closure complete; a separate narrowly scoped isolated-runtime smoke may be authorized after
 independent GitHub review. No release-readiness claim is made in this phase.**
+
+## Phase 9.4.4 — Durable settlement reconciliation of a partial live attempt (2026-10-01)
+
+**Starting state:** `HEAD == origin/main == eb45c26c5dd49d0d801914648bf3f2cad9e93d04`, divergence `0 0`, clean tree.
+
+**The residual defect.** Phase 9.4.3 closed the two *pure* planes: a non-magnitude phase cut is first-class attempt
+evidence, closes the outgoing completed TPS episode, opens no incoming magnitude episode, and is recovered identically
+by a purely durable reconstruction. The controller's **mixed** plane — a partial transient attempt already open, then
+the authoritative durable settlement with the complete decoded stream — was not covered. On `eb45c26` that path
+correlated the settlement to the existing attempt and then called `store.settleAttempt(attempt, …)` alone, ignoring
+`event.decoded`. The attempt kept only the transient tail the reload could still see: a boundary, and every delta before
+the reload, survived on the live card and vanished from the reloaded one.
+
+- [x] **Pre-fix reproduction through the real wire.** `SessionEventFeed` → live controller → `TurnTelemetryStore`, with
+      an actual `SessionEventChange{kind:'replace'}` rebaseline, not a hand-built partial store. Measured on `eb45c26`:
+      `samples 300/350/400`, `phaseCuts []`, `firstTokenMs 300`, `durationMs 100`, `reasoningMs 0`,
+      `reasoningTps null`, `peakTps 3000`, one `output` run `0..100`.
+- [x] **Semantics chosen explicitly: authoritative replacement of the stream-derived fields**, not union and not dedupe.
+      The planes share no per-delta identity, so a union double-counts an overlap and a `timeMs + text` dedupe would
+      reorder same-timestamp deltas. Replacement is idempotent, cannot duplicate a cut and cannot reorder a delta.
+- [x] **`TurnTelemetryStore.reconcileAttemptStream`** replaces `attempt.samples` (one `sampleFromChunk` pass over
+      `decoded.chunks`, stamped with the attempt's own `attemptId`) and `attempt.phaseCuts`
+      (`phaseCutsFromChunks` over the same decode), and upgrades `record.firstTokenMs` through the existing one-way
+      `firstTokenObserved`. Identity, lifecycle, usage and provenance are preserved.
+- [x] **Only a complete decode is authoritative.** An incomplete decode replaces nothing, leaves the transient
+      evidence standing, and is counted.
+- [x] **The live meter is not replayed.** The reconciliation edits the record only — no `acceptSample`, no
+      `observeTokenBoundary`, no `observeUsage` — so no phase is re-opened and no frozen TTFT is reset.
+- [x] **First-token semantics per §6.** Earlier authoritative evidence may improve `record.firstTokenMs`; later
+      evidence may not move it forward; TTFT stays `null` while `turnStartMs` is `null`.
+- [x] **Principal parity.** The mixed path equals the full-evidence reference and a `materializeReconstructedTurn` of
+      the same rows on samples, timestamps, phases, masses, cuts, TTFT fields, phase durations, rates, every curve
+      vertex, visual runs, trace cuts, peaks, generated-token accounting and quality axes — with reconstruction-local
+      identity projected out explicitly.
+- [x] **Cases A–H plus controls.** Overlap without a cut; a boundary in both planes (exactly one cut); a boundary only
+      the pre-reload generation saw; pre-reload magnitude restored into summary and curve; pure durable control; pure
+      live control; a retry chain where each settlement reconciles only its own attempt; an ambiguous correlation that
+      refuses and keeps the durable-restoration policy.
+- [x] **Mandatory window-rebaseline regression** using the real `replace` semantics: old generation cleared, new
+      generation adopts mid-turn, partial transient evidence collected, durable settlement reconciles the existing
+      attempt, `turn/end` publishes the full completed card.
+- [x] **Stale controller comment corrected.** The boundary-only delta path no longer claims the store "opened the
+      episode clock"; it now states frozen TTFT, updated phase identity, recorded phase cut, no magnitude episode.
+- [x] **Phase 9.4.3 invariants preserved.** `src/core` has a zero-file diff; `MIN_RATE_SAMPLES = 3` and
+      `MIN_RATE_ELAPSED_MS = 100` are untouched; no new clamp, smoothing, ceiling, dedupe key or tolerance. The
+      Phase 9.4.3 regression set re-runs green at 78/78.
+- [x] **Version frozen at `0.1.2`** with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No `npm publish`, no `npm version`, no
+      tag, no GitHub Release.
+- [x] **Deterministic/source-only.** No DSH profile was started, stopped, attached to, installed into, modified or
+      deleted; the retained isolated profile was not touched. No real-machine acceptance was run.
+- [x] **Ordinary commits only.** No `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`.
+
+Acceptance gate: `HEAD == origin/main`, divergence `0 0` and a clean tree after the push; the new suite red on
+`eb45c26` (13 of 15) and green on the fixed tree; the completed card from the mixed plane equal to the full-evidence
+card on every metric except reconstruction-local identity; exactly one cut when a boundary is visible in both planes;
+no duplicate sample or token on overlap; the two pure paths and the ambiguous-correlation policy unchanged; 0 failing
+tests; sanitization PASS; `git diff --check` clean; and no version, tag or publication change.
+
+**Status: source-level closure complete; a final narrowly scoped isolated-runtime smoke may be authorized only after
+independent GitHub audit of this reconciliation. No release-readiness claim is made in this phase.**

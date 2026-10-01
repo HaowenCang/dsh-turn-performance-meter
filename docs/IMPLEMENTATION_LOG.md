@@ -5492,3 +5492,192 @@ in `test/phase-duration.test.js`, two in `test/curve.test.js`, two in `test/delt
 comparison in `test/helpers/equivalence.js`. No test was skipped, todo'd or deleted, and no tolerance was widened.
 Ordinary commits only: no `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`. Nothing was
 published, versioned, tagged or released, and no real-machine run happened.
+
+## Phase 9.4.4 — Durable settlement reconciliation of a partial live attempt (2026-10-01)
+
+**Starting state:** `HEAD == origin/main == eb45c26c5dd49d0d801914648bf3f2cad9e93d04`, divergence `0 0`, clean tree.
+
+### 1. The residual defect
+
+Phase 9.4.3's repair is accepted in full: a non-magnitude phase cut is first-class attempt evidence, a different-phase
+cut closes the outgoing completed TPS episode, it opens no incoming magnitude episode, curve and summary both read
+`buildPhaseEpisodes`, same-phase cuts are inert, CASE I is resolved by the same evidence, and pure durable
+reconstruction recovers the cut. None of that was redesigned or reverted.
+
+What Phase 9.4.3 did not cover is the controller's **mixed** plane, which is the plane a reload actually produces:
+
+```text
+partial transient attempt already exists      the tail the replacement window could still see
++
+authoritative durable settlement with its
+full decoded compact stream                   the whole attempt
+```
+
+On `eb45c26` the controller correlated those two correctly and then settled the existing attempt with
+`store.settleAttempt(attempt, …)` alone. `event.decoded` was ignored. The attempt therefore kept only the transient tail
+it happened to have seen — so a boundary, and every delta before the reload, survived on the live card and vanished
+from the reloaded one. The two *pure* planes (transient-only, durable-only) were both correct; only the mixed one lost
+evidence, and it lost it silently, because the settlement itself was recorded exactly as it should be.
+
+### 2. Pre-fix reproduction, measured on `eb45c26`
+
+Driven through the real wire — `SessionEventFeed` → live controller → `TurnTelemetryStore` — not through a hand-built
+partial store. One attempt whose authoritative compact stream is `turn/start 0`, reasoning samples `0/50/100` (100 shape
+tokens each), a name-bearing `tool-call-delta` with an empty `argumentsDelta` at `120` declaring `output`, output
+samples `300/350/400`, settlement at `400`. Generation 1 holds the complete window; a real
+`SessionEventChange{kind:'replace'}` then installs a window holding only the post-cut transient tail; the durable
+`assistant/message` with the complete stream is appended; then `turn/end`:
+
+```text
+record            startMs null (adopted mid-turn), firstTokenMs 300
+attempt.samples   300/350/400            — 3 of 6; the whole reasoning half is gone
+attempt.phaseCuts []                     — the 120 boundary is gone
+curve             durationMs 100, segments [0..100]/3, cuts []
+summary           ttftMs null, reasoningMs 0, outputMs 100, reasoningTps null, outputTps 3000
+curve vertices    0 (output, origin 0, count 1, mass 100) / 100 (tps 3000, origin 0, count 3, mass 300)
+curve runs        output[0..1] 0–100     — one phase, one run, nothing before the reload exists
+peakTps           3000
+quality axes      { tokenTotal unavailable, phaseSplit unavailable, temporalShape estimated }
+```
+
+The same wire with the complete window in the replacement generation, and with no transient frame at all, both produced
+`6 samples`, `phaseCuts [{120, output}]`, `durationMs 400`, `reasoningMs 120`, `reasoningTps 2500`, `outputMs 100`,
+`outputTps 3000`, `peakTps 3000` and the two disjoint runs `reasoning[0..2] 0–120` / `output[3..4] 300–400`. The defect
+is therefore a disagreement between the mixed plane and both pure planes, not a new disagreement about the metrics.
+
+### 3. Chosen reconciliation semantics
+
+**Authoritative replacement of the stream-derived fields**, on the attempt a *proven* correlation names. Union and
+dedupe were both rejected, and the reason is structural rather than stylistic: the two planes share **no per-delta
+identity**. A transient row is `(attemptId, index, revision)` from the client fold; a decoded durable delta is
+`(recordIndex, memberIndex)` from the compact record array. Nothing joins them, so a union double-counts every
+overlapped delta, and a dedupe keyed on `timeMs + text` collapses two genuinely distinct same-timestamp deltas into one
+and reorders what survives. Replacement is idempotent, cannot duplicate a cut and cannot reorder a same-timestamp pair,
+because `decodeAssistantStream` already preserves logical stream order exactly — and it is also literally what the
+requirement states: after settlement the attempt's stream-derived evidence *is* one decode of the durable stream.
+
+`TurnTelemetryStore.reconcileAttemptStream(record, attempt, {decoded})` is that rule:
+
+| field | disposition | why |
+|---|---|---|
+| `attempt.samples` | replaced | rebuilt with `sampleFromChunk` over `decoded.chunks`, stamped with the attempt's own `attemptId` exactly as `acceptChunk` stamps them |
+| `attempt.phaseCuts` | replaced | rebuilt with `phaseCutsFromChunks` over the same decode, so the two planes cannot publish different cuts |
+| `record.firstTokenMs` | one-way upgrade | `firstTokenObserved`: earlier authoritative evidence may replace, later may not |
+| `attempt.attemptId` / `step` / `startedAtMs` | preserved | process-local identity belongs to the attempt the correlation proved — which is why the method mutates in place rather than returning a restored record |
+| settlement fields (`settlementKind`, `surfaceCommitted`, `attemptOutcome`, `settledAtMs`, `settlementSeq`, `settlementEventType`, `interrupted`) | preserved, written by `settleAttempt` afterwards | lifecycle is the settlement's, and it is unchanged from before this phase |
+| `usage` / `usageSource` | untouched | the settlement carrier and the in-stream `usage` chunk keep their existing precedence; neither is recomputed from the decode |
+| `chunks` / `decoded` / `streamQuality` / `issues` | not written | a record built by the live path does not represent them; this method completes that record rather than converting it into a durable-restored one. Nothing in the metric pipeline reads them (`src/core`, `src/client/completed`) |
+
+**Only a complete decode is authoritative.** `decoded.complete` is `false` as soon as one record fails to decode. Such a
+stream is missing evidence the transient plane may still hold, so replacing with it would *lose* data rather than
+complete it; the method refuses with `incomplete-decode`, the transient evidence stands, and the refusal is counted.
+
+### 4. Live-meter non-replay
+
+The durable reconciliation happens at settlement and edits only the record the completed card is built from. It calls
+`firstTokenObserved` and nothing else — no `acceptSample`, no `observeTokenBoundary`, no `observeUsage`. Replaying the
+historical stream through `LiveMeter` would re-open episodes the live pill had already left, reset the frozen TTFT stage
+and restart a settled attempt, i.e. it would rewrite presentation history to match evidence the card already has. The
+live observations already made remain historical presentation facts; the turn's own terminal boundary clears the meter
+in any case. `test/settlement-reconciliation.test.js` §5 asserts the live snapshot is unchanged by the reconciliation,
+which is the assertion that fails if this is ever re-routed through `acceptChunk`.
+
+### 5. Post-fix result, principal mixed path
+
+```text
+record            startMs null (no turn/start in the replacement window, none fabricated), firstTokenMs 0
+attempt.samples   0/50/100 reasoning + 300/350/400 output, in stream order, one decode of the durable stream
+attempt.phaseCuts [{timeMs 120, phase output}]      — exactly one, restored from the durable plane
+attempt identity  a1                                — the transient attempt the correlation proved
+curve             durationMs 400, segments [0..400]/6, cuts [{120, local 120, output}]
+summary           ttftMs null, reasoningMs 120, outputMs 100, reasoningTps 2500, outputTps 3000
+curve vertices    0 (reasoning, origin 0, count 1, mass 100) / 100 (tps 3000) / 120 (tps 2500)
+                  / 300 (output, origin 300, count 1, mass 100) / 400 (tps 3000)
+curve runs        reasoning[0..2] 0–120, output[3..4] 300–400   — no vertex is drawn across the gap
+peakTps           3000
+```
+
+TTFT follows §6 of the phase brief exactly: `firstTokenMs` becomes `0` from the stream's own first-token boundary,
+while `ttftMs` stays `null` because `turnStartMs` is `null` — no start is fabricated, and no TTFT is manufactured from a
+boundary whose turn beginning nobody observed. With the durable `turn/start` present in the same window the mixed path
+publishes `ttftMs 0`, identical to the full-evidence path.
+
+### 6. Parity
+
+`test/settlement-reconciliation.test.js` compares the mixed path against the full-evidence reference path through one
+`paritySurface()` projection covering: samples and their timestamps, magnitudes and phases; `phaseCuts`; the TTFT fact
+fields (`turnStartMs`, `firstTokenMs`, `ttftMs`); `reasoningMs` / `outputMs` / `reasoningTps` / `outputTps`; every curve
+vertex (instant, phase, measured tps, episode origin, elapsed, sample count and mass); `visualRuns`; the trace's own
+`cuts`; `peakTps` and both per-phase peaks; generated-token accounting and the calibration fields; and the quality
+axes. Attempt identity is projected out explicitly, because it is the one thing the two planes cannot agree on by
+construction — a transient attempt is keyed by the client fold's process-local `attemptId`, a restored one by its
+settlement sequence. The same projection is compared against a `materializeReconstructedTurn` of the same durable rows,
+so the mixed, live and durable planes are pinned to one another.
+
+### 7. Cases
+
+| case | scenario | result |
+|---|---|---|
+| A | transient tail overlaps the durable stream, no cut | 6 samples, no duplicate timestamp, one continuous reasoning episode (`reasoningMs 300`), runs share the documented transition seam |
+| B | the boundary is in **both** planes | exactly one cut, on the attempt and on the trace; the boundary still contributes no sample |
+| C | the boundary existed only before the reload | restored by the settlement; `reasoningMs 120`, `outputMs 100`, `reasoningTps 2500` |
+| D | the reasoning magnitude existed only before the reload | restored; the curve is drawn from 6 samples / 600 shape tokens, `peakTps 3000` |
+| E | pure durable control (no transient rows) | unchanged: `settlement:2`, 6 samples, 1 cut, `startMs null`, `firstTokenMs 0` |
+| F | pure live control (no durable stream) | unchanged: `settlementKind none`, 6 samples, 1 cut, `ttftMs 0`, absent terminal duration (`outputMs 0`, `outputTps null`) — the `68ba746` absent-duration semantics |
+| G | retry chain: two attempts in one `(turn, step)` | each settlement reconciles only the attempt it is correlated to; neither is merged into the other; a second reconciliation does not rewrite the first |
+| H | ambiguous correlation | the correlation refuses; the durable row is restored as its own `durable:<seq>` attempt under the existing identity policy; neither candidate is written |
+| §9 | the actual `replace` rebaseline | old generation cleared (a new record object, the old one left at 6 samples), new generation adopts mid-turn with 3 tail samples and no cut, the settlement reconciles the attempt it proves, `turn/end` publishes the full card |
+| §5 | live meter | the live snapshot is byte-for-byte unchanged by the reconciliation |
+| §6 | one-way first token | a later durable first token does not move a recorded one forward; the stream-derived evidence is still replaced |
+| — | incomplete decode | a stream that lost a record replaces nothing; the settlement itself is still recorded, and the refusal is counted |
+
+`test/settlement-reconciliation.test.js` was written and executed **before** any source change, and its final version
+was re-run against a clean worktree at `eb45c26` after the change was committed: **13 of its 15 cases fail there**. The
+two that pass on both trees are labelled controls — CASE E (the pure durable path, which Phase 9.4.3 already made
+correct) and CASE F (the pure live path, which this phase does not touch).
+
+### 8. Diagnostics
+
+`diagnostics(sessionId).counters` gains two counters, incremented where the decision is made:
+`settlementStreamsReconciled` (a settlement whose decoded stream was proved to belong to an attempt this client already
+held, and therefore replaced that attempt's stream-derived evidence) and `settlementStreamsUncorrelated` (a settlement
+that carried a decoded stream and could not be joined to one attempt — an unprovable correlation, or a decode that lost
+a record). A regression that stopped correlating raises the second rather than quietly dropping deltas.
+
+### 9. Deliberately not changed
+
+- **Phase 9.4.3 semantics are untouched.** `phaseCutsFromChunks`, `phaseCutOf`, `phaseCutObserved`, the episode walk in
+  `phase-duration.js`, the curve's cut mapping and the durable reconstruction are all unmodified; `src/core` has a
+  **zero-file diff** in this phase, so `MIN_RATE_SAMPLES = 3` and `MIN_RATE_ELAPSED_MS = 100` are exactly what they
+  were.
+- **No new clamp, smoothing, ceiling, dedupe key or tolerance.** No zero-token sample, no fabricated mass, no
+  sample-count increment, no timestamp special case. The reconciliation adds evidence that exists and invents none.
+- **The durable-restoration branch is unchanged** apart from one counter: an unprovable correlation still restores the
+  settlement as its own attempt rather than guessing.
+- **The absent-duration rendering from `68ba746` is preserved** (CASE F pins it).
+- **The stale controller comment is corrected.** The comment at the boundary-only delta path claimed the store had
+  "already frozen TTFT and opened the episode clock". Phase 9.4.2 made that false; it now says the store has frozen the
+  turn's TTFT, updated the phase identity and recorded the phase cut, and has opened no magnitude episode.
+- **No version, tag or publication change.** `package.json` stays `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`;
+  no `npm publish`, no `npm version`, no tag, no GitHub Release.
+- **No real-machine runtime.** No DSH profile was started, stopped, attached to, modified or deleted; the retained
+  isolated profile was not touched.
+
+### 10. Gates
+
+```text
+npm run build:client             client.js rebuilt (595642 bytes, mirrored to lib/client.js)
+npm run verify                   structure OK (14 required files, 16 core modules, 72 test files, client bundle fresh,
+                                 lib/client.js mirrored); tests 853 · pass 853 · fail 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
+git diff --check                 clean
+client.js == lib/client.js       byte-identical (sha256 530C38E81D798D6DC2A7D6DCD6A38D4501C39C304F12DD03AE637A692DB61654)
+```
+
+Test totals rose from 838 to 853 — **15 new deterministic tests**, all in `test/settlement-reconciliation.test.js`. No
+test was skipped, todo'd or deleted, and no tolerance was widened. The Phase 9.4.3 regression set
+(`test/phase-cut-parity.test.js`, `test/boundary-episode-origin.test.js`, `test/phase94-regressions.test.js`,
+`test/phase-duration.test.js`, `test/curve-rate-publication.test.js`, `test/ttft-boundary.test.js`,
+`test/curve-episode-opening.test.js`, `test/dsh-017-materialize-reconstruction.test.js`) re-runs green at 78/78. Ordinary
+commits only: no `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`. Nothing was published,
+versioned, tagged or released, and no real-machine run happened.

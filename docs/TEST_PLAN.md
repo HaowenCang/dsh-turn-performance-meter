@@ -1030,3 +1030,89 @@ at `68ba746`, the new suite alone is **6 fail / 2 pass** — the two passes are 
 (`node scripts/verify-sanitization.mjs`) and passes. `git diff --check` is clean. No test was skipped, todo'd or
 deleted, and no tolerance was widened, to reach that state. No runtime acceptance was performed: Phase 9.4.3 is
 deterministic/source-only, and no DSH profile was started, stopped, attached to, installed into, modified or deleted.
+
+## 15. Phase 9.4.4 — durable settlement reconciliation of a partial live attempt
+
+### 15.1 The mixed plane, and the pre-fix measurement
+
+Phase 9.4.3 covered the two **pure** planes. A reload produces the mixed one: a partial transient attempt is already
+open, and the authoritative durable settlement then arrives carrying the attempt's complete decoded stream. On
+`eb45c26` the controller correlated the two correctly and then called `store.settleAttempt(attempt, …)` alone, ignoring
+`event.decoded`, so the attempt kept only the tail its replacement window could still see.
+
+Every case in `test/settlement-reconciliation.test.js` is driven through the real wire —
+`SessionEventFeed` → live controller → `TurnTelemetryStore` — with a real
+`SessionEventChange{kind:'replace'}` rebaseline rather than a hand-built partial store. The principal fixture:
+
+```text
+turn start  t = 0
+reasoning sample 0 / 50 / 100        mass 100 each
+name-bearing empty-args tool-call boundary  t = 120   declares output, contributesMagnitude false
+output sample 300 / 350 / 400        mass 100 each
+settlement  t = 400                  assistant/message carrying the whole compact stream
+
+generation 1  the complete window
+replace       only the post-cut transient tail: output 300 / 350 / 400
+append        the durable assistant/message with the complete stream
+append        turn/end
+```
+
+| quantity | `eb45c26` | fixed |
+| --- | --- | --- |
+| `attempt.samples` | `300/350/400` (3 of 6) | `0/50/100` reasoning + `300/350/400` output (6) |
+| `attempt.phaseCuts` | `[]` | `[{timeMs 120, phase output}]` |
+| `record.firstTokenMs` | `300` | `0` |
+| `curve.durationMs` | `100` | `400` |
+| `curve.segments` | `[0..100]/3` | `[0..400]/6` |
+| `curve.cuts` | `[]` | `[{120, local 120, output}]` |
+| `reasoningMs` / `reasoningTps` | `0` / `null` | `120` / `2500` |
+| `outputMs` / `outputTps` | `100` / `3000` | `100` / `3000` |
+| curve vertices (`localMs = tps`) | `0 = null`, `100 = 3000` | `0 = null`, `100 = 3000`, `120 = 2500`, `300 = null`, `400 = 3000` |
+| visual runs | `output[0..1] 0–100` | `reasoning[0..2] 0–120`, `output[3..4] 300–400` |
+| `peakTps` | `3000` | `3000` |
+| `ttftMs` | `null` (no `turn/start` in the replacement window, and none fabricated) | `null`; `0` when the durable `turn/start` is in the window |
+
+The full-evidence control — the same wire, the same settlement and the same `turn/end`, with the complete stream in the
+replacement generation — reads `6 samples`, `phaseCuts [{120, output}]`, `durationMs 400`, `reasoningMs 120`,
+`reasoningTps 2500`, `outputMs 100`, `outputTps 3000`, `peakTps 3000` and the two disjoint runs; the pure-durable
+`materializeReconstructedTurn` of the same rows reads the same. `paritySurface()` compares all of it, projecting out
+reconstruction-local attempt identity explicitly.
+
+`test/settlement-reconciliation.test.js` was written and executed **before** any source change and re-run against a
+clean worktree at `eb45c26` afterwards: **13 of its 15 cases fail there**. The two that pass on both trees are labelled
+controls — CASE E (pure durable, already correct after Phase 9.4.3) and CASE F (pure live, untouched by this phase).
+
+### 15.2 The matrix
+
+| case | scenario | proves | `eb45c26` | fixed |
+| --- | --- | --- | --- | --- |
+| PRINCIPAL | reload after the cut, tail-only replacement window, full durable settlement | the settlement completes the correlated attempt; the whole surface equals the full-evidence reference | FAIL | PASS |
+| PRINCIPAL+start | the same with a durable `turn/start` in the window | `ttftMs 0`, identical to the full-evidence path | FAIL | PASS |
+| PRINCIPAL/durable | the mixed trace against `materializeReconstructedTurn` | the mixed and purely durable planes agree | FAIL | PASS |
+| A | the transient tail overlaps the durable stream, no cut | no duplicate sample or token; one continuous reasoning episode (`reasoningMs 300`); the documented shared transition seam | FAIL | PASS |
+| B | the boundary is visible in both planes | exactly one cut on the attempt and on the trace; the boundary contributes no sample | FAIL | PASS |
+| C | the boundary existed only before the reload | the cut is restored; `reasoningMs 120`, `outputMs 100`, `reasoningTps 2500` | FAIL | PASS |
+| D | pre-reload magnitude restored | the curve is drawn from 6 samples / 600 shape tokens; `peakTps 3000`; axes unchanged | FAIL | PASS |
+| E | pure durable control | unchanged: `settlement:2`, 6 samples, 1 cut, `startMs null`, `firstTokenMs 0`, `ttftMs null` | PASS | PASS |
+| F | pure live control | unchanged: `settlementKind none`, 6 samples, 1 cut, `ttftMs 0`, absent terminal duration (`outputMs 0`, `outputTps null`) | PASS | PASS |
+| G | retry chain: two attempts in one `(turn, step)` | each settlement reconciles only its own attempt; no merge; a second reconciliation does not rewrite the first | FAIL | PASS |
+| H | ambiguous correlation, and one settlement that is provable | the correlation refuses; the durable row is restored as its own `durable:6` attempt; neither candidate is written | FAIL | PASS |
+| §9 | the actual `replace` rebaseline | old generation cleared (a new record object, the old one left at 6 samples), new generation adopts mid-turn with 3 tail samples and no cut, the settlement reconciles, `turn/end` publishes the full card | FAIL | PASS |
+| §5 | the live meter | the live snapshot is byte-for-byte unchanged by the reconciliation | FAIL | PASS |
+| §6 | one-way first token | a later durable first token does not move a recorded one forward, while the stream-derived evidence is still replaced; `ttftMs` stays `null` | FAIL | PASS |
+| — | incomplete decode | a stream that lost a record replaces nothing, the settlement is still recorded, the refusal is counted | FAIL | PASS |
+
+### 15.3 Diagnostics
+
+`diagnostics(sessionId).counters` gains `settlementStreamsReconciled` and `settlementStreamsUncorrelated`, incremented
+where the decision is made. CASE H asserts `1 / 1` (one settlement proved its attempt by identity, one could not be
+proven and took the durable-restoration path); the incomplete-decode case asserts `0 / 1`.
+
+### 15.4 Totals
+
+**853 tests, 853 pass, 0 fail, 0 skipped, 0 todo** (838 before this phase) — **15 new deterministic tests**, all in
+`test/settlement-reconciliation.test.js`. No test was skipped, todo'd or deleted, and no tolerance was widened. The
+Phase 9.4.3 regression set re-runs green at 78/78. `npm run verify` runs `scripts/verify-structure.mjs` and then the
+Node test runner over `test/*.test.js`; sanitization remains a separate gate (`node scripts/verify-sanitization.mjs`)
+and passes; `git diff --check` is clean. No runtime acceptance was performed: Phase 9.4.4 is deterministic/source-only,
+and no DSH profile was started, stopped, attached to, installed into, modified or deleted.

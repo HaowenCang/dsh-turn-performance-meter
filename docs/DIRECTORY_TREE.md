@@ -170,6 +170,11 @@ dsh-turn-performance-meter/
 │   ├── phase-cut-parity.test.js       Phase 9.4.3: a non-magnitude phase cut closes the outgoing episode without
 │   │                                  opening the incoming one — the principal fixture, the pre-origin and same-phase
 │   │                                  controls, the durable/reload parity proof and the publication-gate scan
+│   ├── settlement-reconciliation.test.js Phase 9.4.4: a durable settlement completes the transient attempt it is
+│   │                                  correlated to — the mixed-plane principal fixture against the full-evidence
+│   │                                  reference, the overlap/double-cut/pre-reload-restoration cases, the two
+│   │                                  pure-path controls, the retry and ambiguous-correlation cases, the live-meter
+│   │                                  non-replay proof and the real `replace` rebaseline regression
 │   ├── dsh-client-feed.test.js        SessionEventWindow wire -> normalized events
 │   ├── curve.test.js / curve-axis-endpoint / curve-stream-order /
 │   │   curve-calibration-coverage     Curve primitives: reduced arithmetic, endpoint retention, same-timestamp
@@ -200,7 +205,8 @@ test/          — landed in Phase 5 as curve-view-model.test.js and completed-i
                  curve-source, curve-total-rolling, curve-trace-matrix and curve-long-agent-visual;
                  Phase 9.4 added rate-publication, curve-rate-publication, ttft-boundary and
                  phase94-regressions; Phase 9.4.2 added boundary-episode-origin; Phase 9.4.3 added
-                 phase-cut-parity and extended curve/phase-duration/delta-accounting/time-axis in place
+                 phase-cut-parity and extended curve/phase-duration/delta-accounting/time-axis in place;
+                 Phase 9.4.4 added settlement-reconciliation
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
                  JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
                  Phase 6 verified the *served* client bundle in the live page instead of taking

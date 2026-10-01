@@ -240,6 +240,39 @@ The one implementation of the episode boundary is `buildPhaseEpisodes`, because 
 estimator's rule, the completed curve and the printed phase rates. A second copy would be free to disagree about where
 a phase stopped, which is the defect class this closes.
 
+### The mixed plane: a settlement completes the attempt it settles (Phase 9.4.4)
+
+The two planes above are the *pure* ones. A reload produces a third: an attempt whose evidence arrives on both at once,
+because the replacement window holds only the transient tail it could still see while the settlement that closes the
+attempt carries the whole compact stream. Phase 9.4.3 recorded the cut on both pure planes; this one routes it on the
+mixed plane, where the controller correlated the settlement correctly and then settled the existing attempt without
+reading `event.decoded` at all.
+
+```
+durable assistant/message or assistant/attempt
+        │  decodeStreamRecords  -> one decode of the whole attempt
+        │  correlation          -> the attempt whose (turn, step) it uniquely proves
+        ▼
+TurnTelemetryStore.reconcileAttemptStream(record, attempt, { decoded })
+        ├── attempt.samples     := one sampleFromChunk pass over decoded.chunks
+        ├── attempt.phaseCuts   := phaseCutsFromChunks(decoded.chunks)
+        ├── record.firstTokenMs := one-way upgrade (earlier may replace, later may not)
+        └── everything else     preserved: attemptId, step, startedAtMs, usage, lifecycle
+        ▼
+settleAttempt(...)   ->  endTurn()  ->  aggregateTurn -> curveSource -> attemptTraces
+```
+
+Replacement rather than union or dedupe is structural, not stylistic: the planes share no per-delta identity (a
+transient row is keyed by the fold's `(attemptId, index, revision)`, a decoded durable delta by
+`(recordIndex, memberIndex)`), so a union double-counts an overlap and a `timeMs + text` dedupe would reorder
+same-timestamp deltas. A decode with any malformed record is refused outright, because it is not the whole attempt.
+
+The call touches `LiveMeter` nowhere. The live observations already made are historical presentation facts, and
+re-feeding the decoded stream through `acceptSample`/`observeTokenBoundary` would re-open episodes the pill had left and
+reset its frozen TTFT stage; `test/settlement-reconciliation.test.js` asserts the live snapshot is byte-for-byte
+unchanged across the reconciliation, and that the completed card then equals the full-evidence card with only
+reconstruction-local attempt identity projected out.
+
 ### Curve magnitude provenance (frozen in Phase 7C)
 
 `curveSource` joins `record.attempts` with `aggregate.attemptBreakdown[].calibration.samples`, which is the only place calibration happens. The raw evidence is not mutated and remains the provenance; the join is positional, verified on `attemptId`/`step`/sample count, and degrades **wholesale** to the raw shape if it cannot be trusted, reporting why in `curve.source.issues`.
