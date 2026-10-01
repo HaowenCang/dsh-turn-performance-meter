@@ -5411,9 +5411,13 @@ calibration path are untouched.
 
 ### 5. The matrix, and what changed beyond the principal defect
 
-`test/phase-cut-parity.test.js` (CASE A–H) was written **before** any source change and executed on `68ba746`: **7 of
-its 8 cases fail** there. The eighth, CASE F (the provider baseline at the incoming episode's first magnitude sample),
-passes on both trees and is labelled a control, because Phase 9.4.2 already anchored it. Post-fix the completed trace is
+`test/phase-cut-parity.test.js` (CASE A–H) was written **before** any source change, and its final version was re-run
+against a clean worktree at `68ba746` after the change was committed: **6 of its 8 cases fail there** (A, B, C, D, E, G).
+CASE F (the provider baseline at the incoming episode's first magnitude sample) and CASE H (the publication-gate and
+no-fabrication scan) pass on both trees and are labelled controls — F because Phase 9.4.2 already anchored the baseline
+at the magnitude origin, H because it asserts that the repair fabricated nothing and relaxed no gate. CASE D is a
+non-regression control for the ordinary magnitude transition, and its baseline failure is its `trace.cuts` evidence
+assertion alone: the transition geometry it asserts holds on both trees. Post-fix the completed trace is
 `0 / 100 / 120` reasoning (`null / 3000 / 2500`) and `300 / 400` output (`null / 3000`), the runs are
 `reasoning [0..2]` and `output [3..4]`, nothing is sampled in `120 -> 300`, the peak is unchanged at `3000`, and the
 summary reads `reasoningMs 120 / reasoningTps 2500`.

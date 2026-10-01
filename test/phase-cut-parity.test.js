@@ -40,6 +40,22 @@
  * sample count and no roster of its own. Both reconstruction planes feed it
  * through the same `TurnTelemetryStore.acceptChunk` call, so a reloaded card
  * recovers the identical cut (case G below).
+ *
+ * ## Baseline evidence, and which cases are controls
+ *
+ * The file was written and executed **before** any source change, and its final
+ * version was re-run against a clean worktree at `68ba746`: **6 of the 8 cases
+ * fail there** (A, B, C, D, E, G). Two are labelled controls that pass on both
+ * trees, and they are the non-regression half of the matrix rather than coverage
+ * of the defect:
+ *
+ *   - **CASE F** — the provider baseline already moved to the incoming episode's
+ *     first magnitude sample in Phase 9.4.2, so this phase must not move it again;
+ *   - **CASE H** — the publication gates and the "no fabricated peak, mass, sample
+ *     or zero" scan; the repair adds evidence, and this case proves it added none.
+ *
+ * CASE D is a control for the ordinary magnitude transition (its geometry holds on
+ * both trees); its baseline failure is the `trace.cuts` evidence assertion alone.
  */
 
 import test from 'node:test'
@@ -395,11 +411,14 @@ test('CASE E — a cut never leaks across an attempt boundary', () => {
 
 /* ---------------------------------------------------- F — provider baselines */
 
-test('CASE F — the incoming episode takes its provider baseline at its first magnitude sample', () => {
+test('CASE F (control) — the incoming episode takes its provider baseline at its first magnitude sample', () => {
   /**
    * The cut is not an episode origin, so it is not a baseline instant either: the
    * counter snapshot the output numerator is measured from is the one known when
    * the episode's **first magnitude sample** opened it (Phase 9.4.2's rule, kept).
+   *
+   * It passes on `68ba746` too, and that is the point: the rule was already right,
+   * and this phase must not move it while it moves the episode's end.
    */
   const SESSION = 's-943-f'
   const { store, record, attempt } = openTurn({ sessionId: SESSION, turnStartMs: 0 })
@@ -536,7 +555,14 @@ test('CASE G — the durable reconstruction recovers the identical cut, gap and 
 
 /* ------------------------------------------------ H — publication gates kept */
 
-test('CASE H — the cut fabricates no peak, no mass, no sample and no zero', () => {
+test('CASE H (control) — the cut fabricates no peak, no mass, no sample and no zero', () => {
+  /**
+   * The non-regression half of the brief's §9H: this phase adds evidence, and this
+   * case proves it added no number that was not already there. It passes on
+   * `68ba746` as well, which is exactly what makes it a control — the principal
+   * defect was never a fabricated magnitude, and a repair that introduced one would
+   * fail here.
+   */
   assert.equal(MIN_RATE_SAMPLES, 3)
   assert.equal(MIN_RATE_ELAPSED_MS, 100)
   assert.equal(MIN_WARMUP_SAMPLES, MIN_RATE_SAMPLES)

@@ -975,8 +975,10 @@ Driven through `TurnTelemetryStore -> liveSnapshot -> settleAttempt -> endTurn -
 
 The pre-fix trace is a measurement, not an inference: `dev/scratch/phase943-probe.mjs` prints it and the output is
 recorded in the phase's implementation-log entry. `test/phase-cut-parity.test.js` was written and executed **before**
-any source change; 7 of its 8 cases fail on `68ba746`, and the eighth (CASE F, the provider baseline) is a labelled
-control that passes on both trees because Phase 9.4.2 already anchored it there.
+any source change, and the final version of the file was re-run against a clean worktree at `68ba746` after the change
+was committed: **6 of its 8 cases fail there** (A, B, C, D, E, G). CASE F (the provider baseline) and CASE H (the
+publication-gate and no-fabrication scan) are labelled controls that pass on both trees, and CASE D's baseline failure
+is its `trace.cuts` evidence assertion — its geometry assertions hold on both trees, which is what the case controls.
 
 ### 14.2 The matrix
 
@@ -989,7 +991,7 @@ control that passes on both trees because Phase 9.4.2 already anchored it there.
 | E | attempt `a1` with a boundary + tool + retry `a2` | no cut leaks across an attempt boundary: `a1.cuts` present, `a2.cuts []`, the retry opens its own episode | FAIL | PASS |
 | F | usage chunks around a boundary | the incoming episode takes its provider baseline at its **first magnitude sample**, not at the cut (`{phase: output, counter: 600}`, mass `30`, `tps 300`) | PASS (control) | PASS |
 | G | the principal fixture, encoded as a compact `AssistantStreamRecord[]` | the durable reconstruction recovers the identical cut, gap, vertices, runs and summary through `materializeReconstructedTurn` | FAIL | PASS |
-| H | the principal fixture | the publication gates are untouched (`MIN_RATE_SAMPLES 3`, `MIN_RATE_ELAPSED_MS 100`), every published vertex names its episode, no `0` is fabricated, no zero-token sample exists, the trace integral is the six real samples, and the peak-bearing vertex is inside a drawn run | FAIL | PASS |
+| H | the principal fixture | the publication gates are untouched (`MIN_RATE_SAMPLES 3`, `MIN_RATE_ELAPSED_MS 100`), every published vertex names its episode, no `0` is fabricated, no zero-token sample exists, the trace integral is the six real samples, and the peak-bearing vertex is inside a drawn run | PASS (control) | PASS |
 | I | reasoning `0/50/100`, boundary `120`, reasoning `150/200/250` | the phase-reversion class is **resolved** by the same evidence: the curve splits where the live meter splits and the two halves agree on origin, count, mass and rate | characterized (old divergence asserted) | PASS (new equalities asserted) |
 
 CASE I is the one behavioural change beyond the principal defect, and it is deliberate: the earlier record asserted
@@ -1021,8 +1023,9 @@ contain no boundary at all and are bit-for-bit unchanged, which is the non-regre
 
 ### 14.4 Totals
 
-**838 tests, 838 pass, 0 fail, 0 skipped, 0 todo** (821 before this phase). Baseline evidence: 7 of the 8 new cases
-fail on `68ba746` when the new suite alone is executed against it. `npm run verify` runs
+**838 tests, 838 pass, 0 fail, 0 skipped, 0 todo** (821 before this phase). Baseline evidence: against a clean worktree
+at `68ba746`, the new suite alone is **6 fail / 2 pass** — the two passes are the labelled CASE F and CASE H controls.
+`npm run verify` runs
 `scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
 (`node scripts/verify-sanitization.mjs`) and passes. `git diff --check` is clean. No test was skipped, todo'd or
 deleted, and no tolerance was widened, to reach that state. No runtime acceptance was performed: Phase 9.4.3 is

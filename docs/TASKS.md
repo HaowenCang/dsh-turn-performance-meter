@@ -1535,8 +1535,10 @@ summary                  reasoningMs 120 / reasoningTps 2500, outputMs 100 / out
       `TurnTelemetryStore -> liveSnapshot -> settleAttempt -> endTurn -> completed curve` on `68ba746` and prints the
       live state, every vertex and the summary; the pre-fix trace above is that output, not an inference.
 - [x] **The defect-specific test fails on `68ba746`.** `test/phase-cut-parity.test.js` was written and executed before
-      any source change: **7 of 8 cases FAIL** on the baseline (CASE F, the provider-baseline control, passes on both
-      trees because Phase 9.4.2 already anchored it).
+      any source change, and the final version of the file was re-run against a clean worktree at `68ba746`: **6 of the
+      8 cases FAIL** there (A, B, C, D, E, G). CASE F (the provider baseline) and CASE H (the publication-gate and
+      no-fabrication scan) are labelled controls that pass on both trees; CASE D's baseline failure is its `trace.cuts`
+      evidence assertion, while its geometry assertions hold on both trees.
 - [x] **Regression matrix A�CI**, all deterministic and all driving the real path:
       A principal phase cut; B boundary before the first magnitude sample (no fake pre-sample width, no negative local
       time, no cut vertex); C same-phase boundary (recorded, inert); D ordinary magnitude transition (shared seam
