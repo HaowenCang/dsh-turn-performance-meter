@@ -9,8 +9,16 @@
  * durable boundaries) and path B (durable settlements only) must agree on
  *   phase segmentation, reasoning/output/generated token totals, phase-episode
  *   durations, compressed chart coordinates, peak TPS, tool-argument
- *   output accounting, tool durations, TTFT and the quality metadata,
+ *   output accounting, tool durations, TTFT and the two quality axes that are
+ *   functions of the evidence *content* (token total and phase split),
  * with a numerical tolerance allowed only where `METRICS_SPEC.md` defines one.
+ *
+ * The third axis, `temporalShapeQuality`, is asserted **per plane** rather than
+ * across them: it answers "is this timeline a complete durable reconstruction",
+ * so path A reads `estimated` and path B `reconstructed` by construction. Requiring
+ * the two to be equal would require one of them to misstate its own provenance —
+ * the Phase 9.4.5 defect — so the comparison checks the invariant instead
+ * (`compareTuples`), and the live side's value is pinned here.
  */
 
 import test from 'node:test'
@@ -30,10 +38,10 @@ import { isTokenDelta } from '../src/core/delta-accounting.js'
 const names = listFixtures()
 
 function assertEquivalent(a, b, context) {
-  const { exact, tolerant, semantic } = compareTuples(a, b)
+  const { exact, tolerant, semantic, temporalShape } = compareTuples(a, b)
   const failures = semantic.map(item => `${item.path}: ${JSON.stringify(item.left)} vs ${JSON.stringify(item.right)}`)
   assert.deepEqual(failures, [], `${context}: semantic differences between the live and durable paths`)
-  return { exactCount: exact.length, tolerantCount: tolerant.length }
+  return { exactCount: exact.length, tolerantCount: tolerant.length, temporalShape }
 }
 
 test('every recorded fixture is discoverable and self-describing', () => {
@@ -58,7 +66,25 @@ for (const name of names) {
     const liveMetrics = metricTuple(live)
     const durableMetrics = metricTuple(durable)
 
-    assertEquivalent(liveMetrics, durableMetrics, name)
+    const comparison = assertEquivalent(liveMetrics, durableMetrics, name)
+
+    /**
+     * The one axis the two planes must **not** agree on, stated per plane rather
+     * than left to the comparison (Phase 9.4.5).
+     *
+     * `temporalShapeQuality` says where the timeline came from, so the transient
+     * reading may never claim a durable reconstruction: its samples can be
+     * re-baselined or lost. The durable reading is the one that may claim it, and
+     * whether it does is pinned per fixture by the tests below.
+     */
+    assert.equal(liveMetrics.quality.temporalShapeQuality, 'estimated',
+      `${name}: the transient plane's timeline is a live observation, not a durable reconstruction`)
+    assert.equal(durableMetrics.durableTemporalShape, true,
+      `${name}: every contributing attempt of the durable reading is one complete decode`)
+    assert.equal(comparison.temporalShape.samePlane, false,
+      `${name}: the two readings describe different evidence planes, so the axis is not compared for equality`)
+    assert.equal(durableMetrics.quality.tokenTotalQuality, liveMetrics.quality.tokenTotalQuality,
+      `${name}: the token axis is a metric and must still agree across planes`)
 
     // The comparison must be a real one: if either path had produced nothing,
     // the equality above would be vacuous.

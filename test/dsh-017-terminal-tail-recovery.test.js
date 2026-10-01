@@ -79,6 +79,15 @@ function referenceView(events, label) {
       attemptId: `settlement:${attempt.settlementSeq}`,
       step: attempt.step,
       startedAtMs: attempt.startedAtMs,
+      /**
+       * This reference *is* path B, so it declares what path B is: the samples
+       * accepted below come from `reconstructFromDurable`'s decode of the
+       * settlement's own compact stream, and their temporal authority is that
+       * decode's completeness. Carried through rather than re-derived, so the
+       * reference and the controller cannot disagree about it — which is what the
+       * `recovered metrics == durable reconstruction metrics` assertion compares.
+       */
+      temporalEvidenceAuthority: attempt.temporalEvidenceAuthority ?? null,
     })
     for (const entry of attempt.chunks) {
       store.acceptChunk(record, stored, { timeMs: entry.timeMs, chunk: entry.chunk })

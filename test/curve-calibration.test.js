@@ -47,6 +47,7 @@ import assert from 'node:assert/strict'
 
 import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import { heuristicTokenWeight } from '../src/core/token-allocation.js'
+import { TEMPORAL_EVIDENCE_AUTHORITY } from '../src/core/types.js'
 import { DEFAULT_SAMPLE_EVERY_MS, MAX_SERIES_POINTS, peakTps } from '../src/core/curve.js'
 import { MIN_RATE_ELAPSED_MS, MIN_RATE_SAMPLES } from '../src/core/rate-publication.js'
 
@@ -87,7 +88,21 @@ function outputChunk() {
 function driveThreeDeltaTurn({ outputTokens, reasoningTokens = undefined } = {}) {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
-  const attempt = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
+  const attempt = store.beginAttempt(record, {
+    attemptId: 'a',
+    step: 1,
+    startedAtMs: 0,
+    /**
+     * This fixture stands for an attempt whose timeline is one complete decode of
+     * its durable stream, which is the strongest temporal evidence there is and the
+     * only state in which `curve.quality` can reach its `reconstructed` ceiling
+     * (`test/curve-quality.test.js` asserts the reachable cases; the gate itself is
+     * `TurnTelemetryStore.settle`). Declaring it here keeps this file about
+     * magnitudes: the magnitudes are unaffected by which plane supplied the
+     * timestamps.
+     */
+    temporalEvidenceAuthority: TEMPORAL_EVIDENCE_AUTHORITY.DURABLE_COMPLETE,
+  })
   store.acceptChunk(record, attempt, { timeMs: 0, chunk: outputChunk() })
   store.acceptChunk(record, attempt, { timeMs: 100, chunk: outputChunk() })
   store.acceptChunk(record, attempt, { timeMs: 500, chunk: outputChunk() })
@@ -98,7 +113,11 @@ function driveThreeDeltaTurn({ outputTokens, reasoningTokens = undefined } = {})
     surfaceCommitted: true,
     attemptOutcome: 'committed',
     usage,
-    /** A durable settlement, so the turn's temporal shape reaches its ceiling. */
+    /**
+     * The settlement identity, kept separate from the temporal authority on
+     * `beginAttempt`: a settlement being observed is not the same fact as its
+     * stream having been adopted as the attempt's timeline.
+     */
     settlementSeq: 1,
   })
   return { record, settled: store.endTurn(record, { timeMs: 600, status: 'completed' }) }

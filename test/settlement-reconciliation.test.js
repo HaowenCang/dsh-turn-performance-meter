@@ -763,6 +763,8 @@ test('CASE H — an unprovable correlation is never guessed; the durable restora
   const counters = harness.controller.diagnostics(harness.sessionId).counters
   assert.equal(counters.settlementStreamsReconciled, 1, 'one settlement proved its attempt')
   assert.equal(counters.settlementStreamsUncorrelated, 1, 'one did not, and it is counted rather than silent')
+  assert.equal(counters.settlementStreamsRejected, 0,
+    'nothing was refused: the unprovable correlation took the durable-restoration path under the existing policy')
 })
 
 /* =========================================================================
@@ -922,5 +924,20 @@ test('an incomplete durable decode leaves the transient evidence in place', () =
 
   const counters = harness.controller.diagnostics(harness.sessionId).counters
   assert.equal(counters.settlementStreamsReconciled, 0)
-  assert.equal(counters.settlementStreamsUncorrelated, 1)
+  /**
+   * Phase 9.4.5 renames this assertion's counter, and the reason is semantic
+   * rather than cosmetic: the old `settlementStreamsUncorrelated` counted **both** a
+   * settlement that could not be correlated at all and a *proven* correlation whose
+   * decode was refused, so the name asserted here was testing a mislabeled
+   * diagnostic — the settlement in this case **was** correlated, uniquely, to `a1`.
+   * Reconciliation behaviour is unchanged: the correlation is still proved, the
+   * incomplete decode is still refused, and the transient evidence still stands.
+   * Only the counter that says which of the two happened is corrected.
+   */
+  assert.equal(counters.settlementStreamsUncorrelated, 0,
+    'the correlation was proved, so this is not the uncorrelated outcome')
+  assert.equal(counters.settlementStreamsRejected, 1,
+    'a proved correlation whose incomplete decode was refused is its own outcome')
+  assert.equal(attempt.temporalEvidenceAuthority, 'live',
+    'a refusal replaces nothing, so the attempt keeps the transient timeline it observed')
 })

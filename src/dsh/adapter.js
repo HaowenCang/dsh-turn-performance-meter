@@ -44,6 +44,7 @@ import {
 } from '../core/delta-accounting.js'
 import { MetricQuality, weakestQuality } from '../core/metric-quality.js'
 import { heuristicTokenWeight, sampleFromChunk } from '../core/token-allocation.js'
+import { TEMPORAL_EVIDENCE_AUTHORITY } from '../core/types.js'
 import { decodeStreamRecords, SETTLEMENT_EVENT_TYPES } from './stream-decoder.js'
 
 /** Normalized event kinds emitted by the mapping step. */
@@ -516,6 +517,14 @@ export function normalizeStreamFrame(frame) {
  * whole decoded stream so that block boundaries, `usage` and `finish` remain
  * available to a caller that needs them. Both come from the same decode, so the
  * sample set and the boundary set can never disagree.
+ *
+ * The attempt's `temporalEvidenceAuthority` is derived from that same decode and
+ * from nothing else: the samples *are* one decode of the durable stream, so a
+ * complete decode is `durable-complete` and a decode that lost a record is
+ * `durable-incomplete`. A restored attempt built from a partial stream is still
+ * real evidence and is still restored — it simply may not support a
+ * `reconstructed` temporal shape, because the record it lost is evidence the
+ * transient plane may have held and the decode cannot supply.
  */
 export function attemptFromDecoded({
   attemptId,
@@ -589,6 +598,15 @@ export function attemptFromDecoded({
     issues,
     /** Quality of the decoded stream itself, before any provider anchoring. */
     streamQuality: decoded.quality,
+    /**
+     * Where this attempt's temporal evidence came from: the decode it was just
+     * built from, and only that. A restored attempt is the one path where a
+     * partial decode *is* the sample source, which is why the value distinguishes
+     * the two cases rather than assuming the durable plane is always complete.
+     */
+    temporalEvidenceAuthority: decoded?.complete === true
+      ? TEMPORAL_EVIDENCE_AUTHORITY.DURABLE_COMPLETE
+      : TEMPORAL_EVIDENCE_AUTHORITY.DURABLE_INCOMPLETE,
   }
 }
 

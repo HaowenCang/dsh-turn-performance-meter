@@ -161,6 +161,16 @@ export function materializeReconstructedTurn({ store, sessionId, turn, events = 
       attemptId,
       step: attempt.step ?? null,
       startedAtMs: attempt.startedAtMs ?? null,
+      /**
+       * The store is told where these samples come from, because it cannot see
+       * the decode: `reconstructFromDurable` derives the value from the same
+       * `decoded.complete` verdict that produced the chunks accepted below. A
+       * recovered attempt is therefore `durable-complete` only when the durable
+       * stream decoded completely — a partial decode still restores the attempt
+       * (its surviving deltas are evidence) but is not authoritative temporal
+       * evidence.
+       */
+      temporalEvidenceAuthority: attempt.temporalEvidenceAuthority ?? null,
     })
 
     /**

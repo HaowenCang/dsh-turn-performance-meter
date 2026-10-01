@@ -32,9 +32,14 @@ import {
   phaseRuns,
   visualRunsOf,
 } from '../core/curve.js'
-import { aggregateTurn } from '../core/aggregate-turn.js'
+import { aggregateTurn, isContributingAttempt } from '../core/aggregate-turn.js'
 import { QualityLevel, clampToAxis, QUALITY_AXIS } from '../core/quality-model.js'
-import { turnKey } from '../core/types.js'
+import {
+  TEMPORAL_EVIDENCE_AUTHORITY,
+  TEMPORAL_EVIDENCE_RANK,
+  hasDurableTemporalAuthority,
+  turnKey,
+} from '../core/types.js'
 
 /** How many settled turns are retained per session, newest first. */
 export const DEFAULT_HISTORY_LIMIT = 4
@@ -167,8 +172,30 @@ export class TurnTelemetryStore {
    * Begin an attempt. A new `attemptId` is a hard window boundary: it is exactly
    * the signal that the previous call ended, whether it committed, settled
    * without a surface message, or is being retried.
+   *
+   * ## The temporal-evidence authority of a new attempt
+   *
+   * A new attempt is opened with `temporalEvidenceAuthority: 'live'` and nothing
+   * else: the samples about to arrive are the transient plane's, and this method
+   * cannot know whether a durable stream will ever complete them. A caller that
+   * already holds the attempt's durable decode — the two reconstruction paths —
+   * declares it through the `temporalEvidenceAuthority` option rather than by
+   * assigning the field, so the value travels through the same one-way rule
+   * every other authority claim uses (`temporalEvidenceObserved`).
+   *
+   * The default is what makes the gate fail conservative: a path that says
+   * nothing about its source produces `live`, which can never satisfy
+   * `hasDurableTemporalAuthority`.
    */
-  beginAttempt(record, { attemptId, step = null, startedAtMs = null }) {
+  beginAttempt(
+    record,
+    {
+      attemptId,
+      step = null,
+      startedAtMs = null,
+      temporalEvidenceAuthority = null,
+    },
+  ) {
     let attempt = record.attemptIndex.get(attemptId)
     if (attempt === undefined) {
       attempt = {
@@ -201,12 +228,53 @@ export class TurnTelemetryStore {
         attemptOutcome: 'unknown',
         startedAtMs,
         settledAtMs: null,
+        /**
+         * Where the samples above came from. Set by the two durable decode paths
+         * when they are the source; `live` otherwise. See
+         * `TEMPORAL_EVIDENCE_AUTHORITY` (`src/core/types.js`) for why a durable
+         * settlement observed for this attempt does **not** imply this value.
+         */
+        temporalEvidenceAuthority: TEMPORAL_EVIDENCE_AUTHORITY.LIVE,
       }
       record.attempts.push(attempt)
       record.attemptIndex.set(attemptId, attempt)
     }
+    if (temporalEvidenceAuthority !== null) {
+      this.temporalEvidenceObserved(attempt, { authority: temporalEvidenceAuthority })
+    }
     this.live(record.sessionId).attemptStarted({ attemptId, step, timeMs: startedAtMs })
     return attempt
+  }
+
+  /**
+   * Record where one attempt's temporal sample stream came from.
+   *
+   * The rule is **one-way upward**, and the direction is the whole point:
+   *
+   *   - a proven claim may be raised — a live attempt completed by a durable
+   *     reconciliation, or a partial decode superseded by a complete one — because
+   *     the samples those claims describe were just replaced by better evidence;
+   *   - a proven claim is never withdrawn, because nothing in this store removes a
+   *     sample once it is recorded. An incomplete settlement arriving after a
+   *     complete one leaves the adopted complete decode exactly where it was, so
+   *     the attempt is still backed by it.
+   *
+   * An unknown, absent or unrecognised authority is ranked as `live`, so a caller
+   * cannot promote an attempt past what it can prove, and `hasDurableTemporalAuthority`
+   * stays the single gate the settled temporal shape depends on.
+   *
+   * @param {object} attempt
+   * @param {{authority: string}} input
+   * @returns {boolean} whether the recorded authority changed
+   */
+  temporalEvidenceObserved(attempt, { authority }) {
+    if (attempt === null || attempt === undefined) return false
+    const next = TEMPORAL_EVIDENCE_RANK[authority]
+    if (next === undefined) return false
+    const current = TEMPORAL_EVIDENCE_RANK[attempt.temporalEvidenceAuthority] ?? 0
+    if (next <= current) return false
+    attempt.temporalEvidenceAuthority = authority
+    return true
   }
 
   /**
@@ -293,6 +361,15 @@ export class TurnTelemetryStore {
    * both: the boundary freezes the turn's first token and moves the live meter out
    * of its first-response stage, and no magnitude is fabricated to make the sample
    * set look complete.
+   *
+   * ## This method never claims a temporal authority
+   *
+   * A transient sample cannot make a stream durable, so nothing here raises
+   * `attempt.temporalEvidenceAuthority`; and nothing here lowers it either. The
+   * field describes the stream the reconciliation adopted (or the live
+   * observation standing in its place), which is a fact about *which decode is the
+   * attempt's timeline* rather than about the arrival order of frames. The
+   * reconcile path owns raising it, and `temporalEvidenceObserved` owns the rule.
    *
    * @returns {object|null} the accepted sample, or `null`
    */
@@ -425,7 +502,16 @@ export class TurnTelemetryStore {
    * `decoded.complete` is `false` as soon as one record failed to decode. Such a
    * stream is missing evidence the transient plane may still hold, so replacing
    * with it would *lose* data rather than complete it. The method refuses and
-   * reports why; the caller keeps the transient evidence and counts the refusal.
+   * reports why; the caller keeps the transient evidence and counts the refusal
+   * as `settlementStreamsRejected` — a *proven correlation whose decode was
+   * refused*, which is a different fact from an unprovable correlation.
+   *
+   * A refusal writes **nothing**, and that includes the attempt's
+   * `temporalEvidenceAuthority`: the samples were not replaced, so where they came
+   * from did not change. A correlated settlement that is refused therefore leaves
+   * the attempt `live`, and the settled card reports an `estimated` temporal shape
+   * rather than a `reconstructed` one — `settlementSeq` records that the durable
+   * settlement happened, not that its stream became the attempt's timeline.
    *
    * @param {object} record the turn record that owns `attempt`
    * @param {object} attempt the attempt the settlement was correlated to
@@ -448,6 +534,13 @@ export class TurnTelemetryStore {
     }
     attempt.samples = samples
     attempt.phaseCuts = phaseCutsFromChunks(chunks)
+    /**
+     * The attempt's stream-derived evidence *is* one decode of the durable stream
+     * now, and that decode is complete. This is the fact a finite `settlementSeq`
+     * cannot express: observing the settlement is not adopting its stream, and only
+     * the adopted stream supports `temporalShapeQuality: reconstructed`.
+     */
+    this.temporalEvidenceObserved(attempt, { authority: TEMPORAL_EVIDENCE_AUTHORITY.DURABLE_COMPLETE })
 
     const firstTokenMs = Number.isFinite(decoded.firstTokenTimeMs)
       ? decoded.firstTokenTimeMs
@@ -480,6 +573,13 @@ export class TurnTelemetryStore {
    * Defaults describe "durable non-surface settlement of unknown cause" only
    * when the caller passes `settlementKind: 'attempt'` explicitly; otherwise
    * the message-settlement defaults apply.
+   *
+   * This method records settlement **identity and lifecycle** and nothing else. It
+   * deliberately never writes `attempt.temporalEvidenceAuthority`: a finite
+   * `settlementSeq` proves the durable settlement was observed, and observing a
+   * settlement is a different fact from adopting its embedded stream as the
+   * attempt's timeline. A settlement whose decode was refused leaves the attempt
+   * `live`.
    */
   settleAttempt(
     attempt,
@@ -547,15 +647,42 @@ export class TurnTelemetryStore {
   settle(record) {
     /**
      * Whether the delta timing in hand is durable evidence rather than live
-     * observation. Every attempt carries a `settlementSeq` once its durable
-     * settlement has been seen, and a durable settlement's embedded stream
-     * reproduces the original delta timestamps exactly — that is what makes the
-     * settled temporal shape `reconstructed` instead of `estimated`. An attempt
-     * still streaming when the turn closes has no settlement and degrades the
-     * whole turn's timing claim, which is the honest outcome.
+     * observation, and therefore whether the settled temporal shape may read
+     * `reconstructed`.
+     *
+     * ## What this gate means, and what it used to mean
+     *
+     * It asks one question — is every contributing attempt's temporal sample
+     * stream backed by a **complete authoritative durable decode** — and it reads
+     * the answer from `temporalEvidenceAuthority`, the field written where the
+     * decision is made. It is not a settlement-lifecycle question and must not be
+     * inferred from one: a finite `settlementSeq` proves the durable settlement was
+     * observed, and a refusal to adopt an incomplete decode leaves the attempt's
+     * samples on the transient plane.
+     *
+     * Until Phase 9.4.5 this gate was `every(attempt => Number.isFinite(attempt.settlementSeq))`,
+     * and the two are not the same statement. Measured on `5ef2f0d` for a reload
+     * whose replacement window held only the post-cut tail while the correlated
+     * settlement carried an incomplete decode and an authoritative usage counter:
+     * the reconciliation refused, the attempt kept its three transient samples, and
+     * the settled card still reported `temporalShapeQuality: reconstructed` for a
+     * shape drawn from a window that had lost half the attempt.
+     *
+     * `durableShape` constrains the **temporal** axis only. `settlementSeq`,
+     * `settlementKind`, `surfaceCommitted` and `attemptOutcome` keep their own
+     * meanings and are never derived from this gate, and the token and split axes
+     * stay independent of it: authoritative usage is still `exact` when the
+     * temporal shape is only `estimated`.
+     *
+     * The population is the **contributing** attempts (`isContributingAttempt`,
+     * the same predicate `aggregateTurn` reduces with): an attempt that emitted no
+     * generated sample contributes no vertex to the shape, so it can neither
+     * support nor degrade it. An empty population cannot claim a durable shape,
+     * which is why the length guard is stated rather than left vacuous.
      */
-    const durableShape = record.attempts.length > 0
-      && record.attempts.every(attempt => Number.isFinite(attempt.settlementSeq))
+    const contributing = record.attempts.filter(isContributingAttempt)
+    const durableShape = contributing.length > 0
+      && contributing.every(attempt => hasDurableTemporalAuthority(attempt))
     const timestampsComplete = record.attempts.every(attempt => (
       (attempt.samples ?? []).every(sample => Number.isFinite(sample.timeMs))
     ))

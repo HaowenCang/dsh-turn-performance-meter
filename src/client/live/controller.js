@@ -322,12 +322,19 @@ export function createController({
              * The refusal is as load-bearing as the replacement: a decode with any
              * malformed record is not the whole attempt, so it is declined and the
              * transient evidence — which may well hold deltas the decode lost —
-             * is left exactly as it stands.
+             * is left exactly as it stands. Phase 9.4.5 names the second half of
+             * that: an attempt whose decode was refused keeps its `live` temporal
+             * authority, so the settled card reports an `estimated` shape. A finite
+             * `settlementSeq` and an authoritative usage counter are still recorded
+             * — the settlement happened and the tokens are the provider's — but
+             * neither of them says the attempt's *timeline* is a durable
+             * reconstruction. The refusal is counted as
+             * `settlementStreamsRejected`, not as an unproved correlation.
              */
             if (event.decoded !== undefined) {
               const reconciliation = store.reconcileAttemptStream(record, attempt, { decoded: event.decoded })
               if (reconciliation.reconciled) state.counters.settlementStreamsReconciled += 1
-              else state.counters.settlementStreamsUncorrelated += 1
+              else state.counters.settlementStreamsRejected += 1
               log(
                 'attempt stream reconciled', sessionId, attemptId, reconciliation.reason,
                 reconciliation.samples, reconciliation.cuts,
@@ -384,6 +391,13 @@ export function createController({
            * one candidate made the pairing unprovable and the correlation refused to
            * guess. Counted, so a refused join is visible in `diagnostics()` rather
            * than indistinguishable from a settlement that never carried a stream.
+           *
+           * This is the *uncorrelated* outcome and not the *rejected* one: nothing
+           * was proved about an existing attempt here, so no existing record's
+           * evidence was refused. The restored attempt's own temporal authority is
+           * whatever the decode it was built from supports
+           * (`attemptFromDecoded`), and a malformed stream restores a
+           * `durable-incomplete` attempt rather than a durable-complete one.
            */
           state.counters.settlementStreamsUncorrelated += 1
           /**
@@ -664,21 +678,32 @@ export function createController({
           settledSnapshotBuilt: 0,
           matchedToolResults: 0,
           /**
-           * The mixed plane, counted where it is decided (Phase 9.4.4).
+           * The mixed plane, counted where it is decided (Phase 9.4.4, split into
+           * three facts in Phase 9.4.5).
            *
-           * `settlementStreamsReconciled` is a settlement whose decoded stream was
-           * proved to belong to an attempt this client already held, and therefore
-           * replaced that attempt's stream-derived evidence.
-           * `settlementStreamsUncorrelated` is the complement: a settlement that
-           * carried a decoded stream and could **not** be joined to one attempt —
-           * an unprovable correlation, or a decode that lost a record and is
-           * therefore not the whole attempt. The two are the honest accounting of
-           * "evidence either completed the record it settled, or did not", and the
-           * second is what keeps a regression visible: a change that stopped
-           * correlating would raise it rather than quietly drop deltas.
+           * Three outcomes are distinguishable, and collapsing any two of them
+           * would misstate what happened:
+           *
+           *   - `settlementStreamsReconciled` — the correlation was proved **and**
+           *     the decoded stream was complete, so it replaced that attempt's
+           *     stream-derived evidence;
+           *   - `settlementStreamsUncorrelated` — no unique attempt was proved to
+           *     own the settlement (or none existed at all), so the existing
+           *     durable-restoration policy restored it as its own attempt;
+           *   - `settlementStreamsRejected` — the correlation **was** proved and the
+           *     reconciliation refused anyway, which today means `decoded.complete
+           *     !== true`. The transient evidence stands.
+           *
+           * Phase 9.4.4 counted both non-reconciled outcomes as
+           * `settlementStreamsUncorrelated`. That was false for the rejected case:
+           * the settlement *was* correlated, and the attempt it was correlated to
+           * is exactly the record the refusal had to protect. Reading "the
+           * correlation failed" from a refused decode is how a replaced-stream
+           * regression would have looked identical to an incomplete decode.
            */
           settlementStreamsReconciled: 0,
           settlementStreamsUncorrelated: 0,
+          settlementStreamsRejected: 0,
         },
         /** The kind of view the last `project()` returned. */
         projectedViewKind: null,

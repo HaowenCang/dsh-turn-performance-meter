@@ -24,12 +24,23 @@
  *     `METRICS_SPEC.md` allows a local TPS difference. The tolerance is stated
  *     per metric and no semantic difference (present vs absent, phase swap,
  *     status change) is ever tolerated.
+ *
+ * One field is deliberately *not* required to be equal across the two paths:
+ * `quality.temporalShapeQuality`, because it states which evidence plane produced
+ * the timeline rather than what the timeline measures. Path A reads the transient
+ * plane and path B the decoded compact stream, so only path B can claim a durable
+ * reconstruction — see `compareTuples`. Both paths are still required to satisfy
+ * the invariant that a `reconstructed` claim implies durable temporal authority,
+ * and the frame-form vs client-folded-form comparison (one plane, two wire shapes)
+ * still compares the axis exactly.
  */
 
 import { TurnTelemetryStore } from '../../src/host/telemetry-design.js'
 import { accumulateLive } from '../../src/dsh/live-path.js'
 import { reconstructFromDurable, settlementChronology } from '../../src/dsh/durable-path.js'
 import { settlementClassification, turnEndStatus } from '../../src/dsh/adapter.js'
+import { isContributingAttempt } from '../../src/core/aggregate-turn.js'
+import { hasDurableTemporalAuthority } from '../../src/core/types.js'
 import { attributePhaseDurations } from '../../src/core/phase-duration.js'
 import { compressAttempts } from '../../src/core/time-axis.js'
 import {
@@ -176,7 +187,24 @@ export function durableSettledView(fixture) {
     // derived from the settlement sequence. It is used only as a store key and
     // is excluded from cross-path comparison.
     const attemptId = `settlement:${attempt.settlementSeq}`
-    const stored = store.beginAttempt(record, { attemptId, step: attempt.step, startedAtMs: attempt.startedAtMs })
+    const stored = store.beginAttempt(record, {
+      attemptId,
+      step: attempt.step,
+      startedAtMs: attempt.startedAtMs,
+      /**
+       * Path B's samples *are* one decode of the durable stream, so the attempt's
+       * temporal-evidence authority is the decode's own completeness — the value
+       * `reconstructFromDurable` already derived from `decoded.complete`. It is
+       * carried through rather than re-derived, because a second derivation is a
+       * second place for the rule to drift.
+       *
+       * Path A (`liveSettledView`) deliberately declares nothing: its samples come
+       * from the transient plane, so it stays `live` and its settled shape stays
+       * `estimated`. The two paths agreeing on the *metrics* while disagreeing on
+       * where those metrics came from is the distinction Phase 9.4.5 restores.
+       */
+      temporalEvidenceAuthority: attempt.temporalEvidenceAuthority ?? null,
+    })
     for (const entry of attempt.chunks) {
       store.acceptChunk(record, stored, { timeMs: entry.timeMs, chunk: entry.chunk })
     }
@@ -327,6 +355,7 @@ export function chartView(attempts) {
 export function metricTuple(view) {
   const { settled } = view
   const attempts = view.record.attempts
+  const contributing = attempts.filter(isContributingAttempt)
   return {
     status: settled.status,
     ttftMs: settled.ttftMs,
@@ -357,6 +386,19 @@ export function metricTuple(view) {
       .join(','),
     toolCallIds: view.record.tools.map(call => call.callId).join(','),
     toolErrorCount: settled.tools.failedCount,
+    /**
+     * Whether every contributing attempt of this tuple is backed by a complete
+     * authoritative durable decode — the Phase 9.4.5 gate the temporal-shape axis
+     * reads (`TurnTelemetryStore.settle`).
+     *
+     * It is published on the tuple because it is **not** a metric: it says which
+     * evidence plane the tuple describes. Two tuples built from different planes
+     * are expected to disagree on `quality.temporalShapeQuality`, and this field is
+     * what lets `compareTuples` tell a permitted plane difference from a
+     * regression.
+     */
+    durableTemporalShape: contributing.length > 0
+      && contributing.every(hasDurableTemporalAuthority),
     /**
      * Model-generated tool-call argument bytes. Measured from the decoded
      * chunks in path B and from the accepted transient frames in path A, so it
@@ -408,7 +450,12 @@ export function chunksOf(view) {
 /**
  * Structural comparison of two metric tuples.
  *
- * @returns {{exact: object[], tolerant: object[], semantic: object[]}}
+ * Everything is compared exactly except values derived from a shape weight, which
+ * use `TPS_TOLERANCE`, and `quality.temporalShapeQuality`, which is compared only
+ * between tuples from the same evidence plane — see the field's comment below and
+ * `docs/METRICS_SPEC.md` §11.
+ *
+ * @returns {{exact: object[], tolerant: object[], semantic: object[], temporalShape: object}}
  */
 export function compareTuples(a, b) {
   const exact = []
@@ -466,7 +513,46 @@ export function compareTuples(a, b) {
   same('chart.coordinates', hashOf(a.chart.coordinates), hashOf(b.chart.coordinates))
   same('quality.tokenTotalQuality', a.quality.tokenTotalQuality, b.quality.tokenTotalQuality)
   same('quality.phaseSplitQuality', a.quality.phaseSplitQuality, b.quality.phaseSplitQuality)
-  same('quality.temporalShapeQuality', a.quality.temporalShapeQuality, b.quality.temporalShapeQuality)
+  /**
+   * `quality.temporalShapeQuality` is the one axis the two **planes** are not
+   * required to agree on, because it is the axis that states which plane produced
+   * the timeline.
+   *
+   * Phase 9.4.5 makes the axis read the evidence rather than the settlement's
+   * existence: `reconstructed` is permitted only when every contributing attempt's
+   * sample stream is a complete authoritative durable decode. Path A's samples come
+   * from the transient plane and path B's from the decoded compact stream, so
+   * requiring the two readings to print the same value here would require one of
+   * them to misdescribe its own provenance — the defect this phase removes.
+   *
+   * The two are therefore compared only when both tuples describe the same plane
+   * (which is what the frame-form vs client-folded-form comparison does), and the
+   * per-side invariant is asserted in both cases:
+   *
+   *     temporalShapeQuality === 'reconstructed'  ⇒  durableTemporalShape === true
+   *
+   * which is strictly stronger than the equality it replaces, because it fails on
+   * a single plane that overstates its own evidence. The two values are returned
+   * so a caller can state what each plane is expected to read.
+   */
+  const temporalShape = {
+    left: a.quality.temporalShapeQuality,
+    right: b.quality.temporalShapeQuality,
+    samePlane: Object.is(a.durableTemporalShape, b.durableTemporalShape),
+  }
+  if (temporalShape.samePlane) {
+    same('quality.temporalShapeQuality', temporalShape.left, temporalShape.right)
+  }
+  for (const [side, tuple, value] of [['left', a, temporalShape.left], ['right', b, temporalShape.right]]) {
+    if (value === 'reconstructed' && tuple.durableTemporalShape !== true) {
+      semantic.push({
+        path: `quality.temporalShapeQuality(${side})`,
+        left: value,
+        right: `durableTemporalShape=${String(tuple.durableTemporalShape)}`,
+        reason: 'a reconstructed temporal shape requires a complete authoritative durable decode',
+      })
+    }
+  }
 
   same('attempts.segmentation', describeSegments(a.attempts), describeSegments(b.attempts))
   same('attempts.sampleCounts', a.attempts.map(x => x.sampleCount).join(','), b.attempts.map(x => x.sampleCount).join(','))
@@ -483,7 +569,7 @@ export function compareTuples(a, b) {
   close('chart.output.integral', integral(a.chart.output), integral(b.chart.output), 1e-6)
   same('chart.seriesLengths', `${a.chart.reasoning.length},${a.chart.output.length}`, `${b.chart.reasoning.length},${b.chart.output.length}`)
 
-  return { exact, tolerant, semantic }
+  return { exact, tolerant, semantic, temporalShape }
 }
 
 function integral(series) {

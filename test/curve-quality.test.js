@@ -24,6 +24,7 @@ import assert from 'node:assert/strict'
 import { TurnTelemetryStore, curveQuality } from '../src/host/telemetry-design.js'
 import { QualityLevel, QUALITY_CEILING, qualityAxes } from '../src/core/quality-model.js'
 import { MetricQuality } from '../src/core/metric-quality.js'
+import { TEMPORAL_EVIDENCE_AUTHORITY } from '../src/core/types.js'
 
 function outputChunk(text) {
   return { type: 'text-delta', index: 0, text }
@@ -38,20 +39,32 @@ function outputChunk(text) {
  * two-delta attempt has `peakTps: null` at every quality level, and the peak
  * assertion at the end of this file needs a measured peak to reason about.
  *
- * `usage` chooses the token axis, `settlementSeq` the temporal axis: an attempt
- * with no durable settlement sequence is one still open — or observed only live —
- * when the turn closed, which is what makes the reconstructed timing claim
- * unsupportable.
+ * `usage` chooses the token axis and `durableTemporalEvidence` the temporal one.
+ * The temporal axis reads `attempt.temporalEvidenceAuthority` — where the sample
+ * stream actually came from (`src/core/types.js`) — and **not** the presence of a
+ * `settlementSeq`. An attempt still open when the turn closed, or one whose
+ * correlated settlement was refused because its decode was incomplete, keeps the
+ * transient timeline it observed, and a transient timeline cannot support a
+ * `reconstructed` claim even though the settlement was observed. That separation is
+ * what `test/temporal-evidence-authority.test.js` freezes; this file only needs to
+ * be able to ask for either state.
  */
 function settle({
   usage = { outputTokens: 900, reasoningTokens: 0 },
-  settlementSeq = 11,
+  durableTemporalEvidence = true,
   chunks = true,
   openAttempt = false,
 } = {}) {
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
-  const a = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
+  const a = store.beginAttempt(record, {
+    attemptId: 'a',
+    step: 1,
+    startedAtMs: 0,
+    temporalEvidenceAuthority: durableTemporalEvidence
+      ? TEMPORAL_EVIDENCE_AUTHORITY.DURABLE_COMPLETE
+      : null,
+  })
   if (chunks) {
     store.acceptChunk(record, a, { timeMs: 100, chunk: outputChunk('x'.repeat(400)) })
     store.acceptChunk(record, a, { timeMs: 200, chunk: outputChunk('x'.repeat(400)) })
@@ -63,7 +76,7 @@ function settle({
     surfaceCommitted: true,
     attemptOutcome: 'committed',
     usage,
-    settlementSeq,
+    settlementSeq: 11,
   })
   if (openAttempt) {
     /** A second attempt that never settled: the turn closed while it streamed. */
@@ -95,7 +108,7 @@ test('an exact token total with no durable timing is estimated, not calibrated',
    * durable settlement. The shape claim is therefore `estimated` while the token
    * claim stays `exact`.
    */
-  const { settled, curve, axes } = settle({ settlementSeq: null })
+  const { settled, curve, axes } = settle({ durableTemporalEvidence: false })
   assert.equal(settled.usageComplete, true, 'the token total really is complete')
   assert.equal(axes.tokenTotalQuality, QualityLevel.EXACT)
   assert.equal(axes.temporalShapeQuality, QualityLevel.ESTIMATED)

@@ -14,6 +14,7 @@
 
 import { isTokenDelta, phaseCutsFromChunks } from '../core/delta-accounting.js'
 import { heuristicTokenWeight, sampleFromChunk } from '../core/token-allocation.js'
+import { TEMPORAL_EVIDENCE_AUTHORITY } from '../core/types.js'
 import { applyRetryOutcomes, settlementClassification, toolResultOutcome, turnEndStatus } from './adapter.js'
 import { decodeStreamRecords } from './stream-decoder.js'
 
@@ -117,6 +118,17 @@ export function reconstructFromDurable({ sessionId, turn, events = [], estimate 
           interrupted: data.interrupted === true,
           issues,
           streamQuality: decoded.quality,
+          /**
+           * The reconstruction plane's temporal evidence *is* this decode, so the
+           * authority is the decode's own completeness and nothing else. A
+           * settlement whose stream lost a record still yields an attempt — the
+           * remaining deltas are real evidence — but a partial decode is not
+           * authoritative, and the settled card must read `estimated` rather than
+           * `reconstructed` for it (`src/core/types.js`).
+           */
+          temporalEvidenceAuthority: decoded.complete === true
+            ? TEMPORAL_EVIDENCE_AUTHORITY.DURABLE_COMPLETE
+            : TEMPORAL_EVIDENCE_AUTHORITY.DURABLE_INCOMPLETE,
         }
         if (estimate !== undefined) {
           attempt.samples = samplesFromChunks(decoded.chunks, estimate)

@@ -97,4 +97,9 @@ export { aggregateTurn, isContributingAttempt, normalizeUsage, reduceAttempt } f
 
 export { TURN_STATUS, TurnPhase, initialTurnState, reduceTurnState, settleFromTurnEndReason } from './turn-state.js'
 
-export { turnKey } from './types.js'
+export {
+  TEMPORAL_EVIDENCE_AUTHORITY,
+  TEMPORAL_EVIDENCE_RANK,
+  hasDurableTemporalAuthority,
+  turnKey,
+} from './types.js'

@@ -239,7 +239,17 @@ test('the recorded tool-only turn really has no assistant text', () => {
   /** And the curve reports it that way: reasoning plus tool-argument output. */
   const outputRuns = settled.curve.series.find(series => series.key === 'output').runs
   assert.ok(outputRuns.length > 0, 'tool-call arguments are drawn as output')
-  assert.equal(settled.curve.quality, QualityLevel.RECONSTRUCTED)
+  /**
+   * `liveSettledView` is path A, so the timeline it settles is the **transient**
+   * one and the temporal-shape axis stops at `estimated` — a live pane can be
+   * re-baselined or lose frames, and Phase 9.4.5 made the axis read that fact
+   * instead of the mere presence of a `settlementSeq`. The same turn read from its
+   * own decoded compact stream is a durable reconstruction and does reach the
+   * ceiling, which is the paired assertion; the two together are the distinction
+   * this phase restores.
+   */
+  assert.equal(settled.curve.quality, QualityLevel.ESTIMATED)
+  assert.equal(durableSettledView(fixture).settled.curve.quality, QualityLevel.RECONSTRUCTED)
 })
 
 test('an empty-output turn reports unavailable rather than a zero', () => {
