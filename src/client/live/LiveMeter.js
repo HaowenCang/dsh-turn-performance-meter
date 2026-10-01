@@ -89,8 +89,13 @@ function pillContent(view, label) {
       /**
        * The running first-response counter is the state's only number, so it is
        * the state's focus: `2.80 S` beside the state label.
+       *
+       * The duration is passed through uncoerced. `stopwatchParts` renders a
+       * non-finite duration as the shared em dash with no unit, which is the
+       * honest reading for a turn whose `turn/start` was never observed: `0.00 S`
+       * would be a fabricated measurement (`docs/METRICS_SPEC.md` §4).
        */
-      const parts = stopwatchParts(view.counterMs ?? 0)
+      const parts = stopwatchParts(view.counterMs)
       return [
         metric(parts.value, parts.unit),
         h('span', { key: 's', className: 'dsh-tpm-sep' }),
@@ -110,9 +115,13 @@ function pillContent(view, label) {
      * the pill shows the phase label and the episode's own elapsed counter. The
      * element structure is the same as the `waiting` branch — label, stopwatch,
      * turn elapsed — so the presentation stays inside the frozen visual design.
+     *
+     * With no episode open at all (a boundary-only first token, before the first
+     * magnitude sample) the counter is absent rather than zero, and renders as the
+     * em dash with no unit.
      */
     case 'warming': {
-      const parts = stopwatchParts(view.counterMs ?? 0)
+      const parts = stopwatchParts(view.counterMs)
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
         metric(parts.value, parts.unit),
@@ -128,7 +137,7 @@ function pillContent(view, label) {
       ]
 
     case 'waiting': {
-      const parts = stopwatchParts(view.waitMs ?? 0)
+      const parts = stopwatchParts(view.waitMs)
       return [
         h('span', { key: 'l', className: 'dsh-tpm-label' }, label),
         metric(parts.value, parts.unit),

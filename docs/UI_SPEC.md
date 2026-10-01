@@ -77,7 +77,7 @@ Render a compact pill:
 ```
 
 - label = current phase of the active attempt (`思考` reasoning / `输出` output; tool-call arguments are output);
-- large/accent number = **phase-cumulative** TPS of the active attempt's current phase episode — the episode's token mass over the wall time since that episode began, rounded with `Math.round`. It is published only once the episode holds at least 3 generated samples; before that the pill shows the phase label and the episode's elapsed counter instead of a rate;
+- large/accent number = **phase-cumulative** TPS of the active attempt's current phase episode — the episode's token mass over the wall time since that episode began, rounded with `Math.round`. It is published only once the episode holds at least 3 generated samples; before that the pill shows the phase label and the episode's elapsed counter instead of a rate. When **no episode is open at all** — a name-bearing empty-arguments `tool-call-delta` has frozen TTFT and the phase, but no magnitude sample has arrived yet (`METRICS_SPEC.md` §4) — that slot is the shared em dash with no unit rather than a `0.00 s` counter: the duration does not exist, and `0.00 s` is reserved for an episode that has just opened;
 - the approximate marker `≈` is **mandatory** — live TPS quality is `estimated` unconditionally;
 - right number = turn wall elapsed time from `turn/start` to now;
 - right-side numbers use tabular digits; `tokens/s` renders at a smaller unit size.

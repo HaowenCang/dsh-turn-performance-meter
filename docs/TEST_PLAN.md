@@ -888,21 +888,49 @@ Every case drives the store/live/curve path or the real controller; no test cons
 | C2 — first-output guard | the guard is anchored at the output episode's own origin: `950 ms` after the first output sample it still stands in; one millisecond past `FIRST_OUTPUT_GUARD_MS` it is gone | FAIL | PASS |
 | D — same-phase boundary inside an active episode | the origin (`200`), numerator (`300`) and sample count (`3`) are untouched, and live and curve still agree after it | PASS (control) | PASS |
 | E1 — usage known after the boundary | the first magnitude sample takes the baseline the provider contract needs (`{output, 600}`), and the numerator is a counter delta (`30`) over the episode's own `100 ms` | FAIL | PASS |
-| E2 — usage known before the boundary | the pre-boundary counter (`600`) is not the baseline; the magnitude origin takes `660`, so numerator (`10`) and denominator (`100 ms`) describe `[400, 500]` | FAIL | PASS |
+| E2 — usage known before the boundary | the pre-boundary counter (`600`) is not the baseline; the magnitude origin takes `660`, and the numerator (`10`) is measured from the episode's own origin | FAIL | PASS |
 | E3 — no counters when the episode opened | unchanged policy: a usage chunk inside an episode still never explains it retroactively (shape mass kept) | PASS (control) | PASS |
+| D2 — baseline across a same-phase boundary | an episode's provider baseline (`{output, 700}`), origin and counter delta survive a same-phase boundary: `50` counter tokens over `200 ms` → `250` | PASS (control) | PASS |
 | F — retry / new attempt | the episode, numerator, count and baseline reset; a boundary in the new attempt opens no clock; turn TTFT stays frozen at `100` | FAIL | PASS |
 | G — Phase 9.4 gates | `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, and the §16 CASE 6 `299 ms` fixture still peaks at `2000` with no sub-`100 ms` denominator | PASS (control) | PASS |
 | H — unavailable peak | `curve.peakTps` `null`, `peak.value` `null`, `peak.display` `—`, no fabricated marker | PASS (control) | PASS |
-| A/C on the live path | the pill leaves `首响应计时` at the boundary, never returns, and warms from the first magnitude sample rather than 100 ms earlier | FAIL | PASS |
+| A/C on the live path | the pill leaves `首响应计时` at the boundary, never returns, and warms from the first magnitude sample rather than 100 ms earlier; its absent episode clock is `null`, not a measured `0` | FAIL | PASS |
+| pill stopwatch slots | source-level guard: no `?? 0` coercion of `counterMs`/`waitMs` at the three stopwatch slots, so an absent duration cannot print as `0.00 s` | FAIL | PASS |
+| I — recorded limitation | a `reasoning` delta after a boundary-only `output` delta still splits the live episode (origin `150`, `3000`) while the curve merges the run (origin `0`, `600 tokens over 250 ms`, `2400`); pre-existing, belongs to the phase fallback, deliberately not repaired | PASS (characterization) | PASS |
+| absent stopwatch duration (`test/live-format.test.js`) | `stopwatchParts(null)` is `{ '—', null }` and `stopwatchParts(0)` stays `{ '0.00', 's' }`: absent evidence is not a measured zero | PASS | PASS |
 
-The file was run against a read-only `git worktree` at `6506bd0` (created and removed for the measurement; the working
-tree was never reset, stashed or checked out): **12 tests, 4 pass, 8 fail** on the baseline and **12 pass, 0 fail** on the
-fixed tree. The four baseline-passing cases are controls and are labelled as such in the file; they are not counted as
-coverage of this defect.
+The matrix was run against a read-only `git worktree` at `6506bd0` (created and removed for the measurement; the working
+tree was never reset, stashed or checked out): **15 tests, 6 pass, 9 fail** on the baseline and **15 pass, 0 fail** on the
+fixed tree. Six baseline-passing cases are labelled in the file as controls or as a characterization (D, D2, E3, G, H, I);
+they are not counted as coverage of this defect.
 
-### 13.3 Totals
+### 13.4 Independent review response (second change set)
 
-**817 tests, 817 pass, 0 fail, 0 skipped, 0 todo** (805 before this round). `npm run verify` passes,
+An independent adversarial source review of the first change set confirmed the three-line repair, the untouched curve and
+the absence of any prohibited technique, and raised three findings. Two are corrections, one is a repair:
+
+- **a surviving divergence of a different class is recorded, not repaired** — CASE I above. It belongs to the boundary's
+  phase fallback (`output` is the declared phase for a chunk `classifyDelta` cannot attribute), and repairing it would
+  require the declared phase to be provisional until a sample confirms it, which `METRICS_SPEC.md` §4/§5 do not provide
+  for. It is frozen as a labelled characterization that passes on both trees, and stated as such in §6 of that file.
+- **the provider-counter claim was overstated** — the counter is a step function sampled at usage-chunk cadence, so its
+  delta window can start before the episode origin and end before the clock does, by up to one usage interval at each end.
+  The code was already correct; the wording in `METRICS_SPEC.md` §4/§6.1 and in the E1/E2 messages was not, and now states
+  the invariant as "the baseline shares the episode's origin".
+- **a fabricated `0.00 s` episode counter is repaired** — with no episode open the pill printed a measured-looking zero
+  for a duration that does not exist, against this project's own rule. The presenter now publishes `null` and the three
+  stopwatch slots pass the duration to `stopwatchParts` uncoerced, which already renders `{ '—', null }`. A measured zero
+  (`stopwatchParts(0)`) still renders `0.00 s`. One glyph in one state; no visual redesign, and `src/core/live-metrics.js`
+  is unchanged by this round.
+
+Coverage added by the review response: CASE D2 (baseline across a same-phase boundary), the labelled `publishedRate`
+null-origin hazard in CASE C, the latent no-episode `episodeMass()` in CASE A, the trace-evidence parity translation in
+CASE B (replacing an assertion that reduced to a fixture constant), the pill call-site source guard, and the
+`test/live-format.test.js` absent-stopwatch case.
+
+### 13.5 Totals
+
+**821 tests, 821 pass, 0 fail, 0 skipped, 0 todo** (805 before this phase). `npm run verify` passes,
 `node scripts/verify-sanitization.mjs` passes, `git diff --check` is clean, `client.js` and `lib/client.js` are
 byte-identical, and `package.json` remains version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No test was
 skipped, todo'd or deleted, and no tolerance was widened, to reach that state. No real-machine run was performed in this

@@ -10,6 +10,7 @@ import {
   formatElapsed,
   formatStopwatch,
   formatToolLabel,
+  stopwatchParts,
   truncateToolName,
 } from '../src/client/live/live-format.js'
 
@@ -31,6 +32,28 @@ test('elapsed and stopwatch formats are distinct and stable', () => {
   assert.equal(formatStopwatch(860), '0.86 s')
   assert.equal(formatStopwatch(0), '0.00 s')
   assert.equal(formatStopwatch(null), DASH)
+})
+
+test('an absent stopwatch duration is the em dash with no unit, never a zeroed counter', () => {
+  /**
+   * The pill passes its stopwatch duration straight to `stopwatchParts` (Phase
+   * 9.4.2 removed the `?? 0` coercion at the three call sites), so this function is
+   * where "the duration does not exist" is distinguished from "the duration is
+   * zero".
+   *
+   * `{ value: '—', unit: null }` renders the em dash with **no** unit, which is the
+   * rule for absent evidence (UI_SPEC §12); `{ value: '0.00', unit: 's' }` is a
+   * measured zero-length duration and must keep rendering as one. The states that
+   * reach the em dash are real: a boundary-only first token has opened no phase
+   * episode, and a turn adopted mid-turn was never observed to start.
+   */
+  assert.deepEqual(stopwatchParts(null), { value: DASH, unit: null })
+  assert.deepEqual(stopwatchParts(undefined), { value: DASH, unit: null })
+  assert.deepEqual(stopwatchParts(Number.NaN), { value: DASH, unit: null })
+  assert.deepEqual(stopwatchParts(Number.POSITIVE_INFINITY), { value: DASH, unit: null })
+  assert.deepEqual(stopwatchParts(0), { value: '0.00', unit: 's' },
+    'a measured zero is still a measurement')
+  assert.deepEqual(stopwatchParts(2800), { value: '2.80', unit: 's' })
 })
 
 test('long tool names truncate with an ellipsis instead of stretching the pill', () => {

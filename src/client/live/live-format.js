@@ -37,6 +37,12 @@ export function formatStopwatch(ms, digits = 2) {
  *
  * The live pill renders the number at the top of its type scale and the unit two
  * steps below it, which is only possible if the two are separate runs.
+ *
+ * A non-finite duration is `{ value: '—', unit: null }` — the shared em dash with
+ * no unit, this file's rule for absent evidence — and **not** a zeroed stopwatch.
+ * The distinction matters for the live pill: `0` is a measured zero-length
+ * duration, while `null` means the duration does not exist (no phase episode is
+ * open yet, or the turn start was never observed).
  */
 export function stopwatchParts(ms, digits = 2) {
   return countdownParts(ms, digits)

@@ -1448,19 +1448,33 @@ acceptance was repeated, and the retained `tpm-phase94-isolated` profile was not
 
 **Gates, documentation and Git.**
 
-- [x] `npm run build:client`, `npm run verify` (**817 pass, 0 fail, 0 skipped, 0 todo**, up from 805),
+- [x] An **independent adversarial source review** of the first change set was run and answered point by point: it
+      confirmed the three-line repair, the untouched curve, the single `observeTokenBoundary` caller, the reopened-episode
+      path and the absence of any prohibited technique, and raised three findings. Two were **wording/claim corrections**
+      (the provider-counter delta window is the usage-chunk interval, not literally the denominator interval; the
+      invariant is "the baseline shares the episode's origin") and one was a **repair** (the pill printed a fabricated
+      `0.00 s` episode counter for a duration that does not exist — the presenter now publishes `null` and the three
+      stopwatch slots render the em dash, while a measured zero still renders `0.00 s`). The one surviving divergence the
+      review found — a reasoning delta after a boundary-only `output` delta, where the live meter splits the episode and
+      the curve merges the run — is **pre-existing and belongs to the boundary's phase fallback**; it is recorded in
+      `METRICS_SPEC.md` §6 and frozen as a labelled characterization (CASE I) rather than repaired, because repairing it
+      would require provisional phase semantics that §4/§5 of the brief do not authorize.
+- [x] `npm run build:client`, `npm run verify` (**821 pass, 0 fail, 0 skipped, 0 todo**, up from 805),
       `node scripts/verify-sanitization.mjs`, `git diff --check`; `client.js` byte-identical to `lib/client.js`.
 - [x] `docs/METRICS_SPEC.md` (the two origins stated as a pair, the episode clock, the guard, the provider-counter
-      baseline, §8.2 parity), `docs/IMPLEMENTATION_LOG.md`, `docs/TEST_PLAN.md` §13, `docs/TASKS.md` and the test-file
-      listing in `docs/DIRECTORY_TREE.md` updated; historical evidence not rewritten.
+      baseline and its un-interpolated observation window, the recorded divergence, §8.2 parity, §11.5 absent-clock
+      rendering), `docs/UI_SPEC.md` §3, `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_LOG.md`, `docs/TEST_PLAN.md` §13,
+      `docs/TASKS.md` and the test-file listing in `docs/DIRECTORY_TREE.md` updated; historical evidence not rewritten.
 - [x] **Version frozen at `0.1.2`** with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No `npm publish`, no `npm version`, no
       tag, no GitHub Release.
-- [x] **Ordinary commits only.** No `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`.
+- [x] **Ordinary commits only.** No `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`; the
+      review response is a follow-up commit on top of the first change set rather than a rewrite of it.
 
 Acceptance gate: `HEAD == origin/main`, divergence `0 0` and a clean tree after the push; the new suite red on `6506bd0`
 and green on the fixed tree; live and completed episode origins identical for the fixture; the provider baseline
-describing the same interval as the denominator; the Phase 9.4 gates and the unavailable-peak semantics unchanged; 0
-failing tests; sanitization PASS; `git diff --check` clean; and no version, tag or publication change.
+describing the same episode origin as the denominator; the Phase 9.4 gates and the unavailable-peak semantics unchanged; no
+fabricated `0` where a duration or a rate does not exist; 0 failing tests; sanitization PASS; `git diff --check` clean; and
+no version, tag or publication change.
 
 **Status: source-level closure complete; a separate narrowly scoped isolated-runtime smoke may be authorized after
 independent GitHub review. No release-readiness claim is made in this phase.**

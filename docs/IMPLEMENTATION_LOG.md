@@ -5214,18 +5214,94 @@ provider-counter baseline part of the same invariant; §8.2 names the shared ori
 `docs/TEST_PLAN.md` §13 carries the matrix and the baseline result, `docs/TASKS.md` carries the phase closeout, and
 `docs/DIRECTORY_TREE.md` lists the new test file. Historical Phase 9.4 / 9.4.1 evidence was not rewritten.
 
-### 10. Gates at the change set being committed
+### 10. Gates at the first change set (commits `6477faf`, `2260033`)
 
 ```text
 npm run build:client             client.js rebuilt (558994 bytes, mirrored to lib/client.js)
 npm run verify                   structure OK; tests 817 · pass 817 · fail 0 · skipped 0 · todo 0
 node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
 git diff --check                 clean
-client.js == lib/client.js       byte-identical
+client.js == lib/client.js       byte-identical (560157 bytes each on disk)
 ```
 
 The suite stood at 805 tests before this round and stands at 817 after it; no test was skipped, todo'd or deleted and no
-tolerance was widened. `package.json` remains version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. **No
+tolerance was widened. §12 below supersedes these totals with the review-response change set. `package.json` remains
+version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. **No
 real-machine run happened in this phase** by design: no DSH profile was started, stopped, attached to or installed into,
 the retained `tpm-phase94-isolated` profile was not touched, and no browser/runtime acceptance was repeated. Nothing was
 published, versioned, tagged or released.
+
+### 11. Independent adversarial review, and the three findings it raised
+
+An independent source review was run over the committed change. It confirmed the parts that matter — the behavioural
+diff is exactly three lines in one method; `acceptSample`, `episodeMass`, `episodeRate`, `snapshot` and `publishedRate`
+are byte-identical to `6506bd0`; the completed curve genuinely needed no change; every reader and writer of the changed
+state was traced and `observeTokenBoundary` has one caller; no episode can be left permanently unopenable; no hard
+boundary leaks a stale episode; no prohibited repair is present; the bundles are in sync — and raised three findings and
+a set of coverage gaps. Each was dispositioned rather than accepted or dismissed wholesale.
+
+**Finding 1 — a surviving origin disagreement of a different class (recorded, not repaired).** If an attempt emits
+`reasoning` deltas after a name-bearing boundary classified as `output`, the live meter opens a new reasoning episode at
+the first such sample while the curve merges the two same-phase runs. Measured through the store/curve path: live origin
+`150`, elapsed `100`, count `3`, TPS `3000`; curve origin `0`, elapsed `250`, count `6`, mass `600`, TPS `2400`. The
+review's own analysis is right that this is **pre-existing** (on `6506bd0` the same fixture split at the boundary, `120`)
+and that it belongs to the boundary's *phase fallback* rather than to the episode clock. It is **not repaired here**:
+§4/§5 of the brief require a boundary-only event to establish the phase identity immediately, and removing the split
+would require that declared phase to be provisional until a sample confirms it — a semantics change the brief does not
+authorize. It is instead recorded in `docs/METRICS_SPEC.md` §6 and frozen as a labelled characterization (CASE I) that
+passes on both trees. Whether DSH can emit that sequence at all is not observable from this repository and is stated as
+an unknown rather than assumed.
+
+**Finding 2 — the "one interval" claim overstated what the provider counter can know (wording corrected).** The counter
+is a step function sampled at usage-chunk cadence, so `counter - baseline` is the growth the provider attributed between
+the chunk that supplied the baseline and the latest chunk — an interval that can begin before the episode origin and end
+before the clock does, by up to one usage interval at each end. The code was already correct and satisfies the policy as
+written; the *claim* added in §6.1 ("the numerator and the denominator describe one interval") was not, and neither were
+the two test messages that repeated it. Corrected in `docs/METRICS_SPEC.md` §4/§6.1 and in the E1/E2 messages: the
+invariant is "the baseline shares the episode's origin", and the residual is named as the un-interpolated usage-chunk
+cadence it is. No code changed for this finding.
+
+**Finding 3 — a fabricated `0.00 s` episode counter (repaired).** With no episode open, `episodeElapsedMs` is `null`, and
+two coercions turned that absence into a measured-looking zero: the presenter's `: 0` and the component's
+`stopwatchParts(view.counterMs ?? 0)`. The pill therefore printed `输出 0.00 s` for a duration that does not exist —
+directly against this file's own rule that absent evidence renders as the em dash, never as `0`. The state is newly
+reachable *because of this phase* (before it, the boundary always opened an episode), so it is repaired here, and at the
+existing seam rather than with a new one:
+
+- `src/client/live/live-presenter.js` publishes `counterMs: null` (not `0`) when `episodeElapsedMs` is not finite;
+- `src/client/live/LiveMeter.js` passes the duration to `stopwatchParts` **uncoerced** in the `ttft`, `warming` and
+  `waiting` slots. `countdownParts` already answers a non-finite duration with `{ value: '—', unit: null }`, so the pill
+  renders the em dash with no unit and the element structure is unchanged — no visual redesign, one glyph in one state;
+- a measured zero is still a measurement: `stopwatchParts(0)` stays `{ '0.00', 's' }`, which is what the first real
+  sample of an episode produces (`test/live-format.test.js`);
+- the same rule also stops the `ttft` slot from printing `0.00 S` for a turn whose `turn/start` was never observed, which
+  `docs/METRICS_SPEC.md` §4 already forbids ("never as `0`"). That path is pre-existing and unrelated to this defect; it
+  is reported as a consequence of applying one rule at one seam, not as a second repair.
+
+**Coverage gaps closed.** The tautological parity assertion (which reduced to a fixture constant and also held on
+`6506bd0`) was replaced by the trace's own evidence: `trace.samples[0].timeMs + vertex.episodeStartMs === liveOriginMs`.
+The `publishedRate` null-origin conjunct is now labelled where it is covered (CASE C, whose sub-1000 ms clock is what
+makes the coercion visible). CASE D2 adds the provider baseline to the same-phase-boundary case. The latent no-episode
+`episodeMass()` — a shape-based `0` with no denominator and no consumer — is asserted rather than left unexamined. The
+component call site is guarded at source level, since the component imports `react` and cannot be loaded in Node.
+
+**Flagged and deliberately left alone.** `src/client/ui-model.js`'s `liveViewModel` marks an absent episode clock
+`exact` with `available: false`, but that projection has **no consumer** (`live-presenter.js` imports only
+`completedViewModel`), so it renders nothing; changing it would be gratuitous. `acceptSample` accepts a sample whose
+`attemptId` is `null` after a turn has settled, which would reopen an invisible episode; it is pre-existing, untouched by
+this change, and unreachable through the controller, which drops late transient rows of a finished turn.
+
+### 12. Gates at the review-response change set
+
+```text
+npm run build:client             client.js rebuilt (560278 bytes, mirrored to lib/client.js)
+npm run verify                   structure OK; tests 821 · pass 821 · fail 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
+git diff --check                 clean
+client.js == lib/client.js       byte-identical
+baseline 6506bd0 (worktree)      15 tests · 6 pass · 9 fail  (the 6 are labelled controls/characterization)
+```
+
+The review landed after the first change set was pushed, so this round is an ordinary follow-up commit on top of it —
+no `--amend`, no rebase, no force. Nothing was published, versioned, tagged or released, and no real-machine run
+happened.

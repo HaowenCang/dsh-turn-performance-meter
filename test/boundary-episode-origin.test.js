@@ -46,17 +46,30 @@
  *
  * The provider-counter baseline moves with the same origin: it is the counter
  * snapshot known when the episode's **first magnitude sample** opened it, never
- * one taken at a boundary that opened no episode. Numerator and denominator then
- * describe one interval.
+ * one taken at a boundary that opened no episode. The counter's own observation
+ * window is still bounded by the usage-chunk cadence — that residual is the
+ * existing policy of `docs/METRICS_SPEC.md` §6.1 and is not interpolated — so the
+ * invariant is stated as "the baseline shares the episode's origin", not as "the
+ * numerator and the denominator are the same interval".
+ *
+ * ## What this file deliberately does not claim
+ *
+ * Two things are recorded rather than repaired, and both are labelled as such
+ * below: CASE I characterizes a **pre-existing** divergence belonging to the
+ * boundary's phase fallback (a reasoning delta after a boundary-only delta in the
+ * same attempt still splits the live episode while the curve merges the run), and
+ * the four control cases (D, E3, G, H) pass on the baseline too, so they are
+ * non-regression evidence rather than coverage of this defect.
  *
  * Every test drives the real path — `TurnTelemetryStore.acceptChunk` (host),
  * `liveSnapshot` (live) and `endTurn().curve` (curve) — or the real controller
  * for the presentation half. No test constructs or mutates a `LiveMeter`
- * directly; the meter is only *read*, through the store that owns it.
+ * directly; the meter is only read, through the store that owns it.
  */
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 
 import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import {
@@ -154,6 +167,16 @@ test('CASE A — a boundary-only delta freezes TTFT and opens no TPS episode', (
 
   assert.equal(record.firstTokenMs, 1_100, 'the settled record keeps the frozen boundary')
   assert.equal(attempt.samples.length, 0, 'and no magnitude is invented to go with it')
+  /**
+   * The latent state, frozen deliberately: with no episode open, `episodeMass()`
+   * answers a shape-based `0`. Nothing may publish it — `episodeRate` and
+   * `episodeRateGate` both return `null` when `episodeStartMs` is `null`, so the
+   * zero has no denominator and no consumer — and this assertion exists so that a
+   * future reader can see the value is known rather than assuming it.
+   */
+  assert.deepEqual(meterOf(store, 's-942-a').episodeMass(), { mass: 0, source: 'shape' })
+  assert.equal(meterOf(store, 's-942-a').episodeRate(1_600), null)
+  assert.equal(meterOf(store, 's-942-a').episodeRateGate(1_600), null)
 
   const settled = close(store, record, 1_600)
   assert.equal(settled.ttftMs, 100, 'the completed card reports the TTFT the live pill froze')
@@ -223,12 +246,19 @@ test('CASE B — the 100/200/250/300 fixture: live and completed share one episo
   assert.equal(vertex.episodeElapsedMs, 100)
   assert.equal(vertex.episodeSampleCount, 3)
   assert.equal(vertex.episodeMass, 300)
-  assert.equal(LOCAL_ZERO_MS + vertex.episodeStartMs, 200,
-    'translated through the curve\'s local zero, the completed episode origin is the same 200 ms instant')
   /**
-   * The translation is taken from the trace's own evidence — its first sample's
-   * absolute timestamp is the instant its local zero denotes — so the parity does
-   * not depend on the fixture constant above.
+   * The curve's coordinate convention, stated so the translation below is not a
+   * fudge: local zero is the attempt's first generated sample, so the episode
+   * origin (the first sample of the run) is local `0` and this vertex is local `100`.
+   */
+  assert.equal(vertex.episodeStartMs, 0, 'the episode opens at the curve\'s local zero')
+  assert.equal(vertex.localMs, 100, 'and the vertex is one 100 ms ladder step later')
+  /**
+   * The parity, translated through the trace's **own** evidence rather than through
+   * the fixture constant: its first sample's absolute timestamp is what its local
+   * zero denotes, so `first sample + local episode origin` is the absolute instant
+   * the completed curve measured the episode from — and it must be the instant the
+   * live meter used. This is the assertion the fix is responsible for.
    */
   assert.equal(trace.samples[0].timeMs, LOCAL_ZERO_MS, 'the attempt\'s local zero is its first generated sample')
   assert.equal(trace.samples[0].timeMs + vertex.episodeStartMs, liveOriginMs,
@@ -267,6 +297,14 @@ test('CASE C — a boundary-only phase transition is immediate and opens no outp
   assert.equal(atBoundary.episodeElapsedMs, null, 'and no output TPS clock is started')
   assert.equal(atBoundary.episodeSampleCount, 0)
   assert.equal(meterOf(store, SESSION).episodeTokenMass, 0, 'the reasoning numerator does not bridge')
+  /**
+   * These two assertions are also the coverage for `publishedRate`'s
+   * `episodeStartMs !== null` conjunct. Without it, `nowMs - null` coerces to
+   * `nowMs`, and this fixture — whose clock is 120 ms, i.e. **below**
+   * `FIRST_OUTPUT_GUARD_MS` — would republish the reasoning fallback here. The
+   * sub-1000 ms clock is what makes the case discriminating: an epoch-scale clock
+   * would make the coercion inert and hide the defect.
+   */
   assert.equal(atBoundary.tps, null,
     'the reasoning rate is not silently extended through an output phase that has produced nothing')
   assert.equal(atBoundary.fallback, false)
@@ -362,6 +400,54 @@ test('CASE D — a same-phase boundary does not reset a valid output episode', (
   assert.equal(vertex.tps, live.tps, 'live and completed agree across a same-phase boundary too')
 })
 
+test('CASE D2 — a same-phase boundary leaves an open episode\'s provider baseline alone', () => {
+  /**
+   * The same-phase rule, extended to the numerator's evidence. CASE D asserts that
+   * origin, mass and sample count survive; this case asserts that the baseline the
+   * episode was opened with survives too, and that the provider-counter null
+   * arithmetic still reads the same counter.
+   *
+   * An episode only acquires a baseline when a usable usage chunk is already known
+   * at its first magnitude sample, which needs both phases to have been observed —
+   * so the fixture reaches the output episode through reasoning first.
+   */
+  const SESSION = 's-942-d2'
+  const { store, record, attempt } = openTurn({ sessionId: SESSION, turnStartMs: 0 })
+  const usage = (timeMs, outputTokens, reasoningTokens) => store.acceptChunk(record, attempt, {
+    timeMs,
+    chunk: { type: 'usage', usage: { outputTokens, reasoningTokens } },
+  })
+
+  for (const timeMs of [0, 50, 100]) {
+    store.acceptChunk(record, attempt, { timeMs, chunk: outputDelta(100) })
+  }
+  for (const timeMs of [150, 200]) {
+    store.acceptChunk(record, attempt, { timeMs, chunk: reasoningDelta(100) })
+  }
+  usage(250, 1000, 300)
+  store.acceptChunk(record, attempt, { timeMs: 300, chunk: outputDelta(100) })
+  assert.deepEqual(meterOf(store, SESSION).episodeUsageBaseline, { phase: 'output', counter: 700 },
+    'the output episode opens with the counters known at its first magnitude sample')
+
+  usage(320, 1100, 350)
+  store.acceptChunk(record, attempt, { timeMs: 340, chunk: NAME_ONLY_DELTA })
+  assert.equal(meterOf(store, SESSION).episodeStartMs, 300, 'the same-phase boundary keeps the origin')
+  assert.deepEqual(meterOf(store, SESSION).episodeUsageBaseline, { phase: 'output', counter: 700 },
+    'and keeps the baseline the episode was opened with')
+  assert.equal(store.liveSnapshot(SESSION, 340).episodeSampleCount, 1,
+    'the boundary itself is not a sample')
+
+  for (const timeMs of [400, 500]) {
+    store.acceptChunk(record, attempt, { timeMs, chunk: outputDelta(100) })
+  }
+  const live = store.liveSnapshot(SESSION, 500)
+  assert.equal(live.episodeElapsedMs, 200)
+  assert.equal(live.episodeSampleCount, 3)
+  assert.deepEqual(meterOf(store, SESSION).episodeMass(), { mass: 50, source: 'provider-counter' },
+    'the counter delta is still measured from the episode\'s own baseline: 750 - 700')
+  assert.equal(live.tps, 250, '50 counter tokens over the episode\'s own 200 ms')
+})
+
 /* ------------------------------------ Case E — the provider-counter baseline */
 
 test('CASE E1 — usage becoming known after the boundary still anchors the real episode start', () => {
@@ -409,7 +495,14 @@ test('CASE E1 — usage becoming known after the boundary still anchors the real
   const live = store.liveSnapshot(SESSION, 300)
   assert.equal(meterOf(store, SESSION).episodeStartMs, 200)
   assert.deepEqual(meterOf(store, SESSION).episodeMass(), { mass: 30, source: 'provider-counter' })
-  assert.equal(live.episodeElapsedMs, 100, 'numerator and denominator share the [200, 300] interval')
+  /**
+   * The baseline and the denominator origin are the same episode instant. The
+   * counter's own observation window is *not* exactly the denominator: it is the
+   * growth the provider attributed between the chunk that supplied the baseline
+   * (150 ms here) and the latest chunk (280 ms), which is the existing
+   * usage-chunk-cadence policy of §6.1 and is not interpolated to the origin.
+   */
+  assert.equal(live.episodeElapsedMs, 100, 'the denominator runs from the origin the baseline was taken at')
   assert.equal(live.episodeSampleCount, 3)
   assert.equal(live.tps, 300, '30 counter tokens over the episode\'s own 100 ms')
 })
@@ -427,8 +520,10 @@ test('CASE E2 — usage known before the boundary is re-baselined at the magnitu
    * there is `670 - 660 = 10`.
    *
    * After the fix the episode that opens at 400 ms carries the counters known at
-   * that instant (`outputTotal 660`), so both the live numerator and the live
-   * denominator describe `[400, 500]` — the same interval the curve measures.
+   * that instant (`outputTotal 660`), so the numerator's baseline belongs to the
+   * episode the denominator measures. The counter's own window still runs from the
+   * chunk that supplied that baseline (350 ms) to the latest chunk (420 ms); that
+   * residual is the usage-chunk cadence policy of §6.1, not a boundary artifact.
    */
   const SESSION = 's-942-e2'
   const { store, record, attempt } = openTurn({ sessionId: SESSION, turnStartMs: 0 })
@@ -464,7 +559,7 @@ test('CASE E2 — usage known before the boundary is re-baselined at the magnitu
   const live = store.liveSnapshot(SESSION, 500)
   assert.equal(meterOf(store, SESSION).episodeStartMs, 400)
   assert.deepEqual(meterOf(store, SESSION).episodeMass(), { mass: 10, source: 'provider-counter' })
-  assert.equal(live.episodeElapsedMs, 100, 'the denominator is the same [400, 500] interval')
+  assert.equal(live.episodeElapsedMs, 100, 'the denominator origin is the instant the baseline was taken at')
   assert.equal(live.episodeSampleCount, 3)
   assert.equal(live.tps, 100, '10 counter tokens over the episode\'s own 100 ms')
   assert.notEqual(meterOf(store, SESSION).episodeUsageBaseline.counter, 600,
@@ -638,12 +733,13 @@ test('CASE A/C on the live path — the pill leaves 首响应计时 and warms fr
 
     const atBoundary = captures[boundaryIndex].view
     assert.equal(atBoundary.samples, 0, 'the boundary contributes no sample')
-    assert.equal(atBoundary.counterMs, 0, 'and no episode clock')
+    assert.equal(atBoundary.counterMs, null,
+      'and no episode clock: absent, not a measured zero — the pill draws the em dash')
 
     const afterFirstSample = captures[boundaryIndex + 1].view
     assert.equal(afterFirstSample.kind, 'warming')
     assert.equal(afterFirstSample.counterMs, 0,
-      'the episode clock starts at the first magnitude sample, not 100 ms earlier')
+      'the episode clock starts at the first magnitude sample: a real, just-opened zero')
 
     const live = controller.store.liveSnapshot(SESSION, 1_300)
     assert.equal(live.ttftMs, 100)
@@ -652,4 +748,84 @@ test('CASE A/C on the live path — the pill leaves 首响应计时 and warms fr
   } finally {
     controller.dispose()
   }
+})
+
+test('the pill never coerces an absent stopwatch duration to zero', async () => {
+  /**
+   * The other half of the presentation claim. The presenter now publishes an
+   * absent episode clock as `null` (asserted above) and `stopwatchParts` renders a
+   * non-finite duration as `{ value: '—', unit: null }` (asserted in
+   * `test/live-format.test.js`), so the pill shows the shared em dash with **no**
+   * unit. What joins those two halves is the component call site, and a `?? 0`
+   * there would manufacture a `0.00 s` counter for a duration that does not exist.
+   *
+   * The component imports `react`, so it cannot be imported in Node; this is a
+   * source-level guard on exactly the call sites that would reintroduce the
+   * fabrication, which is the same technique `test/cadence-contract.test.js` uses
+   * for the core/client timing seam.
+   */
+  const source = await readFile(new URL('../src/client/live/LiveMeter.js', import.meta.url), 'utf8')
+  for (const slot of ['view.counterMs', 'view.waitMs']) {
+    assert.equal(source.includes(`${slot} ?? 0`), false,
+      `${slot} must reach the formatter uncoerced, or an absent duration prints as 0.00 s`)
+  }
+  assert.equal(source.includes('stopwatchParts(view.counterMs)'), true,
+    'the stopwatch slots pass the duration straight through')
+})
+
+/* ------------------------- Case I — a recorded, deliberately unrepaired class */
+
+test('CASE I (recorded limitation) — a phase reversion after a boundary-only delta still splits the live episode', () => {
+  /**
+   * §5 of the brief requires a boundary-only event to establish the phase identity
+   * immediately, and `tokenEvidence` falls back to `output` for a chunk it cannot
+   * attribute. If the attempt then emits deltas of the *previous* phase, the live
+   * meter has already moved on: it opens a fresh episode at the first such sample,
+   * while the completed curve — which segments by sample phase only and never sees
+   * the boundary — merges the two same-phase runs into one episode. The two halves
+   * then report different episodes for the same stretch of stream.
+   *
+   * This belongs to the boundary's **phase fallback** (Phase 9.4), not to the
+   * episode clock (Phase 9.4.2), and it is pre-existing: baseline `6506bd0` split
+   * the episode as well, only from the boundary instant (120 ms) rather than from
+   * the next sample (150 ms). It is recorded rather than repaired, because
+   * repairing it would require the declared phase to be provisional until a sample
+   * confirms it, which §2 and §5 do not provide for. This test is therefore a
+   * **characterization**: it passes on both trees, and it exists so that a future
+   * change to the fallback class is deliberate.
+   */
+  const SESSION = 's-942-i'
+  const { store, record, attempt } = openTurn({ sessionId: SESSION, turnStartMs: 0 })
+  for (const timeMs of [0, 50, 100]) {
+    store.acceptChunk(record, attempt, { timeMs, chunk: reasoningDelta(100) })
+  }
+  store.acceptChunk(record, attempt, { timeMs: 120, chunk: NAME_ONLY_DELTA })
+  for (const timeMs of [150, 200, 250]) {
+    store.acceptChunk(record, attempt, { timeMs, chunk: reasoningDelta(100) })
+  }
+
+  const live = store.liveSnapshot(SESSION, 250)
+  const liveOriginMs = meterOf(store, SESSION).episodeStartMs
+  assert.equal(live.activePhase, 'reasoning', 'the reasoning deltas reclaim the phase identity')
+  assert.equal(liveOriginMs, 150, 'the live episode re-opens at the first reasoning sample after the boundary')
+  assert.equal(live.episodeElapsedMs, 100)
+  assert.equal(live.episodeSampleCount, 3)
+  assert.equal(live.tps, 3000, '300 tokens over the live episode\'s own 100 ms')
+
+  store.settleAttempt(attempt, settle(250))
+  const settled = close(store, record, 250)
+  const trace = settled.curve.attempts.find(entry => entry.attemptId === 'a1')
+  const vertex = trace.points.find(point => point.localMs === 250)
+  assert.equal(trace.samples.length, 6, 'the curve streams all six reasoning samples as one run')
+  assert.equal(vertex.episodeStartMs, 0, 'and merges them into a single episode from the first sample')
+  assert.equal(vertex.episodeElapsedMs, 250)
+  assert.equal(vertex.episodeSampleCount, 6)
+  assert.equal(vertex.episodeMass, 600)
+  assert.equal(vertex.tps, 2400, '600 tokens over the merged episode\'s 250 ms')
+
+  /** The divergence, stated as one fact rather than left implicit. */
+  assert.notEqual(trace.samples[0].timeMs + vertex.episodeStartMs, liveOriginMs,
+    'the boundary\'s declared phase, not the boundary instant, is what still splits this class')
+  assert.notEqual(live.tps, vertex.tps,
+    'so the two halves publish different rates for this stretch until the phase fallback is revisited')
 })

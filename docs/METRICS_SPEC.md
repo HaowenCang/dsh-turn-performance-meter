@@ -141,7 +141,8 @@ A boundary-only `tool-call-delta` establishes the first and the phase identity, 
 episode clock, holds mass `0` and sample count `0`, publishes no rate (`snapshot.tps` is `null`), and cannot arm the
 first-output guard of §6 — there is no episode for a guard to stand in for. The TPS clock starts at the first magnitude
 sample of the phase, which is also the origin the completed curve uses (§8.2), and the provider-counter baseline of §6.1
-is taken at that same instant, so the counter numerator and the elapsed denominator describe one interval. A same-phase
+is taken at that same instant, so the counter's baseline belongs to the episode the denominator measures (its own
+observation window is the usage-chunk interval described in §6.1, not an interpolated one). A same-phase
 boundary inside an episode that is already magnitude-open is TTFT/state evidence only: it resets no origin, no numerator
 and no sample count. A boundary that *is* a genuine phase transition ends the previous phase's episode immediately — the
 old phase's clock and numerator are never bridged into the new one — and leaves the new phase's episode unopened until
@@ -228,6 +229,16 @@ the provider-counter baseline. Until the first magnitude sample arrives the phas
 `episodeElapsedMs` is `null`, `episodeSampleCount` is `0`, and no rate — not even the first-output fallback — is
 published.
 
+**Recorded divergence: a phase reversion after a boundary-only delta (Phase 9.4.2, not repaired).** The live meter adopts
+a boundary's declared phase immediately (§4), while the completed curve segments by sample phase alone and never sees the
+boundary. If an attempt emits deltas of the *previous* phase after a boundary-only delta — a `reasoning-delta` following
+a name-bearing tool-call boundary classified as `output` — the live meter opens a fresh episode at the first such sample
+while the curve merges the two same-phase runs into one episode, so the two halves describe different episodes for that
+stretch (`test/boundary-episode-origin.test.js` CASE I, which passes on the pre-fix tree as well). This belongs to the
+boundary's *phase fallback*, not to the episode clock: repairing it would require the declared phase to be provisional
+until a sample confirms it, which §4 and §5 do not provide for. It is recorded rather than silently tolerated, and
+whether DSH can emit that sequence at all is not observable from this project.
+
 Implementation requirements:
 
 - **reset at every phase transition.** A `reasoning → output` change resets the episode start, the numerator and the
@@ -271,11 +282,16 @@ Phase 9.2; the presentation cadence bounds *presentation* only.
    every chunk, including `usage`, and the client fold republishes it as `assistant/live-chunk`). When a usage chunk
    has been observed for the active attempt and its split is usable per the phase-evidence policy of §8.3.1, the
    episode numerator is the counter **delta since the episode started** (`counter - baseline`), where the baseline is
-   the counter snapshot known when that episode's **first magnitude sample opened it** — the same instant as the
-   denominator origin, so the numerator and the denominator describe one interval, never a boundary-anchored one
-   (Phase 9.4.2). The snapshot used is the latest one observed at or before that instant: counters are cumulative and
-   only ever replaced by a newer chunk, so no value observed *after* the origin is ever used as its baseline, and no
-   value is interpolated to the origin. A usage chunk arriving *inside* an episode never retroactively
+   the counter snapshot known when that episode's **first magnitude sample opened it** — the same episode instant as the
+   denominator origin, rather than a boundary that opened no episode (Phase 9.4.2). The snapshot used is the latest one
+   observed at or before that instant: counters are cumulative and only ever replaced by a newer chunk, so no value
+   observed *after* the origin is ever used as its baseline, and no value is interpolated to the origin. **The counter is
+   a step function sampled at usage-chunk cadence**, so the delta it reports is the growth the provider attributed
+   between the chunk that supplied the baseline and the latest chunk: that window can begin before the origin and end
+   before the clock does, by up to one usage interval at each end. This residual is the existing policy and is *not*
+   corrected by interpolation or extrapolation — which is why the invariant is "the baseline shares the episode's
+   origin", not "the numerator and the denominator are the same interval". A usage chunk arriving *inside* an episode
+   never retroactively
    explains it, because the counter value at the episode's start was never observed; that episode keeps its shape
    magnitude. A usage chunk that arrives between a boundary-only first token and the first magnitude sample is
    therefore available to the episode that sample opens.
@@ -808,8 +824,12 @@ nothing authoritative until the attempt settles. A future model-aware exact toke
 have to be verified for the active provider/model route first (see §6).
 
 While the current episode holds fewer than `MIN_WARMUP_SAMPLES` generated samples the value is `unavailable` — no rate
-is published at all — and the pill shows the episode's elapsed counter. The first-output guard of §6 republishes the
-last positive reasoning rate for at most 1000 ms; that value is still `estimated`.
+is published at all — and the pill shows the episode's elapsed counter. **With no episode open at all** — a boundary-only
+first token before its first magnitude sample (§4) — there is no episode counter either, and the pill renders the episode
+slot as the shared em dash with no unit (`—`), per §11.4's "never silently coerce `unavailable` to zero". `0.00 s` is
+reserved for an episode that really has just opened: a *measured* zero is still a measurement. The first-output guard of
+§6 republishes the last positive reasoning rate for at most 1000 ms; that value is still `estimated`, and it cannot
+appear before an episode exists.
 
 ### 11.6 Provider/stream consistency guard
 

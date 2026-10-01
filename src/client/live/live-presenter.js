@@ -137,13 +137,19 @@ export class LivePresenter {
            * measurement. The pill keeps the phase label and the episode's elapsed
            * counter instead of a number (`docs/METRICS_SPEC.md` §12), which is the
            * pending/elapsed presentation the pre-warm-up state already used.
+           *
+           * `counterMs` is `null` — not `0` — when no episode is open at all: a
+           * boundary-only first token knows the phase and the TTFT but has opened
+           * no phase episode (§4), so there is no episode clock to print. The
+           * renderer turns a non-finite duration into the shared em dash, and
+           * `0` would claim a measured zero-length episode.
            */
           return {
             kind: 'warming',
             state: machine.state,
             turn,
             phase,
-            counterMs: Number.isFinite(snapshot.episodeElapsedMs) ? snapshot.episodeElapsedMs : 0,
+            counterMs: Number.isFinite(snapshot.episodeElapsedMs) ? snapshot.episodeElapsedMs : null,
             samples: snapshot.episodeSampleCount ?? 0,
             required: snapshot.warmupSamples ?? 0,
             elapsedMs,
