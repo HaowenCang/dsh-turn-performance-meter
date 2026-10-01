@@ -1,6 +1,7 @@
 /**
  * Same-timestamp phase labels follow the **authoritative stream order** (Phase 7C.1,
- * re-frozen under the Phase 9.2 phase-cumulative estimator).
+ * re-frozen under the Phase 9.2 phase-cumulative estimator and the Phase 9.4 publication
+ * policy).
  *
  * ## The defect this file was written against
  *
@@ -27,6 +28,17 @@
  * which episode is in force at that instant — and therefore both the label **and** the
  * number. That is exactly the live semantics: `LiveMeter.streamingPhase` is the phase of
  * the last accepted sample, and its episode clock starts at that sample.
+ *
+ * ## What Phase 9.4 added to every fixture
+ *
+ * A vertex is a measurement only when the episode in force holds at least three contributing
+ * samples **and** at least 100 ms of its own clock (`src/core/rate-publication.js`), and a
+ * withheld vertex carries `tps: null` rather than a fabricated `0`. A lone simultaneous pair
+ * is therefore a label fixture and no longer a number fixture: with two deltas the episode the
+ * pair opens can never publish. Every script below carries the same pair plus two follow-up
+ * deltas in the phase the pair leaves in force and settles at 200 ms, which gives that episode
+ * three samples and two measured vertices. The tie still decides both the label and the number;
+ * what changed is how much evidence a number needs.
  *
  * ## What is frozen here
  *
@@ -55,9 +67,11 @@ const reasoningChunk = text => ({ type: 'reasoning-delta', index: 0, text })
 /**
  * One attempt whose deltas are delivered in the order given: `[timeMs, kind, chars]`.
  * 400 Latin characters weigh 100 estimated tokens, so the default entries below carry
- * round numbers.
+ * round numbers. `settledAtMs` is the attempt's own settlement instant, and therefore the end
+ * of its trace: the scripts whose episode must publish a rate settle at 200 ms, which is two
+ * cadence steps past the episode's origin.
  */
-function driveOrdered(store, script) {
+function driveOrdered(store, script, { settledAtMs = 50 } = {}) {
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
   const attempt = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
   for (const [timeMs, kind, chars = 400] of script) {
@@ -67,7 +81,7 @@ function driveOrdered(store, script) {
     })
   }
   store.settleAttempt(attempt, {
-    settledAtMs: 50,
+    settledAtMs,
     settlementKind: 'message',
     surfaceCommitted: true,
     attemptOutcome: 'committed',
@@ -77,15 +91,19 @@ function driveOrdered(store, script) {
 }
 
 /**
- * Two curated samples at one instant, in the delivery order given. The magnitudes belong
- * to the **phases** (output 20, reasoning 10), not to the positions, so the two orders are
- * the same pair of deltas delivered differently.
+ * Two curated samples at one instant, in the delivery order given, plus the follow-up deltas
+ * the publication policy requires. The magnitudes belong to the **phases** (output 20,
+ * reasoning 10), not to the positions, so the two orders are the same pair of deltas delivered
+ * differently; the follow-ups carry the later member's phase, so the episode the pair opens
+ * reaches its third contributing sample — and its first full 100 ms — before the trace ends.
  */
 function simultaneous(first, second) {
   const tokensOf = phase => (phase === 'output' ? 20 : 10)
   return [
     { attemptId: 'a', activeTimeMs: 0, phase: first, tokens: tokensOf(first) },
     { attemptId: 'a', activeTimeMs: 0, phase: second, tokens: tokensOf(second) },
+    { attemptId: 'a', activeTimeMs: 50, phase: second, tokens: tokensOf(second) },
+    { attemptId: 'a', activeTimeMs: 100, phase: second, tokens: tokensOf(second) },
   ]
 }
 
@@ -98,55 +116,86 @@ test('the last authoritative sample at an instant owns the vertex label', () => 
    * The audit's counterexample: one attempt, one instant, an `output` delta delivered
    * first and a `reasoning` delta second. The reasoning delta is the last member, so it
    * opens the episode in force at that instant.
+   *
+   * Two further reasoning deltas and a 200 ms settlement give that episode the three samples
+   * and the 100 ms of its own clock the publication policy requires; the pair alone would
+   * publish nothing at all.
    */
-  const settled = driveOrdered(new TurnTelemetryStore(), [[0, 'output'], [0, 'reasoning']])
+  const settled = driveOrdered(
+    new TurnTelemetryStore(),
+    [[0, 'output'], [0, 'reasoning'], [50, 'reasoning'], [100, 'reasoning']],
+    { settledAtMs: 200 },
+  )
   const points = settled.curve.attempts[0].points
 
-  assert.equal(points[0].tps, 0, 'the episode opens at this instant, so its elapsed time is zero')
+  assert.equal(points[0].tps, null,
+    'the episode opens at this instant, so it has no elapsed clock and publishes no rate')
+  assert.equal(points[0].rateUnavailableReason, 'opening-anchor',
+    'and it names that fact rather than publishing a measured zero')
   assert.equal(points[0].activePhase, 'reasoning',
     `live semantics after the second sample are reasoning; the completed curve says ${points[0].activePhase}`)
   assert.equal(points.at(-1).activePhase, 'reasoning')
-  assert.equal(points.at(-1).tps, 2000,
-    'and the episode in force is the reasoning delta\'s own: its 100 tokens over its own 50 ms')
+  assert.equal(points.at(-1).tps, Math.round(300 * 1000 / 200),
+    'and the episode in force is the reasoning episode\'s own: its three deltas\' 300 tokens '
+    + 'over its own 200 ms')
+  assert.equal(points.at(-1).tps, 1500)
+  assert.equal(points[1].tps, Math.round(300 * 1000 / 100),
+    'the first published step is those 300 tokens over the episode\'s own first 100 ms')
+  assert.equal(points[1].tps, 3000)
 })
 
 test('the reverse stream order produces the opposite label from the same evidence', () => {
-  const settled = driveOrdered(new TurnTelemetryStore(), [[0, 'reasoning'], [0, 'output']])
+  const settled = driveOrdered(
+    new TurnTelemetryStore(),
+    [[0, 'reasoning'], [0, 'output'], [50, 'output'], [100, 'output']],
+    { settledAtMs: 200 },
+  )
   const points = settled.curve.attempts[0].points
 
-  assert.equal(points[0].tps, 0)
+  assert.equal(points[0].tps, null)
+  assert.equal(points[0].rateUnavailableReason, 'opening-anchor')
   assert.equal(points[0].activePhase, 'output',
     'reasoning then output: the output delta is the last authoritative member')
   assert.equal(points.at(-1).activePhase, 'output')
-  assert.equal(points.at(-1).tps, 2000)
+  assert.equal(points.at(-1).tps, 1500)
+  assert.equal(points[1].tps, 3000)
 })
 
 test('the pair decides which episode supplies the number, not only the label', () => {
   /**
    * Two simultaneous deltas with different magnitudes: 200 estimated tokens of output and
    * 100 of reasoning. Whichever is delivered last opens the episode in force, and that
-   * episode's own mass and clock produce the number — so the same evidence read in the two
-   * delivery orders publishes different rates. The totals are identical either way; only
-   * the episode boundary moved.
+   * episode's own mass and clock produce the number — so two scripts totalling the same 500
+   * estimated tokens publish different rates. Each script adds two 100-token follow-ups in the
+   * phase the pair leaves in force, which is what brings that episode over the three-sample
+   * gate; the totals stay equal because the follow-ups weigh the same in both.
    */
-  const outputFirst = driveOrdered(new TurnTelemetryStore(), [[0, 'output', 800], [0, 'reasoning', 400]])
-  const reasoningFirst = driveOrdered(new TurnTelemetryStore(), [[0, 'reasoning', 400], [0, 'output', 800]])
+  const outputFirst = driveOrdered(new TurnTelemetryStore(), [
+    [0, 'output', 800], [0, 'reasoning', 400], [50, 'reasoning', 400], [100, 'reasoning', 400],
+  ], { settledAtMs: 200 })
+  const reasoningFirst = driveOrdered(new TurnTelemetryStore(), [
+    [0, 'reasoning', 400], [0, 'output', 800], [50, 'output', 400], [100, 'output', 400],
+  ], { settledAtMs: 200 })
   const a = outputFirst.curve.attempts[0]
   const b = reasoningFirst.curve.attempts[0]
 
-  assert.deepEqual(a.points.map(point => point.activePhase), ['reasoning', 'reasoning'])
-  assert.deepEqual(b.points.map(point => point.activePhase), ['output', 'output'])
+  assert.deepEqual(a.points.map(point => point.activePhase), ['reasoning', 'reasoning', 'reasoning'])
+  assert.deepEqual(b.points.map(point => point.activePhase), ['output', 'output', 'output'])
 
-  assert.equal(a.points.at(-1).tps, Math.round(100 * 1000 / 50),
-    'output then reasoning: the reasoning episode measures its own 100 tokens over its own 50 ms')
-  assert.equal(b.points.at(-1).tps, Math.round(200 * 1000 / 50),
-    'reasoning then output: the output episode measures its own 200 tokens over its own 50 ms')
-  assert.equal(a.points.at(-1).tps, 2000)
-  assert.equal(b.points.at(-1).tps, 4000)
+  assert.equal(a.points[1].tps, Math.round(300 * 1000 / 100),
+    'output then reasoning: the reasoning episode measures its own three 100-token deltas '
+    + 'over its own first 100 ms')
+  assert.equal(b.points[1].tps, Math.round(400 * 1000 / 100),
+    'reasoning then output: the output episode measures its own 200-token delta and two '
+    + '100-token follow-ups over its own first 100 ms')
+  assert.deepEqual(a.points.map(point => point.tps), [null, 3000, 1500])
+  assert.deepEqual(b.points.map(point => point.tps), [null, 4000, 2000])
 
-  assert.equal(a.tokens, 300, 'the same evidence whichever episode is in force')
-  assert.equal(b.tokens, 300)
-  assert.equal(outputFirst.curve.peakTps, 2000)
+  assert.equal(a.tokens, 500, 'the same evidence whichever episode is in force')
+  assert.equal(b.tokens, 500)
+  assert.notEqual(a.points[1].tps, Math.round(500 * 1000 / 100),
+    'and the numerator is the episode\'s own mass, never the whole attempt\'s')
+  assert.equal(outputFirst.curve.peakTps, 3000)
   assert.equal(reasoningFirst.curve.peakTps, 4000)
 })
 
@@ -154,9 +203,10 @@ test('the same evidence in the same order produces the same series, twice', () =
   /** The estimator is a pure function of the ordered evidence; no state leaks between runs. */
   const seriesOf = settled => settled.curve.attempts[0].points
     .map(point => [point.localMs, point.tps, point.activePhase])
+  const script = [[0, 'output'], [0, 'reasoning'], [50, 'reasoning'], [100, 'reasoning']]
   assert.deepEqual(
-    seriesOf(driveOrdered(new TurnTelemetryStore(), [[0, 'output'], [0, 'reasoning']])),
-    seriesOf(driveOrdered(new TurnTelemetryStore(), [[0, 'output'], [0, 'reasoning']])),
+    seriesOf(driveOrdered(new TurnTelemetryStore(), script, { settledAtMs: 200 })),
+    seriesOf(driveOrdered(new TurnTelemetryStore(), script, { settledAtMs: 200 })),
   )
 
   const samples = simultaneous('output', 'reasoning')
@@ -191,32 +241,52 @@ test('an explicit ordinal survives compression and outranks array position', () 
     'the ordinal is the position in the stored attempt, which is the stream order')
 
   /**
-   * The array below lists the output delta first, but its ordinal says it is the later
-   * member. If array position decided the tie, the reasoning delta would be the last
-   * member, the episode in force would be reasoning (10 tokens, rate 100) and the label
-   * would be `reasoning`; the ordinal makes the output delta the later member instead
-   * (20 tokens, rate 200, label `output`).
+   * The array below lists the output delta first, but its ordinal says it is the later member
+   * at instant 0. The two further output deltas at 50 and 100 ms belong to that same episode,
+   * so the ordinal's reading is three 20-token samples over the episode's own first 100 ms.
+   *
+   * Array position would instead make the reasoning delta the later member at that instant:
+   * the output episode would then open at 50 ms, hold two samples, and be withheld. That
+   * counterfactual is asserted below, so this test fails if the ordinal ever stops deciding.
    */
   const shuffled = [
     { attemptId: 'a', activeTimeMs: 0, phase: 'output', tokens: 20, sampleOrder: 1 },
     { attemptId: 'a', activeTimeMs: 0, phase: 'reasoning', tokens: 10, sampleOrder: 0 },
+    { attemptId: 'a', activeTimeMs: 50, phase: 'output', tokens: 20, sampleOrder: 2 },
+    { attemptId: 'a', activeTimeMs: 100, phase: 'output', tokens: 20, sampleOrder: 3 },
   ]
   const trace = attemptTrace({ attemptId: 'a', startMs: 0, endMs: 100 }, shuffled)
-  assert.deepEqual(trace.points.map(point => [point.localMs, point.tps]), [[0, 0], [100, 200]])
+  assert.deepEqual(trace.points.map(point => [point.localMs, point.tps]), [[0, null], [100, 600]],
+    'the output episode is in force: 60 * 1000 / 100 = 600 at the end of its own first step')
   assert.equal(trace.points.at(-1).activePhase, 'output',
     'the ordinal, not the array position, decides: sampleOrder 1 is the later member')
+  assert.equal(trace.points.at(-1).episodeStartMs, 0,
+    'so the episode in force opened at the shared instant, not at the first follow-up')
+  assert.equal(trace.points.at(-1).episodeSampleCount, 3)
+
+  /** The same four samples with array position as the only order: the episode opens too late. */
+  const byArrayPosition = attemptTrace({ attemptId: 'a', startMs: 0, endMs: 100 }, [
+    { attemptId: 'a', activeTimeMs: 0, phase: 'output', tokens: 20 },
+    { attemptId: 'a', activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
+    { attemptId: 'a', activeTimeMs: 50, phase: 'output', tokens: 20 },
+    { attemptId: 'a', activeTimeMs: 100, phase: 'output', tokens: 20 },
+  ])
+  assert.deepEqual(byArrayPosition.points.map(point => [point.localMs, point.tps]),
+    [[0, null], [50, null], [100, null]],
+    'if array position decided, the output episode would open at 50 ms with two samples and '
+    + 'publish nothing anywhere')
 })
 
 test('the series sampler and the attempt trace resolve a tie the same way', () => {
   const trace = attemptTrace({ attemptId: 'a', startMs: 0, endMs: 100 }, simultaneous('output', 'reasoning'))
   assert.deepEqual(trace.points.map(point => [point.localMs, point.tps, point.activePhase]), [
-    [0, 0, 'reasoning'], [100, 100, 'reasoning'],
-  ])
+    [0, null, 'reasoning'], [100, 300, 'reasoning'],
+  ], 'the reasoning delta is the later member, and its episode publishes 30 * 1000 / 100 = 300')
 
   const reversed = attemptTrace({ attemptId: 'a', startMs: 0, endMs: 100 }, simultaneous('reasoning', 'output'))
   assert.deepEqual(reversed.points.map(point => [point.localMs, point.tps, point.activePhase]), [
-    [0, 0, 'output'], [100, 200, 'output'],
-  ])
+    [0, null, 'output'], [100, 600, 'output'],
+  ], 'delivered the other way round the output episode is in force: 60 * 1000 / 100 = 600')
 
   /** The standalone sampler is the same rule, reached without a segment. */
   const series = cumulativePhaseTpsSeries(simultaneous('output', 'reasoning'), {
@@ -234,7 +304,11 @@ test('the series sampler and the attempt trace resolve a tie the same way', () =
 // ---------------------------------------------------------------------------
 
 test('a simultaneous pair yields one labelled run, in the later member\'s tone', () => {
-  const settled = driveOrdered(new TurnTelemetryStore(), [[0, 'output'], [0, 'reasoning']])
+  const settled = driveOrdered(
+    new TurnTelemetryStore(),
+    [[0, 'output'], [0, 'reasoning'], [50, 'reasoning'], [100, 'reasoning']],
+    { settledAtMs: 200 },
+  )
   const trace = settled.curve.attempts[0]
 
   assert.deepEqual(trace.runs.map(run => run.phase), ['reasoning'],
@@ -308,31 +382,38 @@ test('a retry still resets the phase label and the episode, not merely the windo
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
 
+  /** Three deltas per attempt: with two, neither episode could publish a rate at all. */
   const abandoned = store.beginAttempt(record, { attemptId: 'retry-1', step: 1, startedAtMs: 0 })
-  store.acceptChunk(record, abandoned, { timeMs: 0, chunk: outputChunk('a'.repeat(400)) })
+  for (const at of [0, 50, 100]) {
+    store.acceptChunk(record, abandoned, { timeMs: at, chunk: outputChunk('a'.repeat(400)) })
+  }
   store.settleAttempt(abandoned, {
-    settledAtMs: 50,
+    settledAtMs: 100,
     settlementKind: 'attempt',
     surfaceCommitted: false,
     attemptOutcome: 'retried',
   })
 
-  const retry = store.beginAttempt(record, { attemptId: 'retry-2', step: 1, startedAtMs: 100 })
-  store.acceptChunk(record, retry, { timeMs: 100, chunk: reasoningChunk('b'.repeat(400)) })
+  const retry = store.beginAttempt(record, { attemptId: 'retry-2', step: 1, startedAtMs: 200 })
+  for (const at of [200, 250, 300]) {
+    store.acceptChunk(record, retry, { timeMs: at, chunk: reasoningChunk('b'.repeat(400)) })
+  }
   store.settleAttempt(retry, {
-    settledAtMs: 150,
+    settledAtMs: 300,
     settlementKind: 'message',
     surfaceCommitted: true,
     attemptOutcome: 'committed',
   })
 
-  const settled = store.endTurn(record, { timeMs: 300, status: 'completed' })
+  const settled = store.endTurn(record, { timeMs: 500, status: 'completed' })
   const [first, second] = settled.curve.attempts
   assert.equal(first.points[0].activePhase, 'output', 'the abandoned prefix keeps its own tone')
   assert.equal(second.points[0].activePhase, 'reasoning',
     'and the retry is labelled from its own first sample, never the abandoned one')
-  assert.equal(second.points[0].tps, 0, 'its episode opens at its own local zero')
-  assert.equal(second.points.at(-1).tps, 2000,
-    'nor does it inherit the abandoned prefix\'s tokens: 100 over its own 50 ms, not 200')
-  assert.equal(first.points.at(-1).tps, 2000)
+  assert.equal(second.points[0].tps, null, 'its episode opens at its own local zero')
+  assert.equal(second.points[0].rateUnavailableReason, 'opening-anchor')
+  assert.equal(second.points.at(-1).tps, Math.round(300 * 1000 / 100),
+    'nor does it inherit the abandoned prefix\'s tokens: 300 over its own 100 ms, not 600')
+  assert.equal(second.points.at(-1).tps, 3000)
+  assert.equal(first.points.at(-1).tps, 3000)
 })

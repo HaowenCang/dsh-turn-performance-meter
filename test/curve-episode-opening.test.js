@@ -1,34 +1,39 @@
 /**
- * Episode openings under the Phase 9.2 phase-cumulative estimator.
+ * Episode openings under the Phase 9.2 phase-cumulative estimator, as corrected
+ * by Phase 9.4.
  *
- * ## What this file used to freeze, and what it freezes now
+ * ## What this file froze, and what it freezes now
  *
- * The previous revision of this file guarded a trailing-window opening bound: the
- * special case that reopened `(-windowMs, 0]` at an attempt's local zero, and the Phase 7
- * defect it caused at a *resumed* episode inside the same attempt. The window itself no
- * longer exists. The estimator is now the cumulative average of the current phase
- * episode —
+ * The trailing-window estimator is long gone, and so is the attempt-global vertex
+ * grid that replaced it. The estimator is the cumulative average of the current
+ * phase episode —
  *
  *     tps(t) = Math.round(mass(samples of the episode at or before t) * 1000
  *                         / (t - firstSampleOfThatEpisode))
  *
- * — where an episode is the maximal run of consecutive same-phase samples. Four
- * consequences of that definition are frozen here:
+ * — where an episode is the maximal run of consecutive same-phase samples, and it
+ * is sampled on **its own** 100 ms ladder. Five consequences are frozen here:
  *
- *   1. **an episode's opening vertex is `0` with `elapsed == 0`.** The vertex that
- *      coincides with the episode's first sample has no elapsed time yet, so it carries
- *      the anchor `0` rather than a division — and it carries it however heavy that first
- *      sample is. It is not a measured zero, and it is not a fabricated trough: the very
- *      next vertex already publishes the episode's full average;
- *   2. **the next vertex is the full cumulative average over the episode so far** — every
- *      sample of the episode at or before the instant, over the whole time since the
- *      episode opened, never a one-step rate;
- *   3. **a second episode of the same phase resets its own clock and its own mass.** A
- *      phase that falls silent and returns is a new episode, not a continuation: it owns
- *      neither the earlier episode's elapsed time nor its tokens;
- *   4. **a phase transition is a shared seam, not a gap.** The two runs that meet at a
- *      transition share one vertex — `runs[i].endIndex === runs[i + 1].startIndex`, one
- *      index in the attempt's own grid, drawn by both subpaths.
+ *   1. **an episode's opening vertex carries no rate.** Its elapsed time is
+ *      exactly zero, which is not a measurement: the vertex publishes
+ *      `tps: null` with `rateUnavailableReason: 'opening-anchor'`, never `0`.
+ *      "Not measured yet" and "measured zero" are different facts, and the chart
+ *      draws the first as a gap;
+ *   2. **the following vertices are the full cumulative average over the episode
+ *      so far** — every sample of the episode at or before the instant, over the
+ *      whole time since the episode opened, never a one-step rate — once the
+ *      shared publication policy admits them (three samples, 100 ms);
+ *   3. **a second episode of the same phase resets its own clock and its own
+ *      mass.** A phase that falls silent and returns is a new episode, not a
+ *      continuation: it owns neither the earlier episode's elapsed time nor its
+ *      tokens;
+ *   4. **an episode that opens off the attempt's grid is sampled from its own
+ *      origin.** Its first vertex is its own opening instant, and its first
+ *      publishable rate therefore has a full 100 ms denominator — the 50 ms
+ *      remainder the old grid produced at 300 ms no longer exists as a vertex;
+ *   5. **a phase transition is a shared seam, not a gap.** The two runs that meet
+ *      at a transition share one vertex — `runs[i].endIndex === runs[i+1].startIndex`,
+ *      one index in the attempt's own grid, drawn by both subpaths.
  */
 
 import test from 'node:test'
@@ -36,58 +41,67 @@ import assert from 'node:assert/strict'
 
 import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import { attemptTrace, cumulativePhaseTpsSeries } from '../src/core/curve.js'
+import { RateUnavailable } from '../src/core/rate-publication.js'
 
 const outputChunk = text => ({ type: 'text-delta', index: 0, text })
 const reasoningChunk = text => ({ type: 'reasoning-delta', index: 0, text })
+
+/** `[localMs, tps]` for every vertex, so `null` is visible as the withheld rate it is. */
+const rates = points => points.map(point => [point.localMs, point.tps])
 
 // ---------------------------------------------------------------------------
 // 1. The opening vertex
 // ---------------------------------------------------------------------------
 
-test('an episode opens at 0 because its elapsed time is zero, not because its mass is', () => {
+test('an episode opens without a rate: the anchor is unavailable, not a measured zero', () => {
   /**
-   * One 400-token delta at local 0, drawn across a 300 ms tail. The opening vertex is
-   * `0` while the episode already holds 400 tokens: the zero is the anchor for
-   * `elapsed == 0`, and the vertex one ladder step later is the full average.
+   * Three deltas at 0, 50 and 80 ms, drawn across a 300 ms tail. The opening
+   * vertex describes 1 sample over 0 ms: there is no quotient, so it publishes
+   * `null` and says why. The vertex at 100 ms is the episode's full cumulative
+   * average — all 800 tokens over the whole 100 ms since the episode opened.
    */
   const points = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'output', tokens: 400 },
+    { activeTimeMs: 50, phase: 'output', tokens: 200 },
+    { activeTimeMs: 80, phase: 'output', tokens: 200 },
   ], { durationMs: 300, sampleEndMs: 300 })
 
-  assert.deepEqual(points.map(point => [point.localMs, point.tps]), [
-    [0, 0], [100, 4000], [200, 2000], [300, 1333],
+  assert.deepEqual(rates(points), [
+    [0, null], [100, 8000], [200, 4000], [300, 2667],
   ])
   assert.equal(points[0].localMs, 0, 'the opening vertex sits on the episode\'s first sample')
-  assert.equal(points[0].tps, 0)
+  assert.equal(points[0].publishable, false)
+  assert.equal(points[0].rateUnavailableReason, RateUnavailable.OPENING_ANCHOR)
   assert.equal(points[0].activePhase, 'output', 'and it is labelled with that episode\'s phase')
 
   /**
    * The next vertex is the full cumulative average over the episode so far:
-   * `mass(400) * 1000 / (100 - 0) = 4000`. An elapsed time of anything but zero at the
-   * opening vertex would have published a rate there; the definition publishes none.
+   * `mass(800) * 1000 / (100 - 0) = 8000`. An elapsed time of anything but zero at
+   * the opening vertex would have published a rate there; the definition publishes none.
    */
-  assert.equal(points[1].tps, Math.round(400 * 1000 / (100 - 0)))
-  assert.equal(points[1].tps, 4000)
+  assert.equal(points[1].tps, Math.round(800 * 1000 / (100 - 0)))
+  assert.equal(points[1].tps, 8000)
+  assert.equal(points[1].episodeSampleCount, 3)
+  assert.equal(points[1].publishable, true)
 })
 
-test('the next vertex is the full cumulative average over the episode so far', () => {
+test('the following vertex is the full cumulative average over the episode so far', () => {
   /**
-   * Two deltas of one episode — 100 tokens at local 0, 50 tokens at local 50 — and a
-   * settlement tail to 200 ms. The vertex at 100 ms carries both deltas over the whole
-   * 100 ms since the episode opened, and the vertex at 200 ms carries the same mass over
-   * the episode's own 200 ms: the cumulative average grows by accumulation, not by
-   * forgetting.
+   * Three deltas — 100 tokens at 0, 50 at 50 ms, 50 at 80 ms — and a settlement
+   * tail to 200 ms. The vertex at 100 ms carries all 200 tokens over the whole
+   * 100 ms since the episode opened, and the vertex at 200 ms carries the same
+   * mass over the episode's own 200 ms: the cumulative average grows by
+   * accumulation, not by forgetting.
    */
   const trace = attemptTrace({ attemptId: 'a', startMs: 0, endMs: 200 }, [
     { attemptId: 'a', attemptTimeMs: 0, activeTimeMs: 0, phase: 'output', tokens: 100 },
     { attemptId: 'a', attemptTimeMs: 50, activeTimeMs: 50, phase: 'output', tokens: 50 },
+    { attemptId: 'a', attemptTimeMs: 80, activeTimeMs: 80, phase: 'output', tokens: 50 },
   ], { sampleEveryMs: 100 })
 
-  assert.deepEqual(trace.points.map(point => [point.localMs, point.tps]), [
-    [0, 0], [100, 1500], [200, 750],
-  ])
-  assert.equal(trace.points[1].tps, Math.round((100 + 50) * 1000 / (100 - 0)))
-  assert.equal(trace.points[2].tps, Math.round((100 + 50) * 1000 / (200 - 0)))
+  assert.deepEqual(rates(trace.points), [[0, null], [100, 2000], [200, 1000]])
+  assert.equal(trace.points[1].tps, Math.round((100 + 50 + 50) * 1000 / (100 - 0)))
+  assert.equal(trace.points[2].tps, Math.round(200 * 1000 / (200 - 0)))
   assert.deepEqual(trace.points.map(point => point.activePhase), ['output', 'output', 'output'])
 })
 
@@ -97,51 +111,72 @@ test('the next vertex is the full cumulative average over the episode so far', (
 
 test('a second episode of the same phase after an intervening phase resets its own clock and mass', () => {
   /**
-   * Output, reasoning, output again — the third episode is the same **phase** as the
-   * first, but not the same episode. It opens its own clock at 600 ms and accumulates
-   * only its own two deltas, so its 100 ms vertex reads `200 * 1000 / 100 = 2000`.
-   * Carrying either the earlier output episode's mass (which would give 3000) or the
-   * attempt's own clock (which would give `300 * 1000 / 700 ≈ 429`) is refused by the
-   * definition.
+   * Output, reasoning, output again — the third episode is the same **phase** as
+   * the first, but not the same episode. Each episode owns three deltas of 100
+   * tokens, so each publishes `300 * 1000 / 100 = 3000` at its own 100 ms vertex.
+   * Carrying either the earlier output episode's mass (which would give more) or
+   * the attempt's own clock (which would give `300 * 1000 / 700 ≈ 429`) is refused
+   * by the definition.
    */
   const points = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'output', tokens: 100 },
+    { activeTimeMs: 50, phase: 'output', tokens: 100 },
+    { activeTimeMs: 100, phase: 'output', tokens: 100 },
     { activeTimeMs: 300, phase: 'reasoning', tokens: 100 },
+    { activeTimeMs: 350, phase: 'reasoning', tokens: 100 },
+    { activeTimeMs: 400, phase: 'reasoning', tokens: 100 },
     { activeTimeMs: 600, phase: 'output', tokens: 100 },
+    { activeTimeMs: 650, phase: 'output', tokens: 100 },
     { activeTimeMs: 700, phase: 'output', tokens: 100 },
-  ], { durationMs: 700 })
+  ], { durationMs: 700, sampleEndMs: 700 })
 
-  assert.deepEqual(points.map(point => [point.localMs, point.tps]), [
-    [0, 0], [100, 1000], [200, 500],
-    [300, 0], [400, 1000], [500, 500],
-    [600, 0], [700, 2000],
+  assert.deepEqual(rates(points), [
+    [0, null], [100, 3000], [200, 1500],
+    [300, null], [400, 3000], [500, 1500],
+    [600, null], [700, 3000],
   ])
   assert.deepEqual(points.map(point => point.activePhase),
     ['output', 'output', 'output', 'reasoning', 'reasoning', 'reasoning', 'output', 'output'])
 
-  assert.equal(points[6].tps, 0, 'the second output episode opens with elapsed == 0, exactly like the first')
-  assert.equal(points[7].tps, Math.round(200 * 1000 / (700 - 600)))
-  assert.equal(points[7].tps, 2000)
+  assert.equal(points[6].tps, null, 'the second output episode opens on its own zero-elapsed anchor')
+  assert.equal(points[6].rateUnavailableReason, RateUnavailable.OPENING_ANCHOR)
+  assert.equal(points[7].tps, Math.round(300 * 1000 / (700 - 600)))
+  assert.equal(points[7].tps, 3000)
 })
 
-test('an episode that opens between two grid instants has no zero vertex: its first sampled vertex measures from the opening', () => {
+test('an episode opening off the attempt grid is sampled on its own ladder, on its own clock', () => {
   /**
-   * The reasoning episode opens at 0; the output episode opens at 250 ms, which is not a
-   * ladder instant. The opening vertex therefore does not exist on the grid — but the
-   * clock still started at the opening, so the vertex at 300 ms measures 50 ms of the
-   * output episode, `100 * 1000 / 50 = 2000`, not 100 ms from the previous vertex.
+   * The reasoning episode opens at 0, the output episode at 250 ms — which is not
+   * a multiple of the 100 ms cadence. Under the old attempt-global grid the next
+   * vertex was 300 ms, so the output episode's first rate was `100 tokens / 50 ms`
+   * — a spike assembled entirely from the remainder of a ladder step, and the
+   * turn's `peakTps` on the v0.1.2 baseline.
+   *
+   * The episode is now sampled from its own origin, so no vertex of it exists
+   * between 250 ms and 350 ms: the 50 ms denominator is not withheld, it does not
+   * exist. Its first publishable rate has elapsed exactly 100 ms.
    */
   const points = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'reasoning', tokens: 100 },
     { activeTimeMs: 250, phase: 'output', tokens: 100 },
+    { activeTimeMs: 300, phase: 'output', tokens: 100 },
+    { activeTimeMs: 350, phase: 'output', tokens: 100 },
   ], { durationMs: 400, sampleEndMs: 400 })
 
-  assert.deepEqual(points.map(point => [point.localMs, point.tps]), [
-    [0, 0], [100, 1000], [200, 500], [300, 2000], [400, 667],
+  assert.deepEqual(points.map(point => point.localMs), [0, 100, 200, 250, 350, 400],
+    'the output episode contributes 250, 350, … and never a vertex one grid step after 250')
+  assert.equal(points.find(point => point.localMs === 300), undefined,
+    'the 50 ms denominator is absent from the grid, not merely unpublished')
+
+  const published = points.filter(point => point.publishable)
+  assert.deepEqual(published.map(point => [point.localMs, point.episodeElapsedMs, point.tps]), [
+    [350, 100, 3000],
+    [400, 150, 2000],
   ])
-  assert.deepEqual(points.filter(point => point.tps === 0).map(point => point.localMs), [0],
-    'the only zero vertex is the attempt\'s own opening: the off-ladder episode opens no anchor')
-  assert.equal(points.find(point => point.localMs === 300).tps, Math.round(100 * 1000 / (300 - 250)))
+  for (const point of points) {
+    if (point.publishable) continue
+    assert.equal(point.tps, null, 'and every withheld vertex says "no rate" rather than "zero"')
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -150,11 +185,11 @@ test('an episode that opens between two grid instants has no zero vertex: its fi
 
 test('a phase transition seam is shared by the two runs: runs[i].endIndex === runs[i+1].startIndex', () => {
   /**
-   * One attempt with three episodes — output, reasoning, output — driven through the
-   * settled pipeline, because the seam is a property of the **runs** the chart draws:
-   * the outgoing run ends on the last vertex still labelled with its phase, and the
-   * incoming run opens on that same vertex, which is what makes a tone change a seam
-   * rather than a blank horizontal gap.
+   * One attempt with three episodes — output, reasoning, output — driven through
+   * the settled pipeline, because the seam is a property of the **runs** the chart
+   * draws: the outgoing run ends on the last vertex still labelled with its phase,
+   * and the incoming run opens on that same vertex, which is what makes a tone
+   * change a seam rather than a blank horizontal gap.
    */
   const store = new TurnTelemetryStore()
   const record = store.beginTurn({ sessionId: 's1', turn: 1, timeMs: 0 })
@@ -194,6 +229,10 @@ test('a phase transition seam is shared by the two runs: runs[i].endIndex === ru
   assert.equal(runs[1].points[1].activePhase, 'reasoning',
     'and the first vertex beyond the seam is the one the new episode labels')
   assert.equal(runs[1].points[1].localMs, 300)
-  assert.equal(runs[1].points[1].tps, 0,
-    'that vertex is the reasoning episode\'s opening anchor')
+  assert.equal(runs[1].points[1].publishable, false,
+    'that vertex is the reasoning episode\'s opening anchor: no elapsed time, no rate')
+  assert.equal(runs[1].points[1].rateUnavailableReason, RateUnavailable.OPENING_ANCHOR)
+  assert.equal(runs[1].points[1].tps, null)
+  assert.equal(trace.points.every(point => point.tps === null), true,
+    'and no episode here reaches the gates: one or two deltas are not a rate')
 })

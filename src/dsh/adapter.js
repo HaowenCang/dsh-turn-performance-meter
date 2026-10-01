@@ -37,6 +37,7 @@
 import {
   classifyDelta,
   deltaText,
+  firstTokenTime,
   isTokenDelta,
   usageFromChunk,
 } from '../core/delta-accounting.js'
@@ -548,6 +549,22 @@ export function attemptFromDecoded({
     samples,
     chunks: decoded.chunks,
     decoded,
+    /**
+     * The attempt's first-token instant, as DSH's own predicate reads it: the
+     * time of the first chunk `isTokenDelta` accepts, which includes a
+     * name-bearing tool-call delta whose argument fragment is still empty.
+     *
+     * It is published beside `samples` rather than derived from them because the
+     * two are different sets — the boundary chunk contributes no sample — and
+     * deriving TTFT from the sample list is what made a reloaded card report `—`
+     * for a turn whose TTFT the live session had already measured.
+     *
+     * The decoder computes it; `firstTokenTime` re-derives it for a caller that
+     * hands in a bare decode result, so both entry points agree.
+     */
+    firstTokenMs: Number.isFinite(decoded?.firstTokenTimeMs)
+      ? decoded.firstTokenTimeMs
+      : firstTokenTime(decoded?.chunks),
     usage,
     usageSource,
     startedAtMs,

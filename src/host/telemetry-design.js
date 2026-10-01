@@ -17,6 +17,7 @@
 
 import { LiveMeter, LivePhase } from '../core/live-metrics.js'
 import { sampleFromChunk, heuristicTokenWeight } from '../core/token-allocation.js'
+import { tokenEvidence } from '../core/delta-accounting.js'
 import { compressAttempts } from '../core/time-axis.js'
 import { curveSource } from '../core/curve-source.js'
 import {
@@ -191,6 +192,38 @@ export class TurnTelemetryStore {
   }
 
   /**
+   * Freeze the turn's first-token instant, once.
+   *
+   * TTFT is `firstToken - turn/start`, and the first token is the first chunk
+   * DSH's own predicate accepts (`tokenEvidence().countsAsToken`). The stamp is
+   * one-way and additive: a later chunk can never move it forward, and an earlier
+   * one can only replace it with an earlier instant — which is what lets a
+   * durable reconstruction report the same TTFT a live session froze, whichever
+   * order the two planes delivered their evidence in.
+   *
+   * `firstTokenMs` is deliberately *not* the earliest accepted sample. A
+   * name-bearing tool-call delta with an empty argument fragment is the model's
+   * first token and contributes no sample at all, so the two sets are not the
+   * same, and treating them as one is what left the pill on the first-response
+   * stopwatch after the boundary had passed.
+   *
+   * @returns {boolean} whether the recorded instant changed
+   */
+  firstTokenObserved(record, { timeMs }) {
+    if (record === null || record === undefined) return false
+    if (!Number.isFinite(timeMs)) return false
+    if (!Number.isFinite(record.firstTokenMs)) {
+      record.firstTokenMs = timeMs
+      return true
+    }
+    if (timeMs < record.firstTokenMs) {
+      record.firstTokenMs = timeMs
+      return true
+    }
+    return false
+  }
+
+  /**
    * Accept one streamed chunk. Non-generated chunks (block, usage, finish) are
    * ignored by `sampleFromChunk`; a `usage` chunk additionally updates the
    * attempt's authoritative usage without becoming a sample.
@@ -201,6 +234,16 @@ export class TurnTelemetryStore {
    * with the sample: a late frame for an attempt the turn has already moved past
    * therefore cannot enter the newer attempt's cumulative rate, even though the
    * closed attempt still keeps it for the completed curve.
+   *
+   * ## A chunk can be token evidence without being a sample
+   *
+   * DSH's `isTokenDelta` accepts a name-bearing `tool-call-delta` whose
+   * `argumentsDelta` is empty, while `classifyDelta` attributes no argument text
+   * to it and `sampleFromChunk` therefore returns `null`. The TTFT boundary and
+   * the TPS-shape sample set are two different questions, and this method answers
+   * both: the boundary freezes the turn's first token and moves the live meter out
+   * of its first-response stage, and no magnitude is fabricated to make the sample
+   * set look complete.
    *
    * @returns {object|null} the accepted sample, or `null`
    */
@@ -216,9 +259,25 @@ export class TurnTelemetryStore {
       this.live(record.sessionId).observeUsage({ attemptId: attempt.attemptId ?? null, usage: chunk.usage })
       return null
     }
+    if (!Number.isFinite(timeMs)) return null
     const sample = sampleFromChunk(timeMs, chunk, this.estimateTokens)
-    if (sample === null) return null
-    record.firstTokenMs ??= timeMs
+    if (sample === null) {
+      /**
+       * No usable TPS-shape magnitude. That is not the same as "not model
+       * output": the DSH first-token predicate may still accept the chunk, and
+       * when it does, this is the turn's TTFT boundary.
+       */
+      const evidence = tokenEvidence(chunk)
+      if (!evidence.countsAsToken) return null
+      this.firstTokenObserved(record, { timeMs })
+      this.live(record.sessionId).observeTokenBoundary({
+        attemptId: attempt.attemptId ?? null,
+        timeMs,
+        phase: evidence.phase,
+      })
+      return null
+    }
+    this.firstTokenObserved(record, { timeMs })
     const stamped = { ...sample, attemptId: attempt.attemptId ?? null }
     attempt.samples.push(stamped)
     this.live(record.sessionId).acceptSample(stamped)
@@ -355,6 +414,17 @@ export class TurnTelemetryStore {
         .filter(attempt => attempt?.anchored === true)
         .map(attempt => attempt.attemptId ?? null),
     )
+    /**
+     * Each attempt's calibrated allocation mode, carried beside its samples.
+     * `phase-anchored` means the provider's own phase split mapped onto the
+     * observed stream; `total-anchored` means only the attempt's integral is
+     * anchored. The distinction is not recoverable from a sample, so it travels
+     * as a separate fact and is published on the peak's debug provenance.
+     */
+    const allocationModes = new Map()
+    for (const attempt of source.attempts) {
+      allocationModes.set(attempt?.attemptId ?? null, attempt?.temporalAllocationMode ?? null)
+    }
 
     // The curve is built from the same compressed clock the live meter used, so
     // a point read off it means the same thing the pill showed at that instant.
@@ -383,6 +453,7 @@ export class TurnTelemetryStore {
       sampleEveryMs: CURVE_SAMPLE_EVERY_MS,
       maxPoints: MAX_SERIES_POINTS,
       calibratedAttemptIds: calibratedIds,
+      temporalAllocationModeByAttemptId: allocationModes,
     })
 
     /**
@@ -504,6 +575,11 @@ export class TurnTelemetryStore {
          */
         points: trace.points,
         /**
+         * The attempt's own winning measurement, with the episode facts that
+         * produced it. Debug-only; see `curve.peakProvenance` below.
+         */
+        peakProvenance: trace.peakProvenance,
+        /**
          * The attempt's own curve-source samples, on its attempt-local clock, exactly
          * as the phase-cumulative estimator read them. They are the bridge between a
          * printed token total and a drawn vertex, which is why they are published
@@ -535,29 +611,55 @@ export class TurnTelemetryStore {
         phase: key,
         present: runs.some(run => run.points.length >= 2),
         runs,
-        peak: runs.reduce((highest, run) => Math.max(highest, run.peak), 0),
+        /**
+         * The phase's strongest **publishable** vertex, or `null` when the phase
+         * produced no measurement that passed the shared publication policy. It is
+         * read from the points rather than from `run.peak` so a phase whose runs
+         * are all below the gates reports `null` instead of a fabricated zero.
+         */
+        peak: peakTps(...runs.map(run => run.points)),
       }
     })
 
     /**
      * The same allocation, counted the way the chart is drawn. `lineVertices` is the
-     * number of path vertices the SVG will receive — runs of two or more points — and
-     * `markers` is the number of one-vertex runs, each of which becomes a point marker
-     * rather than a vertex of a line. Their sum is what `MAX_RENDER_POINTS_TOTAL`
-     * bounds; see `renderBudget` below for why the two are never published as one
-     * number called `drawnPoints`.
+     * number of path vertices the SVG will receive — runs of two or more **measured**
+     * points — and `markers` is the number of one-vertex runs, each of which becomes a
+     * point marker rather than a vertex of a line. Their sum is what
+     * `MAX_RENDER_POINTS_TOTAL` bounds; see `renderBudget` below for why the two are
+     * never published as one number called `drawnPoints`.
      *
      * A phase-transition vertex is charged **once**, to both of the runs that share it,
      * because it is drawn as the endpoint of both subpaths. That is why the sum below
      * is the honest count of emitted vertices and why the seam can never push the
      * chart past its own bound.
+     *
+     * ## Withheld vertices are spent from the allocation, not drawn
+     *
+     * The allocator charges a run for **every** vertex it holds, which is the right unit
+     * for a budget: a vertex the publication policy later withholds still cost the run
+     * its seat. What the chart *emits* is a different set, and this accounting exists to
+     * state the emitted one, because it is the number `curveViewModel.renderElementPoints`
+     * reports and the one a reader is checking against the bound.
+     *
+     * Since Phase 9.4 a withheld vertex carries `tps: null` instead of a fabricated `0`
+     * (`src/core/rate-publication.js`), and no path is drawn through it. On a dense
+     * fixture that is not a rounding difference: a three-delta attempt on a 250 ms grid
+     * is allocated four vertices and measures two, so counting allocations would report
+     * twice the elements the SVG receives and make the two published numbers disagree by
+     * exactly the number of withheld vertices. Filtering here keeps the pair equal, which
+     * is the property the budget tests assert, and keeps `elementPoints <= allocated <=
+     * total` true in the only direction that matters.
      */
+    const isMeasuredPoint = point => Number.isFinite(point?.tps)
     let lineVertices = 0
     let markers = 0
     for (const entry of series) {
       for (const run of entry.runs) {
-        if (run.points.length >= 2) lineVertices += run.points.length
-        else if (run.points.length === 1) markers += 1
+        const points = Array.isArray(run.points) ? run.points : []
+        const measured = points.filter(isMeasuredPoint).length
+        if (measured >= 2) lineVertices += measured
+        else if (points.length === 1) markers += 1
       }
     }
 
@@ -625,6 +727,28 @@ export class TurnTelemetryStore {
          */
         phaseRuns: phaseRuns(traces),
         peakTps: peakTps(...traces.map(trace => trace.points)),
+        /**
+         * **Debug-only provenance of the published peak.**
+         *
+         * `peakTps` is a maximum, and a maximum says nothing about how it was
+         * produced. The Phase 9.4 defect was exactly that: a peak whose value came
+         * from a denominator — 50 ms, or one millisecond — that no surface
+         * reported. This record publishes the winning attempt, phase, episode
+         * origin, elapsed clock, contributing sample count and mass, the
+         * calibration mode and the timestamps of the samples behind the number, so
+         * a spike can be explained rather than merely observed.
+         *
+         * It is diagnostics and must not be rendered: no module in `src/client`
+         * reads it, and `test/curve-rate-publication.test.js` asserts that the
+         * composed view model does not carry it. `null` when nothing is
+         * publishable, which is the same condition that makes `peakTps` `null`.
+         */
+        peakProvenance: traces.reduce(
+          (best, trace) => (trace.peakProvenance === null
+            ? best
+            : (best === null || trace.peakProvenance.tps > best.tps ? trace.peakProvenance : best)),
+          null,
+        ),
         /**
          * Flat concatenations of the budgeted runs, retained for callers that want one
          * array of vertices. They carry `attemptId` on every point; a renderer must

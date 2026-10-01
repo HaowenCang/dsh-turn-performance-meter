@@ -34,43 +34,57 @@ import {
 
 test('the phase-cumulative series measures one episode at a time', () => {
   /**
-   * A reasoning delta and, half a second later, an output delta; the attempt's own end
-   * instant is 1000 ms, so the terminal episode is drawn across its own tail.
+   * A reasoning episode of three deltas and, half a second later, an output episode of
+   * three; the attempt's own end instant is 1000 ms, so the terminal episode is drawn
+   * across its own tail.
    *
-   *    0 ms    the reasoning episode opens: elapsed 0, so the vertex publishes 0
-   *    250     reasoning: 600 tokens / 0.25 s                            -> 2400
-   *    500     the output episode opens (reasoning's clock and mass are not carried) -> 0
-   *    750     output: 400 / 0.25 s                                      -> 1600
-   *    1000    output: 400 / 0.5 s                                       -> 800
+   *    0 ms    the reasoning episode opens: elapsed 0, so the vertex publishes no rate
+   *    100     two samples: still below the three-sample publication gate
+   *    200     reasoning: 600 tokens / 0.2 s                            -> 3000
+   *    500     the output episode opens (reasoning's clock and mass are not carried)
+   *    600     output: 300 / 0.1 s                                      -> 3000
+   *    1000    output: 300 / 0.5 s                                      ->  600
    */
   const samples = [
-    { activeTimeMs: 0, phase: 'reasoning', tokens: 600 },
-    { activeTimeMs: 500, phase: 'output', tokens: 400 },
+    { activeTimeMs: 0, phase: 'reasoning', tokens: 200 },
+    { activeTimeMs: 100, phase: 'reasoning', tokens: 200 },
+    { activeTimeMs: 200, phase: 'reasoning', tokens: 200 },
+    { activeTimeMs: 500, phase: 'output', tokens: 100 },
+    { activeTimeMs: 550, phase: 'output', tokens: 100 },
+    { activeTimeMs: 600, phase: 'output', tokens: 100 },
   ]
   const series = cumulativePhaseTpsSeries(samples, {
-    sampleEveryMs: 250, durationMs: 1000, sampleEndMs: 1000,
+    sampleEveryMs: 100, durationMs: 1000, sampleEndMs: 1000,
   })
   assert.deepEqual(series.map(p => [p.localMs, p.tps]), [
-    [0, 0], [250, 2400], [500, 0], [750, 1600], [1000, 800],
+    [0, null], [100, null], [200, 3000], [300, 2000], [400, 1500], [500, null],
+    [600, 3000], [700, 1500], [800, 1000], [900, 750], [1000, 600],
   ])
   assert.deepEqual(series.map(p => p.activePhase),
-    ['reasoning', 'reasoning', 'output', 'output', 'output'])
-  assert.equal(peakTps(series), 2400, 'the peak is the maximum of the published series')
+    ['reasoning', 'reasoning', 'reasoning', 'reasoning', 'reasoning', 'output',
+      'output', 'output', 'output', 'output', 'output'])
+  assert.equal(peakTps(series), 3000, 'the peak is the maximum of the published series')
+  assert.equal(series[0].rateUnavailableReason, 'opening-anchor')
+  assert.equal(series[1].rateUnavailableReason, 'below-sample-warmup')
+  assert.equal(series[5].rateUnavailableReason, 'opening-anchor',
+    'the output episode opens its own clock at 500 ms, exactly as the reasoning one did at 0')
 })
 
 test('a bounded call stops at its own end instant rather than at `durationMs`', () => {
   /**
    * `durationMs` is a ceiling, not a request: the sampler covers the attempt's own
-   * evidence — here, the episode that opened on the first delta and ran to the second —
+   * evidence — here, the episode that opened on its first delta and ran to the third —
    * and never samples past it.
    */
   const samples = [
     { activeTimeMs: 0, phase: 'output', tokens: 100 },
+    { activeTimeMs: 250, phase: 'output', tokens: 100 },
     { activeTimeMs: 500, phase: 'output', tokens: 100 },
   ]
   const long = cumulativePhaseTpsSeries(samples, { sampleEveryMs: 250, durationMs: 10_000 })
-  assert.deepEqual(long.map(point => point.localMs), [0, 250, 500])
-  assert.deepEqual(long.map(point => point.tps), [0, 400, 400])
+  assert.deepEqual(long.map(point => point.localMs), [0, 250, 500],
+    'the episode ladder stops at the attempt\'s own last instant, not at the ceiling')
+  assert.deepEqual(long.map(point => point.tps), [null, null, 600])
 
   /** And a ceiling below the end still bounds the trace, as before. */
   const bounded = cumulativePhaseTpsSeries(samples, { sampleEveryMs: 250, toMs: 250 })
@@ -80,38 +94,46 @@ test('a bounded call stops at its own end instant rather than at `durationMs`', 
 test('the phase is a label on a vertex, never a filter of the series', () => {
   const samples = [
     { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
+    { activeTimeMs: 100, phase: 'reasoning', tokens: 10 },
+    { activeTimeMs: 200, phase: 'reasoning', tokens: 10 },
     { activeTimeMs: 750, phase: 'output', tokens: 90 },
+    { activeTimeMs: 800, phase: 'output', tokens: 90 },
+    { activeTimeMs: 850, phase: 'output', tokens: 90 },
   ]
   const series = cumulativePhaseTpsSeries(samples, { sampleEveryMs: 250, durationMs: 1750 })
   assert.deepEqual(series.map(p => [p.localMs, p.activePhase]), [
-    [0, 'reasoning'], [250, 'reasoning'], [500, 'reasoning'], [750, 'output'],
+    [0, 'reasoning'], [250, 'reasoning'], [500, 'reasoning'],
+    [750, 'output'], [850, 'output'],
   ], 'the label changes exactly where the newest sample does, to the trace\'s own end')
-  assert.deepEqual(series.map(p => p.tps), [0, 40, 20, 0],
+  assert.deepEqual(series.map(p => p.tps), [null, 120, 60, null, 2700],
     'one measurement per episode: reasoning is averaged against its own clock until the '
     + 'boundary, and the boundary vertex opens the output episode with no elapsed time yet')
 })
 
 test('a stall decays hyperbolically and never reaches exactly zero', () => {
   /**
-   * 5 s of silence inside one episode. The numerator holds at the first delta's 100
-   * tokens while the clock advances, so the stall is drawn as a continuous decay,
+   * 5 s of silence inside one episode. The numerator holds at the first three deltas'
+   * 300 tokens while the clock advances, so the stall is drawn as a continuous decay,
    * never as a stretch reading zero:
    *
-   *    500 ms   100 / 0.5 s   -> 200
-   *    3000     100 / 3       -> 33.3 -> 33
-   *    5000     200 / 5       -> 40   (the second delta lands)
+   *    500 ms   300 / 0.5 s   -> 600
+   *    3000     300 / 3       -> 100
+   *    5000     400 / 5       ->  80  (the fourth delta lands)
    */
   const series = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'output', tokens: 100 },
+    { activeTimeMs: 100, phase: 'output', tokens: 100 },
+    { activeTimeMs: 200, phase: 'output', tokens: 100 },
     { activeTimeMs: 5000, phase: 'output', tokens: 100 },
   ], { sampleEveryMs: 500, durationMs: 5000 })
 
-  assert.equal(series.find(p => p.localMs === 500).tps, 200)
-  assert.equal(series.find(p => p.localMs === 3000).tps, 33)
-  assert.equal(series.find(p => p.localMs === 5000).tps, 40)
+  assert.equal(series.find(p => p.localMs === 500).tps, 600)
+  assert.equal(series.find(p => p.localMs === 3000).tps, 100)
+  assert.equal(series.find(p => p.localMs === 5000).tps, 80)
   assert.equal(series.at(-1).localMs, 5000)
-  assert.ok(series.slice(1).every(point => point.tps > 0),
-    'the decay is asymptotic: no vertex after the opening one reads exactly zero')
+  assert.ok(series.slice(2).every(point => point.tps > 0),
+    'the decay is asymptotic: no vertex after the warm-up reads exactly zero')
+  assert.equal(series[0].tps, null, 'and the opening anchor is not a zero either')
 })
 
 test('simultaneous samples of two phases resolve by the authoritative stream order', () => {
@@ -130,22 +152,34 @@ test('simultaneous samples of two phases resolve by the authoritative stream ord
    * the two orders publish legitimately different labels *and* rates; the assertions below
    * state both.
    * `test/curve-stream-order.test.js` carries the end-to-end counterexample.
+   *
+   * Three deltas follow the simultaneous pair, so the episode each order opens clears the
+   * publication gates and the difference between the two orders is visible as a rate.
    */
+  const follow = (phase, tokens) => [
+    { activeTimeMs: 100, phase, tokens },
+    { activeTimeMs: 200, phase, tokens },
+    { activeTimeMs: 300, phase, tokens },
+  ]
   const reasoningFirst = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
     { activeTimeMs: 0, phase: 'output', tokens: 20 },
+    ...follow('output', 20),
   ], { sampleEveryMs: 250, durationMs: 500, sampleEndMs: 500 })
   const outputFirst = cumulativePhaseTpsSeries([
     { activeTimeMs: 0, phase: 'output', tokens: 20 },
     { activeTimeMs: 0, phase: 'reasoning', tokens: 10 },
+    ...follow('reasoning', 10),
   ], { sampleEveryMs: 250, durationMs: 500, sampleEndMs: 500 })
 
-  assert.deepEqual(reasoningFirst.map(point => point.tps), [0, 80, 40],
-    'the output episode the newest sample opened: 20 tokens over 250 ms and over 500 ms')
-  assert.deepEqual(outputFirst.map(point => point.tps), [0, 40, 20],
-    'and the reasoning episode the other order opened: 10 tokens over the same clocks')
+  assert.deepEqual(reasoningFirst.map(point => point.tps), [null, 240, 160],
+    'the output episode the newest sample opened: 60 tokens over 250 ms at the first ladder '
+    + 'step, and 80 over 500 ms at the second')
+  assert.deepEqual(outputFirst.map(point => point.tps), [null, 120, 80],
+    'and the reasoning episode the other order opened: 30 tokens over 250 ms, 40 over 500 ms')
   assert.equal(reasoningFirst[0].tps, outputFirst[0].tps,
-    'at the shared instant both orders open an episode, so both publish the zero anchor')
+    'at the shared instant both orders open an episode, so neither publishes a rate')
+  assert.equal(reasoningFirst[0].tps, null)
   assert.equal(reasoningFirst[0].activePhase, 'output',
     'reasoning then output: the output delta is the last authoritative sample')
   assert.equal(outputFirst[0].activePhase, 'reasoning',
@@ -453,30 +487,34 @@ test('an attempt trace measures its own clock and relabels onto the compressed o
   const segment = { attemptId: 'b', startMs: 5000, endMs: 5500 }
   const trace = attemptTrace(segment, [
     { attemptId: 'b', attemptTimeMs: 0, activeTimeMs: 5000, phase: 'output', tokens: 100 },
+    { attemptId: 'b', attemptTimeMs: 250, activeTimeMs: 5250, phase: 'output', tokens: 100 },
     { attemptId: 'b', attemptTimeMs: 500, activeTimeMs: 5500, phase: 'output', tokens: 100 },
   ], { sampleEveryMs: 250 })
   assert.deepEqual(trace.points.map(point => point.localMs), [0, 250, 500])
   assert.deepEqual(trace.points.map(point => point.timeMs), [5000, 5250, 5500],
     'the drawn coordinate is the local one shifted by the segment start')
-  assert.deepEqual(trace.points.map(point => point.tps), [0, 400, 400],
-    'the episode opens at zero; 100 tokens at 250 ms and 200 at 500 ms average to 400')
+  assert.deepEqual(trace.points.map(point => point.tps), [null, null, 600],
+    'the episode opens on its anchor; two samples are still below the gate at 250 ms, and at '
+    + '500 ms the three 100-token deltas average to 600 over the episode\'s own half second')
   assert.equal(trace.durationMs, 500, 'the trace is as wide as the attempt\'s own generation')
-  assert.equal(trace.tokens, 200)
+  assert.equal(trace.tokens, 300)
   assert.equal(trace.calibratedTokens, null, 'an estimated magnitude is never reported as calibrated')
+  assert.equal(trace.points[0].rateUnavailableReason, 'opening-anchor')
 })
 
 test('an off-grid final sample is the trace\'s own last vertex on both clocks', () => {
   const segment = { attemptId: 'b', startMs: 5000, endMs: 5510 }
   const trace = attemptTrace(segment, [
     { attemptId: 'b', attemptTimeMs: 0, activeTimeMs: 5000, phase: 'output', tokens: 100 },
+    { attemptId: 'b', attemptTimeMs: 100, activeTimeMs: 5100, phase: 'output', tokens: 100 },
     { attemptId: 'b', attemptTimeMs: 510, activeTimeMs: 5510, phase: 'output', tokens: 100 },
   ], { sampleEveryMs: 250 })
   assert.deepEqual(trace.points.map(point => point.localMs), [0, 250, 500, 510])
   assert.deepEqual(trace.points.map(point => point.timeMs), [5000, 5250, 5500, 5510],
     'the endpoint anchor is relabelled like every other vertex')
-  assert.deepEqual(trace.points.map(point => point.tps), [0, 400, 200, 392],
-    'the frozen numerator at 100 tokens is diluted to 200 at the 500 ms ladder step, and the '
-    + 'off-grid final delta lifts the episode mass to 200 over its 510 ms clock')
+  assert.deepEqual(trace.points.map(point => point.tps), [null, null, null, 588],
+    'the two deltas that have arrived by 250 ms are still below the sample gate, and the third '
+    + 'arrives only at the off-grid 510 ms vertex: 300 tokens over the episode\'s 510 ms clock')
   assert.equal(trace.points.at(-1).timeMs, trace.startMs + trace.durationMs)
 })
 

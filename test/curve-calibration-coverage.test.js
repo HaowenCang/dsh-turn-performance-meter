@@ -48,7 +48,14 @@ const DELTA_CHARS = 400
 const outputChunk = text => ({ type: 'text-delta', index: 0, text })
 
 /**
- * A turn of several attempts, each with two deltas half a second apart.
+ * A turn of several attempts, each with **three** deltas — two of them 100 ms apart and
+ * the third half a second after the first.
+ *
+ * Three deltas are the smallest episode the corrected publication policy can publish a
+ * rate for: a vertex needs `MIN_RATE_SAMPLES` contributing samples *and* 100 ms of the
+ * episode's own clock (`src/core/rate-publication.js`). A two-delta attempt has no
+ * publishable vertex at all, so its peak is `null` and the peak assertions below would
+ * have nothing to compare.
  *
  * `usages` is positional: `null` means the attempt reported no provider usage at all,
  * which is the case the coverage levels are about.
@@ -63,6 +70,7 @@ function drive(usages) {
       startedAtMs: index * 1000,
     })
     store.acceptChunk(record, attempt, { timeMs: index * 1000, chunk: outputChunk('x'.repeat(DELTA_CHARS)) })
+    store.acceptChunk(record, attempt, { timeMs: index * 1000 + 100, chunk: outputChunk('x'.repeat(DELTA_CHARS)) })
     store.acceptChunk(record, attempt, { timeMs: index * 1000 + 500, chunk: outputChunk('x'.repeat(DELTA_CHARS)) })
     store.settleAttempt(attempt, {
       settledAtMs: index * 1000 + 550,
@@ -148,7 +156,7 @@ test('no coverage: no attempt reported usage, and the raw shape is drawn honestl
 
   /** Nothing was invented: the samples are the raw shape weights, relabelled. */
   for (const attempt of settled.curve.attempts) {
-    assert.equal(attempt.tokens, 2 * 100)
+    assert.equal(attempt.tokens, 3 * 100)
     for (const sample of attempt.samples) assert.equal(sample.quality, 'estimated')
   }
 })
@@ -192,6 +200,10 @@ test('the peak remains approximate under full, partial and absent coverage', () 
    * anchors an attempt's **integral**, never the individual vertices, and DSH attaches
    * no token count to a delta. An anchored winning attempt therefore does not make the
    * peak exact, and the user-facing representation is `≈` in every case.
+   *
+   * Every fixture here publishes a rate at its episode's first full step — 900 anchored
+   * units over the episode's own 500 ms is 1800, and the same three deltas left at the raw
+   * shape weight are 600 — so each coverage level has a real peak to reason about.
    */
   const cases = [
     { name: 'full', usages: [ANCHOR, { outputTokens: 300, reasoningTokens: 0 }] },
@@ -213,6 +225,10 @@ test('the winning attempt\'s anchoring does not upgrade the peak', () => {
    * estimates of the same kind, so identifying which one won must not change how the
    * number is presented — which is why the coverage level travels in the provenance
    * rather than in the peak's label.
+   *
+   * The fixtures make the owner unambiguous: the 900-token anchor puts attempt-1 at
+   * 1800 against the unanchored attempt-2's 600, while a 50-token anchor leaves
+   * attempt-1 at 100 and lets the unanchored attempt own the peak at 600.
    */
   const anchoredWins = drive([ANCHOR, null])
   const unanchoredWins = drive([{ outputTokens: 50, reasoningTokens: 0 }, null])

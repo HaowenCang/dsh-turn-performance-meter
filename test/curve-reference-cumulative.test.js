@@ -1,5 +1,5 @@
 /**
- * Independent reference implementation of the Phase 9.2 phase-cumulative trace.
+ * Independent reference implementation of the Phase 9.4 phase-cumulative trace.
  *
  * Everything asserted here is computed by a **second algorithm**, written for this file
  * and sharing no code with `src/core/curve.js`. The curve module cannot be its own
@@ -13,17 +13,31 @@
  *
  *   - the sample list is walked **once per vertex**, with no cursors and no state carried
  *     between vertices, so it cannot share a defect with the module's monotone scan;
- *   - the episode in force at a vertex is found by walking **left** from the newest
- *     sample at or before it, to the first phase change — the maximal run of consecutive
- *     same-phase samples containing it;
- *   - the rate is the literal `Math.round(mass * 1000 / elapsed)` of that episode's mass
- *     over its own clock, and the opening instant (`elapsed === 0`) publishes `0`;
- *   - the grid is the union of the attempt's `sampleEveryMs` ladder from local zero and
- *     the attempt's own end instant — its settlement when one is known and not earlier
- *     than its last delta, and its last delta otherwise.
+ *   - the episodes are the maximal runs of consecutive same-phase samples, and the episode
+ *     in force at a vertex is found by walking **left** from the newest sample at or before
+ *     it to the first phase change;
+ *   - the vertex grid is **each episode's own** `sampleEveryMs` ladder — from that episode's
+ *     origin to the next episode's origin, or to the attempt's end for the terminal episode —
+ *     unioned over the episodes, with the attempt's own end instant appended when the ladders
+ *     do not already stop there. An episode opening off the cadence is therefore sampled from
+ *     its own origin, and no vertex of it exists one remainder-step later;
+ *   - the rate is the literal `Math.round(mass * 1000 / elapsed)` of that episode's mass over
+ *     its own clock, and it is published **only** when the episode holds at least three
+ *     contributing samples **and** at least 100 ms of its own elapsed time. Every other
+ *     vertex publishes `null` — never `0` — together with the fact that withholds it
+ *     (`opening-anchor`, `below-elapsed-horizon`, `below-sample-warmup`, `no-episode`) and the
+ *     episode facts that explain the refusal.
  *
- * The comparison is vertex by vertex: every instant production emits must carry exactly
- * the reference's rate and label, no vertex may be missing, and the lengths must agree.
+ * The two thresholds and the reason vocabulary are restated here as **literals** rather than
+ * imported from `src/core/rate-publication.js`: an oracle that read the policy it is meant to
+ * witness would agree with a silently changed threshold, and the whole point of this file is
+ * that the contract is witnessed twice. `test/curve-rate-publication.test.js` freezes the
+ * shared module's own values independently.
+ *
+ * The comparison is vertex by vertex **and field by field**: every instant production emits
+ * must carry exactly the reference's instant, rate, availability flag, unavailability reason,
+ * phase label and episode facts (`episodeStartMs`, `episodeElapsedMs`, `episodeSampleCount`,
+ * `episodeMass`), no vertex may be missing, and the lengths must agree.
  *
  * ## Where the magnitudes come from
  *
@@ -43,8 +57,14 @@
  * compressed coordinates abut. Then a deterministic generated matrix over single- and
  * multi-attempt turns: steady, bursty, stalls, phase alternations, single-sample
  * episodes, simultaneous timestamps, zero-width attempts, with and without settlement
- * tails, at every magnitude mode. The matrix closes with coverage floors, so a change
- * that quietly made every generated case trivial fails rather than passes.
+ * tails, at every magnitude mode. The matrix closes with coverage floors over both the
+ * turn shapes and the publication outcome — publishable vertices and withheld ones — so a
+ * change that quietly made every generated case trivial, or that made every vertex
+ * publishable, fails rather than passes.
+ *
+ * Because a rate needs three contributing samples, every episode a named case asserts a
+ * **number** for carries at least three deltas; episodes deliberately left below the gates
+ * carry the withheld form of the same assertion (`tps: null` plus its reason).
  */
 
 import test from 'node:test'
@@ -62,6 +82,35 @@ import {
 import { compressAttempts } from '../src/core/time-axis.js'
 
 const STEP_MS = DEFAULT_SAMPLE_EVERY_MS
+
+/**
+ * The publication policy of `src/core/rate-publication.js`, restated as literals.
+ *
+ * These are not imports on purpose: the reference must be able to disagree with the shipped
+ * gate, and an import would make it structurally unable to.
+ */
+const REFERENCE_MIN_SAMPLES = 3
+const REFERENCE_MIN_ELAPSED_MS = 100
+
+/** Why a vertex carries no rate, restated as literals for the same reason. */
+const REFERENCE_REASON = Object.freeze({
+  NO_EPISODE: 'no-episode',
+  OPENING_ANCHOR: 'opening-anchor',
+  BELOW_ELAPSED_HORIZON: 'below-elapsed-horizon',
+  BELOW_SAMPLE_WARMUP: 'below-sample-warmup',
+})
+
+/** Every field, beyond the instant, that a vertex must carry for the comparison to be exact. */
+const VERTEX_FIELDS = [
+  'tps',
+  'publishable',
+  'rateUnavailableReason',
+  'activePhase',
+  'episodeStartMs',
+  'episodeElapsedMs',
+  'episodeSampleCount',
+  'episodeMass',
+]
 
 const output = text => ({ type: 'text-delta', index: 0, text })
 const reasoning = text => ({ type: 'reasoning-delta', index: 0, text })
@@ -112,43 +161,114 @@ function magnitudeOf(sample) {
 }
 
 /**
+ * Why one in-force episode publishes no rate, in the order the facts are missing.
+ *
+ * The episode's own opening anchor outranks the elapsed horizon, which outranks the sample
+ * count — the same order `rateAvailability` states, restated here rather than imported.
+ */
+function reasonAt({ elapsedMs, sampleCount }) {
+  if (elapsedMs <= 0) return REFERENCE_REASON.OPENING_ANCHOR
+  if (elapsedMs < REFERENCE_MIN_ELAPSED_MS) return REFERENCE_REASON.BELOW_ELAPSED_HORIZON
+  if (sampleCount < REFERENCE_MIN_SAMPLES) return REFERENCE_REASON.BELOW_SAMPLE_WARMUP
+  return null
+}
+
+/**
+ * A vertex with no episode in force: no generated sample exists at or before it.
+ *
+ * With the per-episode grid the first vertex *is* a sample's own instant, so this is
+ * unreachable for every call this file makes; it is restated because the shipped estimator
+ * has the branch, and an oracle that silently omitted it could not witness it.
+ */
+function noEpisodeVertex(localMs) {
+  return {
+    localMs,
+    tps: null,
+    publishable: false,
+    rateUnavailableReason: REFERENCE_REASON.NO_EPISODE,
+    activePhase: null,
+    episodeStartMs: null,
+    episodeElapsedMs: 0,
+    episodeSampleCount: 0,
+    episodeMass: 0,
+  }
+}
+
+/**
  * The independent reference series of one attempt, on the attempt-local clock.
  *
  * @param {{localMs:number, phase:string, tokens:number, weight:number}[]} samples
  * @param {{endMs:number, sampleEveryMs?:number}} options
- * @returns {{localMs:number, tps:number, activePhase:string|null}[]}
+ * @returns {{localMs:number, tps:number|null, publishable:boolean, rateUnavailableReason:string|null,
+ *   activePhase:string|null, episodeStartMs:number|null, episodeElapsedMs:number,
+ *   episodeSampleCount:number, episodeMass:number}[]}
  */
 function referenceSeries(samples, { endMs, sampleEveryMs = STEP_MS }) {
   const ordered = samples
     .map((sample, index) => ({ ...sample, order: index }))
     .sort((left, right) => left.localMs - right.localMs || left.order - right.order)
 
-  /** The attempt's grid: its own cadence ladder, unioned with its real end instant. */
-  const instants = []
-  for (let step = 0; ; step += 1) {
-    const at = step * sampleEveryMs
-    if (at > endMs + 1e-9) break
-    instants.push(at)
+  /** The episodes: the maximal runs of consecutive same-phase samples, by their origins. */
+  const episodes = []
+  for (let index = 0; index < ordered.length; index += 1) {
+    const last = episodes[episodes.length - 1]
+    if (last === undefined || last.phase !== ordered[index].phase) {
+      episodes.push({ phase: ordered[index].phase, startIndex: index, startMs: ordered[index].localMs })
+    }
   }
-  if (endMs > instants[instants.length - 1] + 1e-9) instants.push(endMs)
 
-  return instants.map((at) => {
+  /**
+   * **Each episode's own ladder.** A non-terminal episode is sampled up to the instant the
+   * next episode opens; the terminal one runs to the attempt's own end instant. Instants are
+   * built by multiplication rather than by accumulating `+=`, so the last vertex cannot drift
+   * off the grid it claims to be on.
+   */
+  const instants = []
+  for (let index = 0; index < episodes.length; index += 1) {
+    const episode = episodes[index]
+    const next = episodes[index + 1]
+    const boundMs = next === undefined ? endMs : Math.min(next.startMs, endMs)
+    if (!(episode.startMs <= boundMs + 1e-9)) continue
+    for (let step = 0; ; step += 1) {
+      const at = episode.startMs + step * sampleEveryMs
+      if (at > boundMs + 1e-9) break
+      instants.push(at)
+    }
+  }
+  instants.sort((left, right) => left - right)
+  const vertices = []
+  for (const at of instants) {
+    if (vertices.length === 0 || at > vertices[vertices.length - 1] + 1e-9) vertices.push(at)
+  }
+  /** The attempt's own end instant is a vertex whether or not it falls on a ladder. */
+  if (vertices.length === 0 || endMs > vertices[vertices.length - 1] + 1e-9) vertices.push(endMs)
+
+  return vertices.map((at) => {
     /** The newest sample at or before the vertex, resolved by stream order at one instant. */
     let newest = -1
     for (let index = 0; index < ordered.length; index += 1) {
       if (ordered[index].localMs <= at) newest = index
     }
-    if (newest < 0) return { localMs: at, tps: 0, activePhase: null }
+    if (newest < 0) return noEpisodeVertex(at)
     /** The maximal same-phase run containing it: walk left to the first phase change. */
     let start = newest
     while (start > 0 && ordered[start - 1].phase === ordered[newest].phase) start -= 1
     let mass = 0
     for (let index = start; index <= newest; index += 1) mass += magnitudeOf(ordered[index])
     const elapsed = at - ordered[start].localMs
+    const sampleCount = newest - start + 1
+    const reason = reasonAt({ elapsedMs: elapsed, sampleCount })
     return {
       localMs: at,
-      tps: elapsed > 0 ? Math.round(mass * 1000 / elapsed) : 0,
+      /** A withheld rate is `null`, never a fabricated zero. */
+      tps: reason === null ? Math.round(mass * 1000 / elapsed) : null,
+      publishable: reason === null,
+      rateUnavailableReason: reason,
       activePhase: ordered[newest].phase,
+      episodeStartMs: ordered[start].localMs,
+      episodeElapsedMs: elapsed,
+      episodeSampleCount: sampleCount,
+      episodeMass: mass,
     }
   })
 }
@@ -271,7 +391,7 @@ function joinedAttempts(specs, placed) {
   })
 }
 
-/** Vertex-by-vertex agreement of one production series against the reference. */
+/** Vertex-by-vertex, field-by-field agreement of one production series against the reference. */
 function assertVertexAgreement(points, series, label) {
   assert.equal(points.length, series.length, `${label}: vertex count`)
   for (let index = 0; index < series.length; index += 1) {
@@ -279,11 +399,33 @@ function assertVertexAgreement(points, series, label) {
     const expected = series[index]
     assert.equal(point.localMs, expected.localMs,
       `${label}: vertex ${index} must sit at local ${expected.localMs}`)
-    assert.equal(point.tps, expected.tps,
-      `${label}: at local ${expected.localMs} the reference says ${expected.tps}, production says ${point.tps}`)
-    assert.equal(point.activePhase, expected.activePhase,
-      `${label}: at local ${expected.localMs} the label must be ${expected.activePhase}`)
+    for (const field of VERTEX_FIELDS) {
+      assert.deepEqual(point[field], expected[field],
+        `${label}: at local ${expected.localMs} the reference's ${field} is `
+        + `${JSON.stringify(expected[field])}, production's is ${JSON.stringify(point[field])}`)
+    }
   }
+}
+
+/** The reference's own peak: the largest published rate, or `null` when none was published. */
+function referencePeakOf(expected) {
+  const rates = expected.flatMap(entry => (
+    entry.series.filter(point => point.publishable).map(point => point.tps)
+  ))
+  return rates.length === 0 ? null : Math.max(...rates)
+}
+
+/** How many reference vertices a turn published, and how many the gates withheld. */
+function publicationOf(expected) {
+  let published = 0
+  let withheld = 0
+  for (const entry of expected) {
+    for (const point of entry.series) {
+      if (point.publishable) published += 1
+      else withheld += 1
+    }
+  }
+  return { published, withheld }
 }
 
 /**
@@ -347,15 +489,10 @@ function compareTurn(driven, specs) {
         sampleEndMs: segment.localEndMs,
       },
     )
-    assert.equal(direct.length, series.length, `${spec.id}: the direct estimator emits every vertex`)
+    assertVertexAgreement(direct, series, `${spec.id} (direct)`)
     for (let index = 0; index < series.length; index += 1) {
-      assert.equal(direct[index].localMs, series[index].localMs, `${spec.id}: direct localMs`)
-      assert.equal(direct[index].timeMs, segment.startMs + series[index].localMs, `${spec.id}: direct timeMs`)
-      assert.equal(direct[index].tps, series[index].tps,
-        `${spec.id}: at local ${series[index].localMs} the direct estimator says ${direct[index].tps}, `
-        + `the reference says ${series[index].tps}`)
-      assert.equal(direct[index].activePhase, series[index].activePhase,
-        `${spec.id}: at local ${series[index].localMs} the direct label`)
+      assert.equal(direct[index].timeMs, segment.startMs + series[index].localMs,
+        `${spec.id}: direct timeMs at local ${series[index].localMs}`)
     }
 
     const total = samples.reduce((sum, sample) => sum + magnitudeOf(sample), 0)
@@ -376,53 +513,68 @@ function compareTurn(driven, specs) {
 // ---------------------------------------------------------------------------
 
 test('reference agreement: the episode clock resets at every phase transition', () => {
+  /**
+   * Reasoning, output, reasoning. Each transition opens a new episode with its own clock and
+   * its own mass: the output stretch starts at its own sample, so its opening vertex is its
+   * anchor — `tps: null`, not a rate — and the second reasoning stretch does the same. The
+   * magnitude steps down at the boundary (450 to 300) and climbs again on the new episode's
+   * own evidence. Every episode carries three deltas, the smallest number the publication
+   * policy admits.
+   */
   const spec = {
     id: 'a',
     step: 1,
     mode: 'estimated',
     settledLocal: 700,
-    samples: [[0, 'reasoning', 10], [100, 'reasoning', 10], [300, 'output', 10], [500, 'reasoning', 10]],
+    samples: [
+      [0, 'reasoning', 30], [100, 'reasoning', 30], [200, 'reasoning', 30],
+      [300, 'output', 10], [350, 'output', 10], [400, 'output', 10],
+      [500, 'reasoning', 10], [550, 'reasoning', 10], [600, 'reasoning', 10],
+    ],
   }
   const driven = drive([spec])
   compareTurn(driven, [spec])
-  /**
-   * Reasoning, output, reasoning. Each transition opens a new episode: the output stretch
-   * starts at its own sample, so its opening vertex is `0`, and the second reasoning
-   * stretch does the same. The magnitude steps down at the boundary and climbs again on
-   * the new episode's own evidence.
-   */
   assert.deepEqual(
     driven.curve.attempts[0].points.map(point => [point.localMs, point.tps, point.activePhase]),
     [
-      [0, 0, 'reasoning'], [100, 200, 'reasoning'], [200, 100, 'reasoning'],
-      [300, 0, 'output'], [400, 100, 'output'],
-      [500, 0, 'reasoning'], [600, 100, 'reasoning'], [700, 50, 'reasoning'],
+      [0, null, 'reasoning'], [100, null, 'reasoning'], [200, 450, 'reasoning'],
+      [300, null, 'output'], [400, 300, 'output'],
+      [500, null, 'reasoning'], [600, 300, 'reasoning'], [700, 150, 'reasoning'],
     ],
   )
-  assert.equal(driven.curve.attempts[0].points[3].tps, 0,
+  assert.equal(driven.curve.attempts[0].points[3].tps, null,
     'the opening instant of a new episode carries no rate')
+  assert.equal(driven.curve.attempts[0].points[3].rateUnavailableReason, 'opening-anchor',
+    'and it says the clock has not advanced rather than publishing a measured zero')
+  assert.equal(driven.curve.attempts[0].points[4].episodeSampleCount, 3,
+    'the output episode counts only its own three deltas')
+  assert.equal(driven.curve.attempts[0].points[4].episodeMass, 30,
+    'and carries none of the reasoning episode\'s mass')
 })
 
 test('reference agreement: simultaneous timestamps follow the stream order', () => {
   /**
-   * Two samples at one instant are ordered by the stream that delivered them. The
-   * episode in force at that instant is the one the newer sample belongs to, so the same
-   * pair of magnitudes reads as `output` or as `reasoning` depending on delivery order —
-   * and the mass counted at the next vertex follows the same episode.
+   * Two samples at one instant are ordered by the stream that delivered them. The episode in
+   * force at that instant is the one the newer sample belongs to, so the pair of magnitudes
+   * delivered at local zero reads as `output` or as `reasoning` depending on the delivery
+   * order — and the mass counted at the next vertex follows the same episode. The heavy
+   * magnitude is placed on the phase that is delivered **second**, so the exclusion is
+   * visible in the numbers: the same instants publish 150 or 1 500 depending on which
+   * episode owns the shared anchor.
    */
   const reasoningFirst = {
     id: 'r-first',
     step: 1,
     mode: 'estimated',
-    settledLocal: 100,
-    samples: [[0, 'reasoning', 10], [0, 'output', 10], [100, 'output', 10]],
+    settledLocal: 200,
+    samples: [[0, 'reasoning', 100], [0, 'output', 10], [100, 'output', 10], [200, 'output', 10]],
   }
   const outputFirst = {
     id: 'o-first',
     step: 1,
     mode: 'estimated',
-    settledLocal: 100,
-    samples: [[0, 'output', 10], [0, 'reasoning', 10], [100, 'reasoning', 10]],
+    settledLocal: 200,
+    samples: [[0, 'output', 10], [0, 'reasoning', 100], [100, 'reasoning', 100], [200, 'reasoning', 100]],
   }
   const samePhase = {
     id: 'same',
@@ -441,17 +593,18 @@ test('reference agreement: simultaneous timestamps follow the stream order', () 
 
   assert.deepEqual(
     first.curve.attempts[0].points.map(point => [point.localMs, point.tps, point.activePhase]),
-    [[0, 0, 'output'], [100, 200, 'output']],
-    'delivered reasoning-then-output, the shared instant belongs to the output episode',
+    [[0, null, 'output'], [100, null, 'output'], [200, 150, 'output']],
+    'delivered reasoning-then-output, the shared instant belongs to the output episode, and the '
+    + '100-unit reasoning delta at that instant is not in its mass',
   )
   assert.deepEqual(
     second.curve.attempts[0].points.map(point => [point.localMs, point.tps, point.activePhase]),
-    [[0, 0, 'reasoning'], [100, 200, 'reasoning']],
+    [[0, null, 'reasoning'], [100, null, 'reasoning'], [200, 1500, 'reasoning']],
     'delivered output-then-reasoning, the same instant belongs to the reasoning episode',
   )
   assert.deepEqual(
     third.curve.attempts[0].points.map(point => [point.localMs, point.tps, point.activePhase]),
-    [[0, 0, 'output'], [100, 300, 'output']],
+    [[0, null, 'output'], [100, 300, 'output']],
     'two simultaneous same-phase samples both count toward one episode',
   )
 })
@@ -460,18 +613,23 @@ test('reference agreement: a settlement before the last delta cannot shrink the 
   /**
    * Clock skew: the settlement is recorded 100 ms in, but the model kept producing to
    * 500 ms. The attempt's width is its real generation time, and the trace ends there.
+   * The third delta is what admits the episode, and it is measured over the episode's
+   * own half second rather than over the attempted settlement.
    */
   const spec = {
     id: 'a',
     step: 1,
     mode: 'estimated',
     settledLocal: 100,
-    samples: [[0, 'output', 10], [500, 'output', 10]],
+    samples: [[0, 'output', 10], [100, 'output', 10], [500, 'output', 10]],
   }
   const driven = drive([spec])
   compareTurn(driven, [spec])
   assert.equal(driven.curve.durationMs, 500, 'the attempt keeps its real generation time')
   assert.equal(driven.curve.attempts[0].points.at(-1).localMs, 500)
+  assert.deepEqual(driven.curve.attempts[0].points.map(point => [point.localMs, point.tps]), [
+    [0, null], [100, null], [200, null], [300, null], [400, null], [500, 60],
+  ], 'two deltas stay below the sample gate at every vertex; the third publishes 30 tokens over 500 ms')
 })
 
 test('reference agreement: calibrated magnitudes are the published magnitudes', () => {
@@ -484,8 +642,8 @@ test('reference agreement: calibrated magnitudes are the published magnitudes', 
   const base = {
     id: 'a',
     step: 1,
-    samples: [[0, 'output', 10], [200, 'output', 10], [400, 'output', 10]],
-    settledLocal: 500,
+    samples: [[0, 'output', 10], [200, 'output', 10], [400, 'output', 10], [600, 'output', 10]],
+    settledLocal: 700,
   }
   const estimated = { ...base, mode: 'estimated' }
   const doubled = { ...base, mode: 'calibrated-split-2' }
@@ -499,36 +657,44 @@ test('reference agreement: calibrated magnitudes are the published magnitudes', 
   compareTurn(common, [tripled])
 
   assert.deepEqual(plain.curve.attempts[0].points.map(point => point.tps),
-    [0, 100, 100, 67, 75, 60], 'the raw shape weights')
+    [null, null, null, null, 75, 60, 67, 57], 'the raw shape weights')
   assert.deepEqual(anchored.curve.attempts[0].points.map(point => point.tps),
-    [0, 200, 200, 133, 150, 120], 'each sample scaled to twice its shape weight')
+    [null, null, null, null, 150, 120, 133, 114], 'each sample scaled to twice its shape weight')
   assert.deepEqual(common.curve.attempts[0].points.map(point => point.tps),
-    [0, 300, 300, 200, 225, 180], 'one common factor of three over every sample')
+    [null, null, null, null, 225, 180, 200, 171], 'one common factor of three over every sample')
 
-  assert.equal(plain.curve.attempts[0].tokens, 30)
+  assert.equal(plain.curve.attempts[0].tokens, 40)
   assert.equal(plain.curve.attempts[0].calibrated, false)
   assert.equal(plain.curve.attempts[0].calibratedTokens, null)
   assert.equal(plain.curve.source.calibrationCoverage, 'none')
-  assert.equal(anchored.curve.attempts[0].tokens, 60, 'the anchored integral is the provider total')
+  assert.equal(anchored.curve.attempts[0].tokens, 80, 'the anchored integral is the provider total')
   assert.equal(anchored.curve.attempts[0].calibrated, true)
-  assert.equal(anchored.curve.attempts[0].calibratedTokens, 60)
+  assert.equal(anchored.curve.attempts[0].calibratedTokens, 80)
   assert.equal(anchored.curve.source.calibrationCoverage, 'full')
   assert.equal(common.curve.attempts[0].calibrated, true)
-  assert.equal(common.curve.attempts[0].tokens, 90)
+  assert.equal(common.curve.attempts[0].tokens, 120)
 
-  /** A mixed-phase attempt calibrated per phase: reasoning and output each scaled by two. */
+  /**
+   * A mixed-phase attempt calibrated per phase: both phases are scaled by two, but each
+   * episode is measured over its own clock and its own mass, so the three heavy output
+   * deltas read 1 800 while the three light reasoning deltas read 300.
+   */
   const mixed = {
     id: 'b',
     step: 1,
     mode: 'calibrated-split-2',
     settledLocal: 400,
-    samples: [[0, 'reasoning', 10], [100, 'reasoning', 10], [300, 'output', 10]],
+    samples: [
+      [0, 'reasoning', 10], [100, 'reasoning', 10], [200, 'reasoning', 10],
+      [300, 'output', 30], [350, 'output', 30], [400, 'output', 30],
+    ],
   }
   const mixedDriven = drive([mixed])
   compareTurn(mixedDriven, [mixed])
-  assert.deepEqual(mixedDriven.curve.attempts[0].points.map(point => point.tps),
-    [0, 400, 200, 0, 200], 'reasoning scaled to its own counter, output to its own')
-  assert.equal(mixedDriven.curve.attempts[0].tokens, 60)
+  assert.deepEqual(mixedDriven.curve.attempts[0].points.map(point => [point.localMs, point.tps]),
+    [[0, null], [100, null], [200, 300], [300, null], [400, 1800]],
+    'reasoning scaled to its own counter, output to its own, each over its own episode clock')
+  assert.equal(mixedDriven.curve.attempts[0].tokens, 240)
 })
 
 test('reference agreement: an attempt with no generated delta owns no trace and no width', () => {
@@ -538,13 +704,15 @@ test('reference agreement: an attempt with no generated delta owns no trace and 
     step: 2,
     mode: 'estimated',
     settledLocal: 200,
-    samples: [[0, 'output', 10], [100, 'output', 10]],
+    samples: [[0, 'output', 10], [100, 'output', 10], [200, 'output', 10]],
   }
   const together = drive([empty, real])
   compareTurn(together, [empty, real])
   assert.equal(together.curve.attempts.length, 1, 'only the attempt that produced evidence is drawn')
   assert.equal(together.curve.segments.length, 1, 'and only it owns a coordinate')
   assert.equal(together.curve.segments[0].startMs, 0, 'the empty attempt consumes no width')
+  assert.equal(together.curve.attempts[0].points.at(-1).tps, 150,
+    'the attempt after the empty one is measured on its own evidence')
 
   const alone = drive([real])
   assert.deepEqual(
@@ -557,23 +725,27 @@ test('reference agreement: an attempt with no generated delta owns no trace and 
 test('reference agreement: abutting attempts are measured on their own clocks', () => {
   /**
    * The compressed axis concatenates the two attempts, so their coordinates touch. The
-   * episode clocks do not: B opens on A's last coordinate and measures none of A's mass.
-   * The strongest form of the claim is that each trace is identical whether it is driven
-   * alone or beside the other call.
+   * episode clocks do not: B opens on A's last coordinate and measures none of A's mass,
+   * which is visible in its first publishable vertex — its own three deltas over its own
+   * 200 ms, never A's tokens added to them. The strongest form of the claim is that each
+   * trace is identical whether it is driven alone or beside the other call.
    */
   const first = {
     id: 'A',
     step: 1,
     mode: 'estimated',
     settledLocal: 700,
-    samples: [[0, 'output', 10], [500, 'output', 10]],
+    samples: [[0, 'output', 10], [100, 'output', 10], [200, 'output', 10], [500, 'output', 10]],
   }
   const second = {
     id: 'B',
     step: 2,
     mode: 'estimated',
     settledLocal: 600,
-    samples: [[0, 'output', 10], [300, 'reasoning', 10], [600, 'reasoning', 10]],
+    samples: [
+      [0, 'output', 10], [100, 'output', 10], [200, 'output', 10],
+      [300, 'reasoning', 10], [400, 'reasoning', 10], [500, 'reasoning', 10],
+    ],
   }
   const together = drive([first, second])
   compareTurn(together, [first, second])
@@ -583,13 +755,15 @@ test('reference agreement: abutting attempts are measured on their own clocks', 
 
   const [traceA, traceB] = together.curve.attempts
   assert.deepEqual(traceA.points.map(point => [point.localMs, point.tps]),
-    [[0, 0], [100, 100], [200, 50], [300, 33], [400, 25], [500, 40], [600, 33], [700, 29]])
+    [[0, null], [100, null], [200, 150], [300, 100], [400, 75], [500, 80], [600, 67], [700, 57]],
+    'A decays hyperbolically across its silence and resumes when its fourth delta arrives')
   assert.deepEqual(traceB.points.map(point => [point.localMs, point.tps, point.activePhase]),
-    [[0, 0, 'output'], [100, 100, 'output'], [200, 50, 'output'],
-      [300, 0, 'reasoning'], [400, 100, 'reasoning'], [500, 50, 'reasoning'], [600, 67, 'reasoning']])
+    [[0, null, 'output'], [100, null, 'output'], [200, 150, 'output'],
+      [300, null, 'reasoning'], [400, null, 'reasoning'], [500, 150, 'reasoning'], [600, 100, 'reasoning']])
   assert.equal(traceB.points[0].timeMs, traceA.points.at(-1).timeMs,
     'B opens on the coordinate A\'s clock stopped at')
-  assert.equal(traceB.points[0].tps, 0, 'and it measures none of A\'s mass')
+  assert.equal(traceB.points[2].tps, 150,
+    'and its first publishable vertex is its own three deltas over its own 200 ms, not A\'s mass added')
 
   const aloneA = drive([first])
   const aloneB = drive([second])
@@ -630,6 +804,13 @@ function seeded(seed) {
  *   3 stall             every gap is a long silence inside one phase
  *   4 single sample     one delta only, sometimes of zero width
  *   5 simultaneous      the second sample shares the first's instant, opposite phase
+ *
+ * The shapes are kept as they are because the two facts they produce are the two the
+ * publication policy is about: a shape whose episodes carry three deltas or more satisfies
+ * the gates and publishes, and a shape whose episode carries one or two — a single-sample
+ * attempt, a simultaneous pair, a one-sample phase block — is withheld with the reason that
+ * names the missing fact. Both halves are part of the contract, and the coverage floors
+ * below require both to be exercised in quantity.
  */
 function generatedSpecs(count) {
   const specs = []
@@ -713,9 +894,15 @@ function coverageOf(specs) {
 test('generated turns: every published vertex agrees with the independent reference', () => {
   const specs = generatedSpecs(60)
   let vertices = 0
+  let published = 0
+  let withheld = 0
   for (const spec of specs) {
     const driven = drive([spec])
-    vertices += compareTurn(driven, [spec]).vertices
+    const compared = compareTurn(driven, [spec])
+    vertices += compared.vertices
+    const counts = publicationOf(compared.expected)
+    published += counts.published
+    withheld += counts.withheld
   }
 
   const coverage = coverageOf(specs)
@@ -729,6 +916,15 @@ test('generated turns: every published vertex agrees with the independent refere
   assert.ok(coverage.zeroWidth >= 2, `only ${coverage.zeroWidth} zero-width attempts were exercised`)
   assert.ok(coverage.tails >= 20, `only ${coverage.tails} generated turns carried a settlement tail`)
   assert.ok(coverage.calibrated >= 20, `only ${coverage.calibrated} generated turns were calibrated`)
+  /**
+   * And the gates are exercised from both sides: the corpus must contain vertices that
+   * publish (so the comparison covers measured rates) and vertices that are withheld (so it
+   * covers the null rule and every reason for it).
+   */
+  assert.ok(published >= 200,
+    `only ${published} of ${vertices} generated vertices passed the publication gates`)
+  assert.ok(withheld >= 400,
+    `only ${withheld} of ${vertices} generated vertices were withheld by the publication gates`)
 })
 
 test('generated turns: two attempts per turn abut and never share a clock', () => {
@@ -749,36 +945,45 @@ test('generated turns: two attempts per turn abut and never share a clock', () =
 
 test('the published peak is the maximum of the independently re-derived series', () => {
   const specs = generatedSpecs(30)
+  let measured = 0
   for (const spec of specs) {
     const driven = drive([spec])
     const { expected } = compareTurn(driven, [spec])
-    const referencePeak = Math.max(...expected.flatMap(entry => entry.series.map(point => point.tps)))
+    const referencePeak = referencePeakOf(expected)
     assert.equal(driven.curve.peakTps, referencePeak,
       `${spec.id}: the published peak must be the reference maximum`)
+    if (referencePeak !== null) measured += 1
   }
+  /**
+   * A turn whose every episode is below the gates has no peak at all — `null`, not a
+   * fabricated zero — so an all-withheld corpus is a legitimate outcome for one case and a
+   * defect for the corpus. The floor requires most generated turns to have a real maximum.
+   */
+  assert.ok(measured >= 12,
+    `only ${measured} of ${specs.length} generated turns produced a publishable peak`)
 
   /**
    * And on a multi-attempt turn it is the largest single attempt, never a sum: the heavy
    * call peaks at 1000 and the light one at 200, so the turn peak is 1000 rather than
-   * 1200.
+   * 1200. Both calls carry three deltas, so both really publish.
    */
   const heavy = {
     id: 'heavy',
     step: 1,
     mode: 'estimated',
     settledLocal: 500,
-    samples: [[0, 'output', 100], [400, 'output', 100]],
+    samples: [[0, 'output', 100], [100, 'output', 100], [300, 'output', 100]],
   }
   const light = {
     id: 'light',
     step: 2,
     mode: 'estimated',
-    settledLocal: 200,
-    samples: [[0, 'output', 10], [100, 'output', 10]],
+    settledLocal: 150,
+    samples: [[0, 'output', 10], [100, 'output', 10], [150, 'output', 10]],
   }
   const together = drive([heavy, light])
   const { expected } = compareTurn(together, [heavy, light])
-  const referenceMax = Math.max(...expected.flatMap(entry => entry.series.map(point => point.tps)))
+  const referenceMax = referencePeakOf(expected)
   assert.equal(together.curve.peakTps, referenceMax)
   assert.equal(together.curve.peakTps, 1000)
   assert.notEqual(together.curve.peakTps, 1200, 'the peak is never the two attempts added together')

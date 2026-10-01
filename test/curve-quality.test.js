@@ -30,8 +30,13 @@ function outputChunk(text) {
 }
 
 /**
- * Drive one two-measurement attempt and report both the curve quality and the
+ * Drive one three-measurement attempt and report both the curve quality and the
  * axes it was derived from.
+ *
+ * Three deltas rather than two because the corrected publication policy publishes a
+ * rate only for an episode holding `MIN_RATE_SAMPLES` contributing samples: a
+ * two-delta attempt has `peakTps: null` at every quality level, and the peak
+ * assertion at the end of this file needs a measured peak to reason about.
  *
  * `usage` chooses the token axis, `settlementSeq` the temporal axis: an attempt
  * with no durable settlement sequence is one still open — or observed only live —
@@ -49,6 +54,7 @@ function settle({
   const a = store.beginAttempt(record, { attemptId: 'a', step: 1, startedAtMs: 0 })
   if (chunks) {
     store.acceptChunk(record, a, { timeMs: 100, chunk: outputChunk('x'.repeat(400)) })
+    store.acceptChunk(record, a, { timeMs: 200, chunk: outputChunk('x'.repeat(400)) })
     store.acceptChunk(record, a, { timeMs: 600, chunk: outputChunk('x'.repeat(400)) })
   }
   store.settleAttempt(a, {
@@ -189,10 +195,16 @@ test('the peak keeps its approximation at every curve quality', () => {
    * `reconstructed` is the best achievable shape, and a reconstructed vertex is
    * still a shape weight on an estimated local shape — so `≈` follows the peak at
    * every level. A quality label is not a licence to print a bare number.
+   *
+   * The fixture publishes one: the attempt's 900 anchored tokens over its episode's
+   * own 500 ms, 1800 tokens/s, at both durability levels — the quality label moves
+   * and the measured peak does not.
    */
   for (const settlementSeq of [11, null]) {
     const { settled, curve } = settle({ settlementSeq })
-    assert.ok(settled.curve.peakTps > 0)
+    assert.ok(settled.curve.peakTps > 0,
+      'the turn must have a measured peak to reason about at every quality level')
+    assert.equal(settled.curve.peakTps, 900 * 1000 / 500)
     assert.equal(curve.quality === QualityLevel.EXACT, false, 'a curve is never exact')
     assert.equal(MetricQuality.EXACT === curve.quality, false)
   }

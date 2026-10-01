@@ -119,7 +119,13 @@ test('the curve is compressed: tool waits and next-call TTFT contribute no width
     [0, 2500], [2500, 9000], [9000, 13_500],
   ])
   assert.equal(settled.curve.quality, 'estimated')
-  assert.ok(settled.curve.peakTps > 0)
+  /**
+   * This fixture gives each attempt two deltas, which is below the three-sample
+   * publication gate of `src/core/rate-publication.js`, so no rate is claimed for
+   * it. The compression claim above is what this test asserts; a rate is not
+   * fabricated to fill the peak in.
+   */
+  assert.equal(settled.curve.peakTps, null)
 })
 
 test('the completed curve is an attempt trace list with phase-coloured runs, not one array spanning every call', () => {

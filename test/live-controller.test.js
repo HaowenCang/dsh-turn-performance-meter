@@ -175,9 +175,10 @@ test('session switch: A and B never share machines, subscriptions or resets', ()
   assert.equal(controller.attach('session-A'), true)
   assert.equal(sessions.listenerCount('session-A'), 1, 'exactly one eventSource subscription for A')
 
-  // A starts streaming. Three deltas so the episode passes its warm-up count and
-  // publishes a rate; `from-A` weighs 1.5 shape tokens, so the cumulative average at
-  // 250 ms is `round(3 * 1.5 * 1000 / 50)`.
+  // A starts streaming. Three deltas so the episode passes its warm-up count, and
+  // the projection is taken once the episode has also cleared the elapsed horizon
+  // (`src/core/rate-publication.js`): `from-A` weighs 1.5 shape tokens, so the
+  // cumulative average at 300 ms is `round(3 * 1.5 * 1000 / 100)`.
   let revision = 1
   const aStart = durableEntry('turn/start', 1, 100, { turn: 1 })
   const aChunk = transientEntry('a:1', 200, { type: 'text-delta', index: 0, text: 'from-A' })
@@ -188,14 +189,21 @@ test('session switch: A and B never share machines, subscriptions or resets', ()
   sourceA.appendEntry(aChunk, (revision += 1))
   sourceA.appendEntry(aChunk2, (revision += 1))
   sourceA.appendEntry(aChunk3, (revision += 1))
-  const viewA = controller.project('session-A', 250)
-  assert.equal(viewA.kind, 'streaming', 'A streams')
+  /**
+   * At 250 ms the episode is 50 ms old: it owns three samples but not a
+   * measurement, so the pill is the warming counter. That is the shared gate doing
+   * its job, not a missing delta.
+   */
+  assert.equal(controller.project('session-A', 250).kind, 'warming',
+    'A has three samples but not yet 100 ms of episode clock')
+  const viewA = controller.project('session-A', 300)
+  assert.equal(viewA.kind, 'streaming', 'A streams once the episode clears the horizon')
   assert.equal(viewA.turn, 1)
-  assert.equal(viewA.tps, 90)
+  assert.equal(viewA.tps, 45)
 
   // B attaches idle, then runs its own turn.
   assert.equal(controller.attach('session-B'), true)
-  assert.equal(controller.project('session-B', 250).kind, 'hidden', 'B has no observed turn yet')
+  assert.equal(controller.project('session-B', 300).kind, 'hidden', 'B has no observed turn yet')
 
   const bStart = durableEntry('turn/start', 1, 100, { turn: 1 })
   const bChunk = transientEntry('b:1', 200, { type: 'text-delta', index: 0, text: 'from-B' })
@@ -206,9 +214,9 @@ test('session switch: A and B never share machines, subscriptions or resets', ()
   sourceB.appendEntry(bChunk, (revision += 1))
   sourceB.appendEntry(bChunk2, (revision += 1))
   sourceB.appendEntry(bChunk3, (revision += 1))
-  const viewB = controller.project('session-B', 250)
+  const viewB = controller.project('session-B', 300)
   assert.equal(viewB.kind, 'streaming', 'B streams')
-  assert.equal(viewB.tps, 90, 'and it measures its own episode, not A\'s')
+  assert.equal(viewB.tps, 45, 'and it measures its own episode, not A\'s')
 
   // B settles: it gets its own card, and A must be untouched (no shared
   // currentTurn, no wrong reset, no cross-session card).

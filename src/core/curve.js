@@ -40,6 +40,9 @@
  * maximum (docs/METRICS_SPEC.md §9).
  */
 
+import { MetricQuality } from './metric-quality.js'
+import { RateUnavailable, rateAvailability } from './rate-publication.js'
+
 export const DEFAULT_SAMPLE_EVERY_MS = 100
 
 /**
@@ -129,19 +132,34 @@ function ordinalOf(sample, index) {
  * rule) across a silence, because the numerator freezes while the denominator
  * advances.
  *
- * **The vertex grid.** Vertices run from `fromMs` on the `sampleEveryMs` ladder to
- * `sampleEndMs` — the attempt's own end instant, which for the terminal phase is
- * the attempt's settlement time — and that end instant is appended when it does not
- * fall on the ladder. Nothing is sampled after it: a vertex past the attempt's end
- * measures elapsed time the model never had, and on the completed chart it would
- * carry a coordinate larger than `curve.durationMs` and be clamped onto `x = 100`
+ * **The vertex grid is per episode.** Every episode is sampled on **its own**
+ * ladder — `episodeStart, episodeStart + sampleEveryMs, …` up to the instant the
+ * next episode opens (or the attempt's own end, for the terminal episode) — and
+ * the attempt's end instant is a vertex whether or not it falls on a ladder.
+ *
+ * The previous revision used one attempt-global ladder. That grid is what made a
+ * phase episode opening between two of its instants acquire a first denominator
+ * of nothing but the remainder of a step: an episode opening at 250 ms was first
+ * measured over `300 - 250 = 50 ms`, and one opening at 299 ms over a single
+ * millisecond. Those quotients were published, and `peakTps` is a maximum, so
+ * they became the turn's peak. Sampling each episode from its own origin removes
+ * the class of vertex rather than filtering its value afterwards: a denominator
+ * between 1 and 99 ms no longer exists on the grid.
+ *
+ * Nothing is sampled after the attempt's end: a vertex past it measures elapsed
+ * time the model never had, and on the completed chart it would carry a
+ * coordinate larger than `curve.durationMs` and be clamped onto `x = 100`
  * (`test/curve-axis-endpoint.test.js`).
  *
- * **The opening vertex carries no rate.** At the attempt's local zero the episode
- * has just begun, so `elapsed == 0` and the vertex publishes `0` rather than a
- * division. MiMo's own series never samples that instant — its first tick is 100 ms
- * after the first content character — so this is the DSH anchor for an axis that
- * must start where the attempt started, not a value MiMo publishes.
+ * **A vertex is a measurement only when the shared publication policy says so.**
+ * `src/core/rate-publication.js` requires at least `MIN_RATE_SAMPLES` contributing
+ * samples *and* at least `MIN_RATE_ELAPSED_MS` of the episode's own clock. A
+ * vertex that fails either gate carries `tps: null` — never `0` — together with
+ * the episode facts that explain the refusal (`rateUnavailableReason`,
+ * `episodeElapsedMs`, `episodeSampleCount`, `episodeMass`). "Not measured yet" and
+ * "measured zero" are different facts, and the chart draws the first as a gap.
+ * There is no clamp, no smoothing and no ceiling anywhere in this path: a rate
+ * that passes both gates is published exactly as computed.
  *
  * **A phase is never filtered out.** What a phase contributes here is the
  * `activePhase` **label** on each vertex — the phase of the latest generated sample
@@ -170,8 +188,11 @@ function ordinalOf(sample, index) {
  *   sampleEndMs?:number,
  * }} [options]
  * @returns {{
- *   timeMs:number, localMs:number, tps:number,
+ *   timeMs:number, localMs:number, tps:number|null,
+ *   publishable:boolean, rateUnavailableReason:string|null,
  *   activePhase:string|null, attemptId:string|null,
+ *   episodeStartMs:number|null, episodeElapsedMs:number,
+ *   episodeSampleCount:number, episodeMass:number,
  * }[]}
  */
 export function cumulativePhaseTpsSeries(samples, options = {}) {
@@ -209,29 +230,54 @@ export function cumulativePhaseTpsSeries(samples, options = {}) {
   const sampleEndMs = Number.isFinite(options.sampleEndMs)
     ? Math.max(0, options.sampleEndMs)
     : Math.max(0, Math.min(sampleEnd, toMs))
+  const bodyEndMs = Math.max(fromMs, Math.min(sampleEndMs, toMs))
 
-  const result = []
   /**
-   * Vertex instants, built explicitly rather than by accumulating `+= every`:
-   * floating-point error over a ten-minute turn would otherwise put the last vertex
-   * off the grid it claims to be on.
-   *
-   * The set is the **union of the cadence ladder and the attempt's own end instant**.
-   * The ladder alone would drop an end that does not fall on the cadence — an attempt
-   * settling at 510 ms would be sampled at 500 and the instant its clock stopped would
-   * never be drawn. The end instant alone would drop the shape samples in between.
-   * Their union, deduplicated and ascending, is what makes the attempt's real endpoint
-   * an unconditional vertex while leaving the cadence intact
-   * (`test/curve-axis-endpoint.test.js`).
+   * The episodes, as the maximal runs of consecutive same-phase samples. Only the
+   * first instant of each run is needed here: the per-instant walk below advances
+   * the episode cursors in one monotone pass.
+   */
+  const episodes = []
+  for (let index = 0; index < filtered.length; index += 1) {
+    const phase = filtered[index].phase ?? null
+    const last = episodes[episodes.length - 1]
+    if (last === undefined || last.phase !== phase) {
+      episodes.push({ phase, startIndex: index, startMs: filtered[index].activeTimeMs })
+    }
+  }
+
+  /**
+   * **Each episode's own ladder**, from its own origin. A non-terminal episode is
+   * sampled up to the instant the next episode opens; the terminal one runs to the
+   * attempt's end instant. Instants are built by multiplication rather than by
+   * accumulating `+=`, so floating-point error over a ten-minute turn cannot put the
+   * last vertex off the grid it claims to be on.
    */
   const instants = []
-  const bodyEndMs = Math.max(fromMs, Math.min(sampleEndMs, toMs))
-  for (let step = 0; ; step += 1) {
-    const at = fromMs + step * sampleEveryMs
-    if (at > bodyEndMs + 1e-9) break
-    instants.push(at)
+  for (let index = 0; index < episodes.length; index += 1) {
+    const episode = episodes[index]
+    const next = episodes[index + 1]
+    const boundMs = next === undefined ? bodyEndMs : Math.min(next.startMs, bodyEndMs)
+    if (!(episode.startMs <= boundMs + 1e-9)) continue
+    for (let step = 0; ; step += 1) {
+      const at = episode.startMs + step * sampleEveryMs
+      if (at > boundMs + 1e-9) break
+      if (at >= fromMs - 1e-9 && at <= toMs + 1e-9) instants.push(at)
+    }
   }
-  if (bodyEndMs > instants[instants.length - 1] + 1e-9) instants.push(bodyEndMs)
+  instants.sort((a, b) => a - b)
+  const vertices = []
+  for (const at of instants) {
+    if (vertices.length === 0 || at > vertices[vertices.length - 1] + 1e-9) vertices.push(at)
+  }
+  /**
+   * The attempt's own end instant is unconditional: an attempt settling at 510 ms
+   * is sampled at its own `…, 500, 510`, so the instant its clock stopped is always
+   * drawn and the trace cannot end short of the axis it is drawn against.
+   */
+  if ((vertices.length === 0 || bodyEndMs > vertices[vertices.length - 1] + 1e-9) && bodyEndMs >= fromMs - 1e-9) {
+    vertices.push(bodyEndMs)
+  }
 
   /**
    * The episode cursors. `newest` is the index of the newest sample at or before the
@@ -244,8 +290,10 @@ export function cumulativePhaseTpsSeries(samples, options = {}) {
   let episodeStartIndex = -1
   let episodePhase = null
   let episodeMass = 0
+  let episodeSampleCount = 0
 
-  for (const localMs of instants) {
+  const result = []
+  for (const localMs of vertices) {
     while (newest + 1 < filtered.length && filtered[newest + 1].activeTimeMs <= localMs) {
       newest += 1
       const sample = filtered[newest]
@@ -260,37 +308,55 @@ export function cumulativePhaseTpsSeries(samples, options = {}) {
         episodeStartIndex = newest
         episodePhase = phase
         episodeMass = weight
+        episodeSampleCount = 1
       } else {
         episodeMass += weight
+        episodeSampleCount += 1
       }
     }
-    /**
-     * The label comes from the newest sample at or before this instant, which is the
-     * same rule `LiveMeter.streamingPhase` applies.
-     */
     if (newest < 0) {
+      /**
+       * No sample at or before this instant. With per-episode ladders the first
+       * vertex *is* the first sample, so this is reachable only for a bounded call
+       * whose `fromMs` precedes all evidence — and then the honest answer is that
+       * no episode exists, not that the rate is zero.
+       */
       result.push({
         timeMs: offsetMs + localMs,
         localMs,
-        tps: 0,
+        tps: null,
+        publishable: false,
+        rateUnavailableReason: RateUnavailable.NO_EPISODE,
         activePhase: null,
         attemptId: null,
+        episodeStartMs: null,
+        episodeElapsedMs: 0,
+        episodeSampleCount: 0,
+        episodeMass: 0,
       })
       continue
     }
     const startMs = filtered[episodeStartIndex].activeTimeMs
     const elapsed = localMs - startMs
+    const gate = rateAvailability({ sampleCount: episodeSampleCount, elapsedMs: elapsed })
     result.push({
       timeMs: offsetMs + localMs,
       localMs,
       /**
-       * `Math.round` is MiMo's observed rule for every published rate. The opening
-       * vertex of an episode has no elapsed time yet and therefore no rate; `0` is
-       * the anchor the chart draws from, not a measured zero.
+       * `Math.round` is MiMo's observed rule for every published rate. A vertex
+       * that fails either gate publishes **nothing**: `null` is not a rate, and a
+       * `0` here would be read as a measured zero by every consumer that does not
+       * consult `publishable`.
        */
-      tps: elapsed > 0 ? Math.round(episodeMass * 1000 / elapsed) : 0,
+      tps: gate.publishable ? Math.round(episodeMass * 1000 / elapsed) : null,
+      publishable: gate.publishable,
+      rateUnavailableReason: gate.reason,
       activePhase: filtered[newest].phase ?? null,
       attemptId: filtered[newest].attemptId ?? null,
+      episodeStartMs: startMs,
+      episodeElapsedMs: elapsed,
+      episodeSampleCount,
+      episodeMass,
     })
   }
   return result
@@ -389,11 +455,13 @@ export function capSeriesPoints(series, maxPoints = MAX_SERIES_POINTS) {
  * @param {readonly object[]} samples compressed samples carrying `attemptId` and `activeTimeMs`
  * @param {{
  *   sampleEveryMs?:number, attemptId?:string|null, calibrated?:boolean, maxPoints?:number,
+ *   temporalAllocationMode?:string|null,
  * }} [options]
  * @returns {{
  *   attemptId:string|null, startMs:number, endMs:number, localEndMs:number,
  *   durationMs:number, sampleCount:number, tokens:number, calibratedTokens:number|null,
  *   calibrated:boolean, samples:object[], points:object[], visualRuns:object[],
+ *   peakProvenance:object|null,
  * }}
  */
 export function attemptTrace(segment, samples, options = {}) {
@@ -450,6 +518,7 @@ export function attemptTrace(segment, samples, options = {}) {
       samples: [],
       points: [],
       visualRuns: [],
+      peakProvenance: null,
     }
   }
 
@@ -497,6 +566,17 @@ export function attemptTrace(segment, samples, options = {}) {
     samples: perAttempt,
     points,
     visualRuns: visualRunsOf(points),
+    /**
+     * The attempt's own strongest **publishable** vertex, with the evidence that
+     * produced it. `null` when no vertex of this attempt passed the shared
+     * publication policy — see `peakTps` for why that is not `0`.
+     */
+    peakProvenance: peakProvenanceOf({
+      attemptId,
+      point: strongestPoint(points),
+      samples: perAttempt,
+      temporalAllocationMode: options.temporalAllocationMode ?? null,
+    }),
   }
 }
 
@@ -578,10 +658,17 @@ export function visualRunsOf(points) {
 /**
  * The per-attempt trace list the completed curve is drawn from, in turn order.
  *
+ * `temporalAllocationModeByAttemptId` carries each attempt's calibrated
+ * allocation mode (`phase-anchored` / `total-anchored` / `unanchored`) into its
+ * trace, where it is published on the peak's debug provenance. The samples
+ * themselves do not carry it — it is a property of the attempt's calibration, not
+ * of one delta — so it travels beside them rather than being inferred from them.
+ *
  * @param {readonly object[]} segments `compressAttempts` segments, in turn order
  * @param {readonly object[]} samples `compressAttempts` samples
  * @param {{sampleEveryMs?:number, maxPoints?:number,
- *   calibratedAttemptIds?:ReadonlySet<string|null>}} [options]
+ *   calibratedAttemptIds?:ReadonlySet<string|null>,
+ *   temporalAllocationModeByAttemptId?:Map<string|null, string|null>}} [options]
  * @returns {object[]} one trace per segment that produced evidence
  */
 export function attemptTraces(segments, samples, options = {}) {
@@ -589,12 +676,18 @@ export function attemptTraces(segments, samples, options = {}) {
     segment => segment && typeof segment === 'object' && Number.isFinite(segment.startMs),
   )
   const calibrated = options.calibratedAttemptIds
+  const allocationModes = options.temporalAllocationModeByAttemptId instanceof Map
+    ? options.temporalAllocationModeByAttemptId
+    : null
   const traces = []
   for (const segment of ordered) {
     const trace = attemptTrace(segment, samples, {
       sampleEveryMs: options.sampleEveryMs,
       maxPoints: options.maxPoints,
       calibrated: calibrated instanceof Set ? calibrated.has(segment.attemptId ?? null) : false,
+      temporalAllocationMode: allocationModes === null
+        ? null
+        : (allocationModes.get(segment.attemptId ?? null) ?? null),
     })
     if (trace.points.length === 0) continue
     traces.push(trace)
@@ -612,17 +705,113 @@ export function attemptTraces(segments, samples, options = {}) {
  * afterwards and must not be read here: taking the maximum of the drawn points
  * would make a chart setting silently change a number the card reports, which is
  * the one direction this statistic still refuses.
+ *
+ * **Only publishable vertices compete.** Every vertex below the shared
+ * publication policy (`src/core/rate-publication.js`) carries `tps: null` and is
+ * skipped by the `Number.isFinite` test, which is what keeps an episode opening
+ * anchor, a sub-100 ms denominator and a below-warm-up vertex out of the peak.
+ * A number that passes the gates is never clamped: this function takes a maximum
+ * and does nothing else to it.
+ *
+ * **`null` when nothing is publishable.** An attempt whose every episode is
+ * below the gates has no measured rate at all, and `0` would be a fabricated
+ * measurement of zero throughput. The UI prints `—` for `null`.
+ *
+ * @param {...(readonly {tps?:number|null}[])} seriesList
+ * @returns {number|null}
  */
 export function peakTps(...seriesList) {
-  let peak = 0
+  let peak = null
   for (const series of seriesList) {
     if (!Array.isArray(series)) continue
     for (const point of series) {
       const value = point?.tps
-      if (Number.isFinite(value) && value > peak) peak = value
+      if (!Number.isFinite(value)) continue
+      if (peak === null || value > peak) peak = value
     }
   }
   return peak
+}
+
+/** Whether one vertex is a publishable measurement. */
+function isMeasured(point) {
+  return Number.isFinite(point?.tps)
+}
+
+/**
+ * The strongest publishable vertex of one series, or `null`.
+ *
+ * Ties resolve to the earliest vertex, so a provenance record is a pure function
+ * of the evidence rather than of the order two equal maxima happened to be
+ * emitted in.
+ */
+function strongestPoint(points) {
+  let best = null
+  for (const point of points) {
+    if (!isMeasured(point)) continue
+    if (best === null || point.tps > best.tps) best = point
+  }
+  return best
+}
+
+/**
+ * The sample quality of an episode's contributing samples.
+ *
+ * `calibrated` requires **every** contributing sample to carry a provider-anchored
+ * magnitude; a mixture is reported as `mixed` rather than rounded to either end,
+ * because the two answers mean different things to a reader diagnosing a spike.
+ */
+function sampleQualityOf(samples) {
+  if (samples.length === 0) return null
+  let calibrated = 0
+  let estimated = 0
+  for (const sample of samples) {
+    if (sample?.quality === MetricQuality.CALIBRATED) calibrated += 1
+    else estimated += 1
+  }
+  if (estimated === 0) return MetricQuality.CALIBRATED
+  if (calibrated === 0) return MetricQuality.ESTIMATED
+  return 'mixed'
+}
+
+/**
+ * Debug-only provenance for one published peak.
+ *
+ * Phase 9.4 added this because the peak stopped being explainable by its value
+ * alone: the defect it fixes was a peak produced by a denominator nobody could
+ * see on the chart. Every field here is evidence the estimator already held —
+ * the episode's origin, its elapsed clock, its contributing sample count and
+ * mass, the calibration mode, and the timestamps of the samples that produced
+ * the winning vertex — so a diagnostic can say *why* a number is the maximum.
+ *
+ * It is **diagnostics only** and must not reach a renderer: nothing in
+ * `src/client` reads `peakProvenance`, and `test/curve-rate-publication.test.js`
+ * asserts that the rendered view model does not carry it.
+ */
+function peakProvenanceOf({ attemptId, point, samples, temporalAllocationMode }) {
+  if (point === null) return null
+  const contributing = samples.filter(sample => (
+    Number.isFinite(sample?.activeTimeMs)
+    && Number.isFinite(point.episodeStartMs)
+    && sample.activeTimeMs >= point.episodeStartMs
+    && sample.activeTimeMs <= point.localMs
+    && (sample.phase ?? null) === (point.activePhase ?? null)
+  ))
+  const quality = sampleQualityOf(contributing)
+  return {
+    attemptId,
+    phase: point.activePhase ?? null,
+    episodeStartMs: point.episodeStartMs ?? null,
+    pointTimeMs: point.timeMs,
+    elapsedMs: point.episodeElapsedMs ?? 0,
+    episodeSampleCount: point.episodeSampleCount ?? 0,
+    episodeMass: point.episodeMass ?? 0,
+    temporalAllocationMode: temporalAllocationMode ?? null,
+    calibrated: quality === MetricQuality.CALIBRATED,
+    sampleQuality: quality,
+    contributingSampleTimes: contributing.map(sample => sample.activeTimeMs),
+    tps: point.tps,
+  }
 }
 
 /**

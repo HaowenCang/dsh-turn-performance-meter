@@ -27,10 +27,14 @@
  *
  * The last two sections exercise the same allocation through the settled snapshot
  * and the curve view model, because the defect is only observable to a reader if the
- * printed peak and the placed dot disagree. Since Phase 9.2 the published statistic is
- * a phase-cumulative average, so a one-delta attempt publishes the opening anchor `0`
- * and its own first step — a **two-vertex** run — and the counterexample is rebuilt
- * around that geometry.
+ * printed peak and the placed dot disagree. Since Phase 9.4 the published statistic is
+ * a phase-cumulative average that passes the shared publication policy or publishes
+ * nothing: an episode needs three contributing samples before any of its vertices
+ * carries a rate. The shortest run that can therefore bear a peak through the real
+ * pipeline is a **three-vertex** run — the episode's opening anchor, its still-warming
+ * first step and its first measured step — and the counterexample is rebuilt around
+ * that geometry. A run made only of withheld vertices is not drawable at all: the
+ * allocator and the downsampler both skip a `tps` that is not finite.
  */
 
 import test from 'node:test'
@@ -43,6 +47,7 @@ import {
   MIN_MAX_POINTS,
   allocateRunBudgets,
   minimumRunCost,
+  peakTps,
 } from '../src/core/curve.js'
 import { CURVE_PLOT_HEIGHT, curveViewModel } from '../src/client/completed/curve-view-model.js'
 import { completedTree } from '../src/client/completed/completed-tree.js'
@@ -354,20 +359,33 @@ const ORDINARY_CALLS = 120
 const ORDINARY_DELTA_CHARS = 400
 const ORDINARY_DELTA_TOKENS = 100
 /**
- * The three one-delta attempts, lightest first. Each settles one sampling step after its only
- * delta, so its trace is the opening anchor and its own first step, `tokens * 1000 / 100`; the
- * last of them is the chart's maximum, placed deliberately behind two weaker short runs — the
- * input order the old length-partitioned allocation walked straight through.
+ * The three short-delta attempts, lightest first, and the sampling step each of them spreads its
+ * three deltas over. Each attempt opens an episode of its own with three deltas, so it is the
+ * smallest episode the shared publication policy admits: its ladder holds the opening anchor,
+ * two steps that are still below the three-sample warmup, and the measured steps. The last of
+ * the three is the chart's maximum, placed deliberately behind two weaker short runs — the input
+ * order the old length-partitioned allocation walked straight through.
  */
 const SHORT_TOKENS = [10, 20, 9999]
+const SHORT_STEP_MS = 100
+/** The three-delta episode settles at `2 * SHORT_STEP_MS`, so its ladder runs through the tail. */
 const SHORT_TAIL_MS = 100
-/** The chart maximum: 9999 tokens over the 100 ms from the episode's opening to the attempt's end. */
-const PEAK_TPS = SHORT_TOKENS[2] * 1000 / SHORT_TAIL_MS
 /**
- * The strongest vertex an ordinary call publishes: its output episode's first step, 50 ms
- * after the phase change at 750 ms, `100 * 1000 / 50`.
+ * The chart maximum: all three deltas in the numerator over the 200 ms from the episode's
+ * opening to its third vertex, `3 * 9999 * 1000 / 200`. A shorter episode's ladder would have to
+ * hold fewer than three vertices to measure fewer than three deltas, which is exactly what the
+ * publication policy withholds — so this is the cheapest run that can carry a peak at all.
  */
-const ORDINARY_PEAK_TPS = ORDINARY_DELTA_TOKENS * 1000 / 50
+const PEAK_TPS = SHORT_TOKENS[2] * 3 * 1000 / (2 * SHORT_STEP_MS)
+/**
+ * The strongest vertex an ordinary call publishes. Its reasoning episode opens at its local zero
+ * with three 100-token deltas, and its first vertex at which all three are in the numerator is
+ * `3 * 100 * 1000 / 500` — the same `mass * 1000 / elapsed` the definition gives, not a step
+ * remainder: the per-episode ladder has no vertex between 0 and 500 that could divide by less.
+ * The output episode reaches the same shape over `3 * 100 * 1000 / 750`.
+ */
+const ORDINARY_PEAK_TPS = ORDINARY_DELTA_TOKENS * 3 * 1000 / 500
+const ORDINARY_OUTPUT_PEAK_TPS = ORDINARY_DELTA_TOKENS * 3 * 1000 / 750
 
 const textDelta = text => ({ type: 'text-delta', index: 0, text })
 const reasoningDelta = text => ({ type: 'reasoning-delta', index: 0, text })
@@ -386,22 +404,27 @@ function chunkWeighing(tokens) {
 /**
  * A saturated turn whose global maximum lives in the **cheapest run that can carry one**.
  *
- * Since Phase 9.2 the published statistic is a phase-cumulative average over the episode in
- * force, so the shortest a peak-bearing run can be is two vertices: the opening anchor `0` and
- * the first ladder instant, `mass * 1000 / 100`. That is the modern shape of the Phase 7A.1
- * counterexample — a chart maximum in a low-cost run while ordinary runs compete for the
- * budget — and it is the shape the allocation must keep.
+ * Since Phase 9.4 the published statistic is a phase-cumulative average that the shared
+ * publication policy admits or withholds, so a run can carry a peak only if its episode
+ * contributed at least three samples: the shortest a peak-bearing run can be is three vertices —
+ * the opening anchor, the still-warming first step, and the first measured step,
+ * `mass * 1000 / 200` on a hundred-millisecond episode. That is the modern shape of the Phase
+ * 7A.1 counterexample: a chart maximum in the cheapest run that can hold one, while ordinary runs
+ * compete for the budget.
  *
  * The ordinary calls are 120 two-phase calls: three reasoning deltas on the 250 ms grid, then
  * three tool-call-argument deltas, with the attempt settling a quarter-second after its last
- * one. Each call contributes a reasoning run of eight vertices and an output run of nine, so
- * the chart holds `120 * 2 + 4` runs and well over 512 vertices: the allocation really binds
- * and runs really are refused, rather than being saturated only marginally.
+ * one. Each call therefore contributes a reasoning run and an output run of four vertices each —
+ * an episode's ladder starts at its own origin, so the reasoning episode is sampled at
+ * `0, 500, 600, 700` and the output one at `700, 1250, 1450, 1500` — and the chart holds
+ * `120 * 2 + 4` runs over far more than 512 vertices, so the allocation really binds and runs
+ * really are refused rather than being saturated only marginally.
  *
- * Three one-delta attempts follow, the chart maximum last, so it is placed behind two weaker
+ * Three three-delta attempts follow, the chart maximum last, so it is placed behind two weaker
  * short runs — the input order the old length-partitioned allocation walked straight through.
- * A final zero-width attempt (one delta, settled on its own instant) publishes the opening
- * anchor alone and keeps the marker half of the chart-wide bound live.
+ * Each publishes its own three measured deltas over its own episode clock. A final zero-width
+ * attempt (one delta, settled on its own instant) owns a single vertex that is withheld as the
+ * episode's opening anchor, and keeps the marker half of the chart-wide bound live.
  */
 function driveSaturatedShortPeak() {
   const store = new TurnTelemetryStore()
@@ -435,9 +458,19 @@ function driveSaturatedShortPeak() {
       step: ORDINARY_CALLS + 1 + index,
       startedAtMs: wallMs,
     })
-    store.acceptChunk(record, attempt, { timeMs: wallMs, chunk: chunkWeighing(tokens) })
+    /**
+     * Three deltas of one weight, one sampling step apart. They are the smallest episode the
+     * publication policy admits, and they give the attempt a three-vertex ladder: the anchor at
+     * its local zero, the withheld first step, and the measured step at its local 200.
+     */
+    for (let delta = 0; delta < 3; delta += 1) {
+      store.acceptChunk(record, attempt, {
+        timeMs: wallMs + delta * SHORT_STEP_MS,
+        chunk: chunkWeighing(tokens),
+      })
+    }
     store.settleAttempt(attempt, {
-      settledAtMs: wallMs + SHORT_TAIL_MS,
+      settledAtMs: wallMs + 2 * SHORT_STEP_MS + SHORT_TAIL_MS,
       settlementKind: 'message',
       surfaceCommitted: true,
       attemptOutcome: 'committed',
@@ -477,15 +510,38 @@ test('a saturated chart keeps a low-cost global peak and the budget that bounds 
   assert.ok(curve.renderBudget.degradedRuns > 0,
     'a chart of this many runs against 512 vertices must refuse runs, or the bound is not exercised')
 
-  /** Each one-delta attempt publishes its anchor and its own first step. */
+  /**
+   * Each three-delta attempt's own trace, on its own 100 ms ladder. The three deltas arrive at
+   * local `0, 100, 200` and the episode settles at local 300, so the ladder is
+   * `0, 100, 200, 300`:
+   *
+   *     local   0: elapsed 0,   1 sample  -> the opening anchor, withheld
+   *     local 100: elapsed 100, 1 sample  -> below the three-sample warmup, withheld
+   *     local 200: elapsed 200, 2 samples -> `2 * tokens * 1000 / 200`
+   *     local 300: elapsed 300, 3 samples -> `3 * tokens * 1000 / 300`
+   *
+   * The third sample lands exactly on the local-200 instant, so the two measured steps divide
+   * two and then three deltas by their own elapsed clocks. Three vertices is all a drawable
+   * peak-bearing run could have been under the superseded anchor rule; the publication policy
+   * is what makes it four, two of which are withheld.
+   */
   const shortTraces = curve.attempts.filter(attempt => String(attempt.attemptId).startsWith('short-'))
   assert.deepEqual(shortTraces.map(attempt => attempt.points.map(point => [point.localMs, point.tps])), [
-    [[0, 0], [100, 100]],
-    [[0, 0], [100, 200]],
-    [[0, 0], [100, 99_990]],
-  ], 'each short attempt is the anchor plus its own cumulative first step, tokens * 1000 / 100')
+    [[0, null], [100, null], [200, 150], [300, 100]],
+    [[0, null], [100, null], [200, 300], [300, 200]],
+    [[0, null], [100, null], [200, 149_985], [300, 99_990]],
+  ], 'each short attempt is two withheld leading vertices and its own measured steps, 2 * tokens * 1000 / 200 and 3 * tokens * 1000 / 300')
+  assert.deepEqual(shortTraces.map(attempt => attempt.points.map(point => point.rateUnavailableReason)),
+    [
+      ['opening-anchor', 'below-sample-warmup', null, null],
+      ['opening-anchor', 'below-sample-warmup', null, null],
+      ['opening-anchor', 'below-sample-warmup', null, null],
+    ], 'and the withheld vertices name the fact that is missing rather than reporting a zero')
   assert.equal(curve.peakTps, PEAK_TPS)
-  assert.equal(PEAK_TPS, 99_990)
+  assert.equal(PEAK_TPS, 149_985)
+  /** The peak the card prints is the strongest measured step of these three attempts. */
+  assert.equal(Math.max(...shortTraces.map(attempt => peakTps(attempt.points))), PEAK_TPS,
+    'the third short attempt\'s measured step at local 200, 3 * 9999 * 1000 / 200')
 
   /** The maximum is seated: its run is drawn and still carries the value the card prints. */
   const peakRun = runs.find(run => run.points.some(point => Math.abs(point.tps - curve.peakTps) < 1e-9))
@@ -497,12 +553,28 @@ test('a saturated chart keeps a low-cost global peak and the budget that bounds 
   assert.equal(curve.renderBudget.peakRetained, true)
   assert.equal(allocationRunsOf(curve)[curve.renderBudget.peakRun].attemptId, 'short-2',
     'the published peak index names the run that carries the maximum in the allocation\'s own order')
-  /** The ordinary runs really are the weaker evidence here: the peak is not a tie. */
-  const ordinaryPeaks = runs.filter(run => String(run.attemptId).startsWith('a')).map(run => run.peak)
-  assert.ok(ordinaryPeaks.every(peak => peak <= ORDINARY_PEAK_TPS),
-    `an ordinary run measured more than ${ORDINARY_PEAK_TPS} tokens/s: ${Math.max(...ordinaryPeaks)}`)
-  assert.equal(Math.max(...ordinaryPeaks), ORDINARY_PEAK_TPS,
-    'and the strongest of them is the output episode\'s own first step')
+  /**
+   * The ordinary runs really are the weaker evidence here: the peak is not a tie. A run's own
+   * maximum is a **number** on the settled projection (`null` only for a refused run or a run
+   * with no measurement), so it is read directly rather than through a point object.
+   */
+  const ordinaryPeaks = runs.filter(run => String(run.attemptId).startsWith('a')).map(run => run.peak ?? null)
+  assert.ok(ordinaryPeaks.every(peak => peak === null || peak <= ORDINARY_PEAK_TPS),
+    `an ordinary run measured more than ${ORDINARY_PEAK_TPS} tokens/s: ${Math.max(...ordinaryPeaks.filter(peak => peak !== null))}`)
+  assert.equal(Math.max(...ordinaryPeaks.filter(peak => peak !== null)), ORDINARY_PEAK_TPS,
+    'and the strongest of them is the reasoning episode\'s own first measured step, 3 * 100 * 1000 / 500')
+  /**
+   * Both phases do carry a measured peak of their own — the output episode's later ladder step at
+   * local 750, `2 * 100 * 1000 / 250` — which is why `ORDINARY_OUTPUT_PEAK_TPS` is below it. The
+   * strongest ordinary vertex is the reasoning episode's, and every ordinary run that was seated
+   * carries it: the set is a single value rather than a spread, so the assertion above is not
+   * passing on a lucky maximum.
+   */
+  assert.ok(ORDINARY_OUTPUT_PEAK_TPS <= ORDINARY_PEAK_TPS)
+  assert.deepEqual([...new Set(ordinaryPeaks.filter(peak => peak !== null))], [ORDINARY_PEAK_TPS],
+    'every seated ordinary run is capped by its reasoning episode\'s first fully-measured step')
+  assert.ok(ORDINARY_PEAK_TPS < PEAK_TPS / 100,
+    `the peak must not be a near-tie with the ordinary runs: ${ORDINARY_PEAK_TPS} against ${PEAK_TPS}`)
 
   /** Chart-wide bound: path vertices **and** singleton markers together are what 512 bounds. */
   assert.ok(curve.renderBudget.elementPoints <= MAX_RENDER_POINTS_TOTAL,
@@ -587,12 +659,15 @@ test('the printed peak and the placed dot are the same measurement', () => {
   assert.equal(dot.props['data-leader'], 'output')
 
   /**
-   * The zero-width attempt keeps its own point marker, and it is not the peak: a marker whose
-   * measurement is the opening anchor reads 0, one plot-height away from the dot.
+   * The zero-width attempt keeps its own point marker, and it is not the peak. That marker sits
+   * on the attempt's one vertex, whose rate the publication policy withholds — the episode's
+   * opening anchor, published as `null` rather than as a fabricated zero — so it is one
+   * plot-height away from the dot, on the axis floor rather than on a measurement.
    */
   const [marker] = byClass(panel, 'dsh-tpm-singleton-dot')
   assert.ok(marker !== undefined, 'the zero-width attempt is placed as a point marker')
-  assert.equal(marker.props['data-tps'], '0')
+  assert.equal(marker.props['data-tps'], 'null',
+    'the anchor-only marker carries no rate at all, and never a measured zero')
   assert.notEqual(marker.props.style.top, dot.props.style.top,
     'the peak dot is not drawn on the anchor-only marker')
 })

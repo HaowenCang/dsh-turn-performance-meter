@@ -24,6 +24,7 @@ import { TurnTelemetryStore } from '../src/host/telemetry-design.js'
 import { MetricQuality } from '../src/core/metric-quality.js'
 import { QualityLevel } from '../src/core/quality-model.js'
 import { LivePhase } from '../src/core/live-metrics.js'
+import { peakTps } from '../src/core/curve.js'
 import { turnKey } from '../src/core/types.js'
 import { createController } from '../src/client/live/controller.js'
 import { formatToolLabel } from '../src/client/live/live-format.js'
@@ -322,7 +323,12 @@ test('a retry before a tool resets the episode on both sides of the boundary', (
         id: 'first',
         step: 1,
         at: 0,
-        chunks: [[0, output('a'.repeat(2000))], [500, output('a'.repeat(2000))]],
+        chunks: [
+          [0, output('a'.repeat(2000))],
+          [100, output('a'.repeat(2000))],
+          [200, output('a'.repeat(2000))],
+          [1000, output('a'.repeat(2000))],
+        ],
         settlementKind: 'attempt',
         surfaceCommitted: false,
         attemptOutcome: 'retried',
@@ -330,11 +336,16 @@ test('a retry before a tool resets the episode on both sides of the boundary', (
       {
         id: 'second',
         step: 1,
-        at: 600,
-        chunks: [[600, output('b'.repeat(40))], [1100, output('b'.repeat(40))]],
+        at: 2000,
+        chunks: [
+          [2000, output('b'.repeat(40))],
+          [2100, output('b'.repeat(40))],
+          [2200, output('b'.repeat(40))],
+          [3000, output('b'.repeat(40))],
+        ],
       },
     ],
-    endMs: 2200,
+    endMs: 4000,
   })
   const runs = settled.curve.series.find(series => series.key === 'output').runs
   assert.deepEqual(runs.map(run => run.attemptId), ['first', 'second'])
@@ -342,25 +353,26 @@ test('a retry before a tool resets the episode on both sides of the boundary', (
   assert.deepEqual(traces.map(trace => trace.attemptId), ['first', 'second'])
   /**
    * The abandoned attempt's own trace is measured on its own window, and the
-   * replacement's on its own. Both attempts carry the same *shape* — one measurement
-   * at local zero and one half a window later — so the relationship between them is
-   * the assertion: each of the replacement's vertices is a tenth of the abandoned
+   * replacement's on its own. Both attempts carry the same *shape* — the same four
+   * local instants and the same phases — so the relationship between them is the
+   * assertion: each of the replacement's vertices is a fiftieth of the abandoned
    * attempt's at the same local instant, whatever the estimator's absolute scale.
    *
-   * A bridged window would put `firstTokens + secondTokens` in the replacement's
-   * opening vertex and break that ratio at the first vertex.
+   * A bridged series would put `firstTokens + secondTokens` in the replacement's
+   * vertices and break that ratio at the first measured one.
    */
   const ratio = traces[0].tokens / traces[1].tokens
   assert.ok(ratio >= 9.5, `the two attempts differ by ${ratio.toFixed(2)}×`)
   /**
-   * Each trace is its own episode's cumulative average, sampled on the same 100 ms
-   * ladder: the abandoned attempt's 500-token deltas and the replacement's 10-token
-   * ones, each measured from its own first sample. A bridged estimator would put
-   * `firstTokens + secondTokens` in the replacement's opening vertices and break the
-   * second array at its first entry.
+   * Each trace is its own episode's cumulative average, sampled on its own 100 ms
+   * ladder: 500-token deltas for the abandoned attempt and 10-token ones for the
+   * replacement, each measured from its own first sample. The third delta lifts the
+   * numerator at 200 ms, and the fourth at 1000 ms.
    */
-  assert.deepEqual(traces[0].points.map(point => point.tps), [0, 5000, 2500, 1667, 1250, 2000])
-  assert.deepEqual(traces[1].points.map(point => point.tps), [0, 100, 50, 33, 25, 40])
+  assert.deepEqual(traces[0].points.map(point => point.tps),
+    [null, null, 7500, 5000, 3750, 3000, 2500, 2143, 1875, 1667, 2000])
+  assert.deepEqual(traces[1].points.map(point => point.tps),
+    [null, null, 150, 100, 75, 60, 50, 43, 38, 33, 40])
   assert.equal(traces[1].points.length, traces[0].points.length,
     'the same script produces the same number of vertices in either placement')
   for (let index = 0; index < traces[0].points.length; index += 1) {
@@ -375,7 +387,7 @@ test('a retry before a tool resets the episode on both sides of the boundary', (
    * replacement's trace, and no vertex exceeds what the replacement's own mass can
    * produce over one ladder step of its own clock.
    */
-  assert.ok(traces[1].points.every(point => point.tps <= traces[1].tokens * 1000 / 100 + 1e-9),
+  assert.ok(traces[1].points.every(point => point.tps === null || point.tps <= traces[1].tokens * 1000 / 100 + 1e-9),
     'every vertex of the retry is bounded by the retry\'s own tokens and its own clock')
   assert.equal(settled.attemptBreakdown.map(a => a.attemptOutcome).join(','), 'retried,committed')
   assert.equal(settled.curve.quality, QualityLevel.ESTIMATED,
@@ -385,17 +397,27 @@ test('a retry before a tool resets the episode on both sides of the boundary', (
 test('a retry after a tool resets the episode again, and the tool keeps zero width', () => {
   const { settled } = drive({
     attempts: [
-      { id: 'a', step: 1, at: 0, chunks: [[0, output('x'.repeat(400))], [500, output('x'.repeat(400))]] },
+      {
+        id: 'a',
+        step: 1,
+        at: 0,
+        chunks: [[0, output('x'.repeat(400))], [100, output('x'.repeat(400))], [200, output('x'.repeat(400))]],
+      },
       {
         id: 'b',
         step: 2,
         at: 6000,
-        chunks: [[6000, output('y'.repeat(4000))], [6500, output('y'.repeat(4000))]],
+        chunks: [[6000, output('y'.repeat(4000))], [6100, output('y'.repeat(4000))], [6200, output('y'.repeat(4000))]],
         settlementKind: 'attempt',
         surfaceCommitted: false,
         attemptOutcome: 'retried',
       },
-      { id: 'c', step: 2, at: 7000, chunks: [[7000, output('z'.repeat(40))], [7500, output('z'.repeat(40))]] },
+      {
+        id: 'c',
+        step: 2,
+        at: 7000,
+        chunks: [[7000, output('z'.repeat(40))], [7100, output('z'.repeat(40))], [7200, output('z'.repeat(40))]],
+      },
     ],
     tools: [{ callId: 't1', name: 'pwsh', startMs: 600, endMs: 5000 }],
     endMs: 8000,
@@ -403,14 +425,14 @@ test('a retry after a tool resets the episode again, and the tool keeps zero wid
   const runs = settled.curve.series.find(series => series.key === 'output').runs
   assert.deepEqual(runs.map(run => run.attemptId), ['a', 'b', 'c'],
     'the abandoned attempt and its replacement are separate runs')
-  assert.equal(settled.curve.durationMs, 500 + 500 + 500, 'the 4.4 s tool contributes no width')
+  assert.equal(settled.curve.durationMs, 200 + 200 + 200, 'the 4.4 s tool contributes no width')
   /**
-   * The second retry's series is its own episode's cumulative average: ten shape
-   * tokens from local zero, so `round(10 * 1000 / t)` on the 100 ms ladder, ending on
-   * its own last delta. Nothing of the two earlier attempts is in it — a bridged
-   * estimator would open with their 4000-token mass instead of `0`.
+   * The second retry's series is its own episode's cumulative average: three
+   * ten-token deltas from local zero, so `round(30 * 1000 / 200)` at the vertex that
+   * admits them. Nothing of the two earlier attempts is in it — a bridged estimator
+   * would open with their 1000-token mass instead.
    */
-  assert.deepEqual(runs[2].points.map(p => p.tps), [0, 100, 50, 33, 25, 40],
+  assert.deepEqual(runs[2].points.map(p => p.tps), [null, null, 150],
     'the second retry starts empty, whatever the first two attempts measured, and ends on its own last delta')
   assert.ok(settled.curve.peakTps >= 1000)
 })
@@ -715,12 +737,20 @@ test('missing timestamps are refused rather than defaulted to zero', () => {
  */
 function referenceCumulativeRate(samples, localMs) {
   const upto = samples.filter(sample => sample.activeTimeMs <= localMs + 1e-9)
-  if (upto.length === 0) return 0
+  if (upto.length === 0) return null
   const phase = upto[upto.length - 1].phase ?? null
   let start = upto.length - 1
   while (start > 0 && (upto[start - 1].phase ?? null) === phase) start -= 1
   const elapsed = localMs - upto[start].activeTimeMs
-  if (!(elapsed > 0)) return 0
+  const sampleCount = upto.length - start
+  /**
+   * The publication gate, re-derived here with its own literals rather than read
+   * from the shipped policy: fewer than three contributing samples, or fewer than
+   * 100 ms of the episode's own clock, is not a measurement and the vertex must
+   * publish nothing. Restating the numbers is what makes this an oracle — if the
+   * shipped gate drifts, this file fails.
+   */
+  if (!(sampleCount >= 3) || !(elapsed >= 100)) return null
   let mass = 0
   for (let index = start; index < upto.length; index += 1) {
     mass += upto[index].tokens ?? upto[index].weight ?? 0
@@ -755,11 +785,19 @@ test('every recorded turn survives the full settle path under both readings', ()
       for (const trace of settled.curve.attempts) {
         for (const run of trace.runs) {
           for (const point of run.points) {
-            assert.ok(Number.isFinite(point.tps), `${where} ${trace.attemptId} has a finite rate`)
-            assert.equal(point.tps, referenceCumulativeRate(trace.samples, point.localMs),
+            /**
+             * The oracle answers both halves of the contract: the value of a
+             * publishable vertex, and `null` for one the policy withholds. A vertex
+             * that publishes a number the oracle refuses, or withholds a number the
+             * oracle can derive, fails here.
+             */
+            const expected = referenceCumulativeRate(trace.samples, point.localMs)
+            assert.equal(point.tps, expected,
               `${where} ${trace.attemptId} at local ${point.localMs}`)
+            assert.equal(point.publishable, expected !== null,
+              `${where} ${trace.attemptId} at local ${point.localMs} states its availability`)
           }
-          assert.equal(run.peak, Math.max(...run.points.map(p => p.tps)), `${where} run peak`)
+          assert.equal(run.peak, peakTps(run.points), `${where} run peak`)
         }
       }
       assert.equal(settled.curve.quality, settled.quality.temporalShapeQuality, `${where} curve quality`)

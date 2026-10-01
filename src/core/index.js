@@ -33,8 +33,17 @@ export {
   expandAssistantStream,
   firstTokenTime,
   isTokenDelta,
+  tokenEvidence,
   usageFromChunk,
 } from './delta-accounting.js'
+
+export {
+  MIN_RATE_ELAPSED_MS,
+  MIN_RATE_SAMPLES,
+  RateUnavailable,
+  rateAvailability,
+  rateIsPublishable,
+} from './rate-publication.js'
 
 export { PHASE, attributePhaseDurations, phaseEpisodes } from './phase-duration.js'
 

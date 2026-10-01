@@ -225,11 +225,19 @@ test('a peak confined to one run among many is retained', () => {
   const runs = runsOf(curve)
 
   /**
-   * Four thousand characters weigh 1000 tokens, ten times the ordinary delta, so the
-   * spike's own first step is `1000 * 1000 / 100 = 10 000` tokens/s while every ordinary
-   * call's strongest vertex is its own first step, `100 * 1000 / 100 = 1000`.
+   * Four thousand characters weigh 1000 tokens, ten times the ordinary delta, and the shared
+   * publication policy admits a rate only once the episode holds three samples and has run for
+   * 100 ms. The spike streams five deltas on the 250 ms cadence, so its ladder is
+   * `0, 100, …, 1250` and the first vertex that passes both gates is local 500, where three
+   * samples (3000 tokens) sit behind 500 ms of episode clock:
+   *
+   *     3000 * 1000 / 500 = 6000
+   *
+   * Every ordinary call streams three 100-token deltas on the same cadence, so its strongest
+   * vertex is that same shape at a tenth of the mass — `3 * 100 * 1000 / 500 = 600` — and the
+   * spike dominates it ten to one.
    */
-  assert.equal(curve.peakTps, 10_000,
+  assert.equal(curve.peakTps, 6_000,
     `the spike must dominate the peak; measured ${curve.peakTps}`)
   assert.ok(runs.length > 20, `expected many runs, found ${runs.length}`)
   assert.ok(curve.drawnPoints <= MAX_RENDER_POINTS_TOTAL)
@@ -338,17 +346,39 @@ test('the published budget accounting matches the geometry actually emitted', ()
    * inside the budget while the runs held far fewer vertices than their 250 ms grids would
    * imply. That reading is expected (a call whose deltas share an instant really does have
    * almost no width), and this asserts the arithmetic around it rather than the reading.
+   *
+   * The drawn count is over the vertices that carry a measurement. Since Phase 9.4 every
+   * episode's leading vertices fail the shared publication policy — the first five of this
+   * fixture's ladder are the opening anchor and four warmup steps — and a withheld vertex
+   * (`tps: null`) is drawn as a gap rather than as a point on the axis floor, so it costs the
+   * chart no element. `budget.drawnPoints` remains the allocator's own accounting and does
+   * count them; the two are reconciled by the withheld count below rather than by pretending
+   * the accounting and the geometry are the same number.
+   *
+   * This is the snapshot-side half of the same quantity
+   * `test('line vertices plus singleton markers are bounded by the chart budget together')`
+   * asserts through the view model that actually builds the elements. The predicate is the
+   * snapshot's own — `Number.isFinite(point.tps)` — so the two counts cannot drift apart by
+   * using different definitions of "measured".
    */
+  const emitted = run => run.points.filter(point => Number.isFinite(point.tps))
   for (const stretches of [1, 10, 120]) {
     const curve = driveAlternating({ stretches })
     const runs = runsOf(curve)
     const budget = curve.renderBudget
 
     assert.equal(budget.lineVertices + budget.markers, budget.elementPoints)
-    assert.equal(budget.markers, runs.filter(run => run.points.length === 1).length)
-    assert.equal(budget.lineVertices, runs.filter(run => run.points.length >= 2)
-      .reduce((sum, run) => sum + run.points.length, 0))
-    assert.equal(curve.drawnPoints, runs.reduce((sum, run) => sum + run.points.length, 0))
+    assert.equal(budget.markers, runs.filter(run => emitted(run).length === 1).length)
+    assert.equal(budget.lineVertices, runs.filter(run => emitted(run).length >= 2)
+      .reduce((sum, run) => sum + emitted(run).length, 0))
+    /**
+     * The allocator's accounting still charges every budgeted vertex, so it exceeds the drawn
+     * geometry by exactly the vertices the publication policy withholds — and every run here
+     * opens on at least a withheld anchor, so the difference is not zero by accident.
+     */
+    const withheld = runs.reduce((sum, run) => sum + run.points.filter(point => !Number.isFinite(point.tps)).length, 0)
+    assert.ok(withheld > 0, 'the fixture must withhold at least one anchor, or this says nothing')
+    assert.equal(curve.drawnPoints, runs.reduce((sum, run) => sum + emitted(run).length, 0) + withheld)
     assert.equal(budget.runs, runs.length)
     /**
      * The allocator's `allocated` is what it charged, and it never charges a run more than the

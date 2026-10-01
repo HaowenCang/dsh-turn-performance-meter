@@ -24,6 +24,7 @@
 
 import { TurnTelemetryStore } from '../../host/telemetry-design.js'
 import { turnKey } from '../../core/types.js'
+import { tokenEvidence } from '../../core/delta-accounting.js'
 import { NORMALIZED_KIND, applyRetryOutcomes, attemptFromDecoded } from '../../dsh/index.js'
 import { SessionEventFeed } from '../../dsh/client-feed.js'
 import { materializeReconstructedTurn } from '../../dsh/reconstruction.js'
@@ -232,15 +233,40 @@ export function createController({
           })
         }
         const sample = store.acceptChunk(record, attempt, { timeMs: event.timeMs, chunk: event.chunk })
-        if (sample === null) return
-        // Only model-producing deltas drive the state machine; the machine's
-        // first accepted delta is what freezes the turn TTFT stage.
+        if (sample !== null) {
+          // Only model-producing deltas drive the state machine; the machine's
+          // first accepted delta is what freezes the turn TTFT stage.
+          state.presenter.apply({
+            type: 'delta',
+            attemptId: event.attemptId,
+            turn: record.turn,
+            phase: sample.phase,
+            timeMs: sample.timeMs,
+          })
+          return
+        }
+        /**
+         * No accepted sample — and that no longer ends the story. A name-bearing
+         * `tool-call-delta` whose argument fragment is still empty is accepted by
+         * DSH's `isTokenDelta` and rejected by `classifyDelta`, so it produces no
+         * TPS-shape sample while remaining the model's **first token**. Returning
+         * here is exactly the defect Phase 9.4 removes: the machine stayed in
+         * `pending-first-token` and the pill kept rendering the first-response
+         * stopwatch after the boundary had passed.
+         *
+         * The boundary is applied as a delta event so the machine advances to its
+         * streaming stage, and nothing else happens: the store has already frozen
+         * TTFT and opened the episode clock, and no magnitude is invented for a
+         * chunk whose argument text does not exist yet.
+         */
+        const evidence = tokenEvidence(event.chunk)
+        if (!evidence.countsAsToken) return
         state.presenter.apply({
           type: 'delta',
           attemptId: event.attemptId,
           turn: record.turn,
-          phase: sample.phase,
-          timeMs: sample.timeMs,
+          phase: evidence.phase,
+          timeMs: event.timeMs,
         })
         return
       }
@@ -311,17 +337,26 @@ export function createController({
           record.attempts.push(restored)
           record.attemptIndex.set(restored.attemptId, restored)
           /**
-           * The turn TTFT is `turn/start -> first non-empty model-producing
-           * delta`, and a restored attempt brings that delta with it. Taking the
-           * earliest sample timestamp here is what lets a card rebuilt after a
-           * reload report the same TTFT the live session froze, instead of `—`.
+           * The turn TTFT is `turn/start -> first chunk DSH's predicate accepts`,
+           * and a restored attempt brings that instant with it: `decoded` carries
+           * the boundary from the compact stream itself, so a name-bearing
+           * tool-call delta whose argument fragment stayed empty is counted
+           * exactly as the live path counts it. Taking the earliest *sample*
+           * instead — as an earlier revision did — would silently miss that
+           * boundary and report `—` for a TTFT the live session had measured.
+           *
+           * `firstTokenObserved` is the same one-way freeze the live path uses, so
+           * replaying a settlement can never move an instant already recorded.
            */
-          for (const sample of restored.samples) {
-            if (!Number.isFinite(sample.timeMs)) continue
-            record.firstTokenMs = record.firstTokenMs === null
-              ? sample.timeMs
-              : Math.min(record.firstTokenMs, sample.timeMs)
-          }
+          const restoredFirstTokenMs = Number.isFinite(restored.firstTokenMs)
+            ? restored.firstTokenMs
+            : restored.samples.reduce(
+              (earliest, sample) => (Number.isFinite(sample.timeMs) && (earliest === null || sample.timeMs < earliest)
+                ? sample.timeMs
+                : earliest),
+              null,
+            )
+          store.firstTokenObserved(record, { timeMs: restoredFirstTokenMs })
           state.durableAttempts = (state.durableAttempts ?? 0) + 1
           log('durable attempt restored', sessionId, restored.attemptId, restored.samples.length)
         }

@@ -32,7 +32,13 @@
  *
  * Phase 9.2 changed the statistic the vertices carry — a phase-cumulative average over the
  * episode in force, not a trailing one-second window — so a stall is now a strictly decaying
- * stretch rather than a run of measured zeros. The geometry this file is about is unchanged.
+ * stretch rather than a run of measured zeros. Phase 9.4 added the shared publication policy
+ * (`src/core/rate-publication.js`) in front of that statistic: an episode needs three
+ * contributing samples and 100 ms of its own clock before any of its vertices carries a rate,
+ * and a vertex that fails either gate is published as `tps: null` with a
+ * `rateUnavailableReason` — never as a measured zero. The geometry this file is about is
+ * unchanged; what changed is that the leading vertices of a phase are withheld rather than
+ * drawn on the axis floor.
  */
 
 import test from 'node:test'
@@ -228,36 +234,69 @@ test('the long turn keeps its attempt resets and its zero-width tools', () => {
   /**
    * The chart is one subpath sequence per call, and every call owns its own trace: no episode
    * clock crosses a boundary, so no attempt is credited with a neighbour's tokens. The sharp
-   * check is the trace's first measured vertex: `attempt.points[1]` measures the attempt's own
-   * first episode — the mass it accumulated by local 100 ms — over its own 100 ms of clock, so
-   * it must equal that mass recomputed from the attempt's own published samples. A series that
-   * bridged two calls would divide its predecessor's mass by its predecessor's clock here.
+   * check is an attempt's own first **published** vertex: recomputed from the attempt's own
+   * samples, it must be the mass that attempt's episode had accumulated by that instant over
+   * that episode's own elapsed clock. A series that bridged two calls would divide its
+   * predecessor's mass by a clock that is not its own here.
+   *
+   * Its ladder's second instant is not that vertex. Under the Phase 9.4 publication policy a
+   * rate exists only once the episode holds `MIN_RATE_SAMPLES` (three) samples and has run for
+   * `MIN_RATE_ELAPSED_MS` (100 ms), and the reasoning episode reaches its third sample only at
+   * local 500 — so the local-100 vertex is withheld as `below-sample-warmup` and its opening
+   * anchor is `null` with `opening-anchor`, never the `0` a pre-9.4 curve drew there.
    */
   for (const [index, attempt] of curve.attempts.entries()) {
-    const firstEpisodeMass = attempt.samples
+    assert.equal(attempt.startMs, curve.segments[index].startMs)
+    assert.equal(attempt.points[0].localMs, 0, `${attempt.attemptId}: the trace opens on its own episode anchor`)
+    assert.equal(attempt.points[0].tps, null,
+      `${attempt.attemptId}: and that anchor is withheld rather than reported as a measured zero`)
+    assert.equal(attempt.points[0].rateUnavailableReason, 'opening-anchor')
+    assert.equal(attempt.points[1].localMs, 100, `${attempt.attemptId}: the ladder's first step`)
+    /**
+     * The first step is a measurement only when the policy admits it. Every call but the
+     * double-wide one has contributed a single delta by then, which is below
+     * `MIN_RATE_SAMPLES`; that call has stacked eight deltas into its opening instant, so its
+     * step is a genuine three-plus-sample rate. Either way the vertex is measured against the
+     * estimator — a withheld vertex may not carry a number, and a published one always does.
+     */
+    const firstStepMass = attempt.samples
       .filter(sample => sample.activeTimeMs <= 100)
       .reduce((sum, sample) => sum + sample.tokens, 0)
-    assert.equal(attempt.points[1].localMs, 100, `${attempt.attemptId}: the ladder's first step`)
-    assert.equal(attempt.points[1].tps, Math.round(firstEpisodeMass * 1000 / 100),
-      `${attempt.attemptId}: the first measured vertex is the attempt's own mass over its own clock`)
-    assert.equal(attempt.points[0].tps, 0,
-      `${attempt.attemptId}: and the trace opens on its own episode anchor, never on a predecessor's rate`)
-    assert.equal(attempt.startMs, curve.segments[index].startMs)
-    /**
-     * Every positive elapsed clock in this fixture is at least 50 ms — the smallest step from a
-     * sample instant (a multiple of 250 ms) to the next 100 ms ladder instant — so no vertex of
-     * an attempt may claim more than twenty times that attempt's own token mass.
-     */
-    for (const point of attempt.points) {
-      assert.ok(point.tps <= attempt.tokens * 20 + 1e-9,
-        `${attempt.attemptId} at ${point.localMs} claims ${point.tps} tokens/s from ${attempt.tokens} tokens`)
+    const firstStepCount = attempt.samples.filter(sample => sample.activeTimeMs <= 100).length
+    assert.equal(attempt.points[1].tps,
+      firstStepCount >= 3 ? Math.round(firstStepMass * 1000 / 100) : null,
+      `${attempt.attemptId}: the first step is the attempt's own mass over its own clock once the policy admits it`)
+    if (firstStepCount < 3) {
+      assert.equal(attempt.points[1].rateUnavailableReason, 'below-sample-warmup',
+        `${attempt.attemptId}: ${firstStepCount} samples cannot carry a rate`)
+    }
+    const published = attempt.points.filter(point => point.publishable)
+    assert.ok(published.length > 0, `${attempt.attemptId}: the attempt publishes no measurement at all`)
+    for (const point of published) {
+      const ownMass = attempt.samples
+        .filter(sample => sample.phase === point.activePhase
+          && sample.activeTimeMs <= point.localMs
+          && sample.activeTimeMs >= point.episodeStartMs)
+        .reduce((sum, sample) => sum + sample.tokens, 0)
+      assert.equal(point.tps, Math.round(ownMass * 1000 / point.episodeElapsedMs),
+        `${attempt.attemptId} at ${point.localMs}: the published vertex is the attempt's own mass over its own elapsed clock`)
+      assert.ok(point.episodeElapsedMs >= 100 && point.episodeSampleCount >= 3,
+        `${attempt.attemptId} at ${point.localMs}: a published rate must satisfy both gates`)
     }
     if (index > 0) {
       const previous = curve.attempts[index - 1]
       assert.equal(previous.points.at(-1).timeMs, attempt.points[0].timeMs,
         `${attempt.attemptId}: the attempts abut on one compressed coordinate`)
-      assert.ok(previous.points.at(-1).tps > 0,
+      const closing = previous.points.at(-1)
+      assert.equal(closing.publishable, true,
         `${previous.attemptId}: the predecessor closes on a measurement of its own`)
+      const closingMass = previous.samples
+        .filter(sample => sample.phase === closing.activePhase
+          && sample.activeTimeMs <= closing.localMs
+          && sample.activeTimeMs >= closing.episodeStartMs)
+        .reduce((sum, sample) => sum + sample.tokens, 0)
+      assert.equal(closing.tps, Math.round(closingMass * 1000 / closing.episodeElapsedMs),
+        `${previous.attemptId}: and that closing measurement is its own mass over its own clock`)
     }
   }
   /** Tool time consumes no width: the axis is the sum of the calls' own spans. */

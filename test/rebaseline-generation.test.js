@@ -368,7 +368,15 @@ test('a rebaseline onto a settled turn shows the card and no live meter', () => 
   const record = recordOf(run.controller, 's-settled-only')
   assert.equal(record.firstTokenMs, 1100, 'the settled attempt restores the instant it produced its first token')
   assert.equal(record.settled.ttftMs, 100, 'and TTFT is the same interval a live observation would have frozen')
-  assert.equal(record.settled.curve.peakTps > 0, true, 'the curve is rebuilt from the embedded stream')
+  assert.equal(record.settled.curve.attempts.length, 1, 'the curve is rebuilt from the embedded stream')
+  assert.equal(record.settled.curve.attempts[0].sampleCount, 2,
+    'with both of the settlement\'s deltas, on the attempt\'s own clock')
+  /**
+   * Two deltas are below the three-sample publication gate, so the rebuilt curve
+   * claims no rate — the reconstruction is asserted above, and the em dash the UI
+   * prints for `null` is the honest reading rather than a fabricated zero.
+   */
+  assert.equal(record.settled.curve.peakTps, null)
   assert.equal(record.settled.tools.count, 0, 'and a turn with no tool row reports no tool')
   run.dispose()
 })

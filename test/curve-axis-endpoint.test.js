@@ -30,13 +30,22 @@
  *   - the trace's last vertex is its real end instant, and nothing is sampled past it:
  *     no vertex ever carries a coordinate larger than the attempt's own segment end or
  *     than `curve.durationMs`;
- *   - an end instant that does not fall on the 100 ms cadence is appended as a vertex
- *     of its own, and one that does fall on it is not duplicated;
+ *   - the vertex grid is each episode's **own** 100 ms ladder, so an end instant that does
+ *     not fall on the terminal episode's ladder is appended as a vertex of its own, and one
+ *     that does fall on it is not duplicated;
  *   - an attempt that never settled ends at its last generated delta;
  *   - a phase transition stays a shared seam, never a blank gap.
  *
  * A tool wait and a retry still own zero width, and the attempt that follows still opens
  * on the coordinate its predecessor closed on.
+ *
+ * ## What this file deliberately does not test
+ *
+ * Whether a vertex publishes a rate is the shared publication policy's decision
+ * (`src/core/rate-publication.js`, frozen by `test/curve-rate-publication.test.js`), not
+ * the endpoint rule's. The fixtures here satisfy that policy where a rate is asserted —
+ * three contributing deltas per episode — so that the endpoint assertions below are about
+ * the endpoint and cannot be satisfied by a withheld vertex.
  */
 
 import test from 'node:test'
@@ -122,12 +131,13 @@ function assertNothingPastTheEnd(settled) {
 
 test('an attempt settling 400 ms after its last delta is sampled to that settlement, and the tail decays', () => {
   /**
-   * One delta at the attempt's local zero, then 400 ms of model-attempt time before the
-   * settlement. The terminal episode's numerator freezes at the delta's 100 tokens while
-   * its denominator advances, so the tail is the hyperbola 100 * 1000 / t, rounded:
-   * 1000, 500, 333, 250 — strictly decreasing and never zero by rule.
+   * Three deltas — at 0, 100 and 150 ms — then 250 ms of model-attempt time before the
+   * settlement at 400 ms. The terminal episode's numerator freezes at the 300 tokens that
+   * had arrived while its denominator advances, so the tail is the hyperbola
+   * `300 * 1000 / t`, rounded: 1500, 1000, 750 — strictly decreasing and never zero by
+   * rule. The two vertices before it are withheld by the gates, not drawn as zeros.
    */
-  const { settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output']], { settledAtMs: 400 })
+  const { settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output'], [100, 'output'], [150, 'output']], { settledAtMs: 400 })
   const curve = settled.curve
   const trace = traceOf(settled)
 
@@ -135,10 +145,11 @@ test('an attempt settling 400 ms after its last delta is sampled to that settlem
   assert.equal(trace.localEndMs, 400)
   assert.equal(trace.endMs, 400)
   assert.deepEqual(trace.points.map(point => point.localMs), [0, 100, 200, 300, 400])
-  assert.deepEqual(trace.points.map(point => point.tps), [0, 1000, 500, 333, 250],
-    'hand-computed: 100 tokens over 100, 200, 300 and 400 ms, rounded')
+  assert.deepEqual(trace.points.map(point => point.tps), [null, null, 1500, 1000, 750],
+    'hand-computed: the frozen 300 tokens over 200, 300 and 400 ms, rounded')
 
-  const tail = trace.points.slice(1)
+  const tail = trace.points.slice(2)
+  assert.equal(tail.length, 3, 'the tail is the vertices the episode is publishable at')
   for (let index = 1; index < tail.length; index += 1) {
     assert.ok(tail[index].tps < tail[index - 1].tps,
       `the frozen numerator decays as the denominator advances (${tail[index - 1].tps} -> ${tail[index].tps})`)
@@ -164,19 +175,20 @@ test('an attempt settling 400 ms after its last delta is sampled to that settlem
 
 test('an attempt with no settlement ends at its last delta', () => {
   /**
-   * The turn itself runs on for another 5 s after the attempt's last delta, but an
-   * unsettled attempt owns no time past the last delta it was seen to produce: nothing
-   * was observed there, so nothing is sampled there.
+   * Three deltas at 0, 100 and 200 ms, and no settlement observed. The turn itself runs on
+   * for another 5 s after the attempt's last delta, but an unsettled attempt owns no time
+   * past the last delta it was seen to produce: nothing was observed there, so nothing is
+   * sampled there.
    */
-  const { record, settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output'], [100, 'output']])
+  const { record, settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output'], [100, 'output'], [200, 'output']])
   const trace = traceOf(settled)
 
-  assert.equal(record.endMs - record.startMs, 5100, 'the turn ran 5.1 s of wall time')
-  assert.equal(settled.curve.durationMs, 100, 'an unsettled attempt ends on its last delta')
-  assert.equal(trace.localEndMs, 100)
-  assert.deepEqual(trace.points.map(point => [point.timeMs, point.tps]), [[0, 0], [100, 2000]],
-    'hand-computed: the attempt\'s own 200 tokens over its own 100 ms')
-  assert.equal(trace.points.at(-1).timeMs, 100)
+  assert.equal(record.endMs - record.startMs, 5200, 'the turn ran 5.2 s of wall time')
+  assert.equal(settled.curve.durationMs, 200, 'an unsettled attempt ends on its last delta')
+  assert.equal(trace.localEndMs, 200)
+  assert.deepEqual(trace.points.map(point => [point.timeMs, point.tps]), [[0, null], [100, null], [200, 1500]],
+    'hand-computed: the attempt\'s own 300 tokens over its own 200 ms, its last delta included')
+  assert.equal(trace.points.at(-1).timeMs, 200)
   assertNothingPastTheEnd(settled)
 })
 
@@ -186,29 +198,32 @@ test('an attempt with no settlement ends at its last delta', () => {
 
 test('an off-grid end instant is appended as a vertex of its own', () => {
   /**
-   * A pure 100 ms ladder would give `0 … 500` and omit 510, the instant the attempt's
-   * clock stopped. The vertex set is the union of the cadence and the attempt's own end
-   * instant, so 510 is drawn.
+   * The terminal episode's own ladder runs from its first delta at 0 ms: `0 … 500` at 100 ms
+   * steps, and the last delta arrives at 250 ms, between two of those instants. A pure
+   * ladder would omit 510, the instant the attempt's clock stopped, so the vertex set is the
+   * episode's ladder union the attempt's own end instant, and 510 is drawn.
    */
-  const { settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output']], { settledAtMs: 510 })
+  const { settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output'], [100, 'output'], [250, 'output']], { settledAtMs: 510 })
   const trace = traceOf(settled)
 
   assert.equal(settled.curve.durationMs, 510)
   assert.deepEqual(trace.points.map(point => point.timeMs), [0, 100, 200, 300, 400, 500, 510],
-    'the cadence grid union the real end instant, deduplicated and ascending')
-  assert.notEqual(510 % 100, 0, 'the end instant really is off the cadence')
+    'the episode\'s own ladder union the real end instant, deduplicated and ascending')
+  assert.notEqual(510 % 100, 0, 'the end instant really is off the ladder')
   assert.equal(trace.points.at(-1).timeMs, 510, 'the last vertex is the instant the attempt ended')
-  assert.equal(trace.points.at(-1).tps, 196, 'hand-computed: 100 * 1000 / 510, rounded')
+  assert.equal(trace.points.at(-1).tps, Math.round(300 * 1000 / 510),
+    'hand-computed: the episode\'s 300 tokens over its own 510 ms, rounded')
+  assert.equal(trace.points.at(-1).tps, 588)
   assertNothingPastTheEnd(settled)
 })
 
 test('an end instant that falls exactly on the cadence is not duplicated', () => {
   /**
-   * The final delta and the settlement coincide at 500 ms, which is already a ladder
-   * point. The union must emit that instant once: the end vertex is appended only when
-   * it does not fall on the cadence.
+   * The last delta and the settlement both land at 500 ms, which is already a ladder point
+   * of the episode that opened at 0. The union must emit that instant once: the end vertex
+   * is appended only when it does not fall on the ladder.
    */
-  const { settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output'], [500, 'output']], {
+  const { settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output'], [150, 'output'], [250, 'output'], [500, 'output']], {
     settledAtMs: 500,
   })
   const trace = traceOf(settled)
@@ -217,25 +232,29 @@ test('an end instant that falls exactly on the cadence is not duplicated', () =>
   assert.equal(settled.curve.durationMs, 500)
   assert.deepEqual(times, [0, 100, 200, 300, 400, 500])
   assert.equal(new Set(times).size, times.length, 'the shared instant is emitted once')
-  assert.equal(trace.points.at(-1).tps, 400,
-    'hand-computed: the second delta is inside the episode at the attempt\'s end')
+  assert.equal(trace.points.at(-1).tps, 800, 'hand-computed: 400 * 1000 / 500, rounded')
+  assert.deepEqual(trace.points.filter(point => point.publishable).map(point => [point.localMs, point.tps]),
+    [[300, 1000], [400, 750], [500, 800]],
+    'the episode is publishable at the three vertices it owns after its third delta, endpoint included')
   assertNothingPastTheEnd(settled)
 })
 
 test('a one-delta attempt is a single vertex', () => {
   /**
    * One delta at the local zero and no settlement: the attempt owns no time past the
-   * instant it produced its only delta, so its trace is the single opening anchor. The
+   * instant it produced its only delta, so its trace is the single opening vertex. The
    * measurement is not lost — `tokens` still reports the delta's mass — the vertex is
-   * simply the instant at which the attempt both began and ended.
+   * simply the instant at which the attempt both began and ended, and a rate assembled
+   * from a single delta over zero elapsed time is not a measurement, so it publishes
+   * nothing rather than a zero.
    */
   const { settled } = driveOneAttempt(new TurnTelemetryStore(), [[0, 'output']])
   const trace = traceOf(settled)
 
   assert.equal(settled.curve.durationMs, 0, 'a single delta is a zero-width attempt')
   assert.equal(trace.points.length, 1)
-  assert.deepEqual(trace.points.map(point => [point.timeMs, point.tps]), [[0, 0]],
-    'the opening vertex carries no rate: elapsed time is zero')
+  assert.deepEqual(trace.points.map(point => [point.timeMs, point.tps]), [[0, null]],
+    'the opening vertex carries no rate: elapsed time is zero, so the measurement is withheld')
   assert.equal(trace.tokens, 100, 'the delta\'s mass is still reported')
   assert.deepEqual(trace.runs.map(run => [run.phase, run.startIndex, run.endIndex]), [['output', 0, 0]])
   assertNothingPastTheEnd(settled)
@@ -268,33 +287,39 @@ test('a very long attempt still ends at its own end instant after the series cap
 
 test('a phase transition is a shared seam, never a blank gap', () => {
   /**
-   * Reasoning deltas at 0 and 100 ms, then output deltas at 200 and 300 ms, settled at
-   * 350. Every vertex carries a label, so the maximal same-label stretches are adjacent
-   * and the two coloured subpaths meet on one vertex — the last vertex of the outgoing
-   * stretch. Dropping it would reopen, as a blank horizontal gap, a tone change that is
-   * not a stall. The transition also resets the magnitude: the output episode opens on
-   * its own clock at 200, exactly as the reasoning episode opened on its own at 0.
+   * Reasoning deltas at 0, 100 and 200 ms, then output deltas at 250, 300 and 350 ms, with
+   * the settlement at 350. Every vertex carries a label, so the maximal same-label stretches
+   * are adjacent and the two coloured subpaths meet on one vertex — the last vertex of the
+   * outgoing stretch. Dropping it would reopen, as a blank horizontal gap, a tone change
+   * that is not a stall. The transition also resets the magnitude: the output episode opens
+   * on its own clock at 250 ms with its own mass, exactly as the reasoning episode opened on
+   * its own at 0.
    */
   const { settled } = driveOneAttempt(new TurnTelemetryStore(), [
-    [0, 'reasoning'], [100, 'reasoning'], [200, 'output'], [300, 'output'],
+    [0, 'reasoning'], [100, 'reasoning'], [200, 'reasoning'],
+    [250, 'output'], [300, 'output'], [350, 'output'],
   ], { settledAtMs: 350 })
   const trace = traceOf(settled)
 
   assert.deepEqual(trace.points.map(point => [point.localMs, point.tps, point.activePhase]), [
-    [0, 0, 'reasoning'],
-    [100, 2000, 'reasoning'],
-    [200, 0, 'output'],
-    [300, 2000, 'output'],
-    [350, 1333, 'output'],
+    [0, null, 'reasoning'],
+    [100, null, 'reasoning'],
+    [200, Math.round(300 * 1000 / 200), 'reasoning'],
+    [250, null, 'output'],
+    [350, Math.round(300 * 1000 / 100), 'output'],
   ], 'each episode owns its own clock: the transition resets numerator and denominator')
+  assert.equal(trace.points[2].tps, 1500, 'the reasoning episode: its three deltas over its own 200 ms')
+  assert.equal(trace.points[3].rateUnavailableReason, 'opening-anchor',
+    'the seam vertex opens the new episode, so it is not a measurement')
+  assert.equal(trace.points.at(-1).tps, 3000, 'the output episode: its three deltas over its own 100 ms')
 
   assert.deepEqual(visualRunsOf(trace.points).map(run => [run.phase, run.startIndex, run.endIndex]), [
-    ['reasoning', 0, 1],
-    ['output', 1, 4],
+    ['reasoning', 0, 2],
+    ['output', 2, 4],
   ], 'the boundary of a label change is the outgoing stretch\'s own last vertex')
   assert.deepEqual(trace.runs.map(run => [run.phase, run.startIndex, run.endIndex]), [
-    ['reasoning', 0, 1],
-    ['output', 1, 4],
+    ['reasoning', 0, 2],
+    ['output', 2, 4],
   ])
   assert.equal(trace.runs[0].endIndex, trace.runs[1].startIndex, 'consecutive runs share exactly one vertex')
   assert.equal(trace.runs[0].points.at(-1), trace.runs[1].points[0],

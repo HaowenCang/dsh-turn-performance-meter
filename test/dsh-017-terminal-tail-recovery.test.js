@@ -494,7 +494,12 @@ test('a window whose only evidence is turn/end closes with no invented data', ()
   assert.equal(settled.tools.workMs, 0)
   assert.equal(settled.tools.wallMs, 0)
   assert.equal(settled.curve.attempts.length, 0)
-  assert.equal(settled.curve.peakTps, 0)
+  /**
+   * `null`, not `0`: a turn with no attempts has no measured rate to report, and
+   * the card prints `—` for it. A zero would be a fabricated measurement of zero
+   * throughput.
+   */
+  assert.equal(settled.curve.peakTps, null)
   assert.equal(settled.curve.source.calibrationCoverage, 'none', 'nothing was calibrated, and that is not a fallback')
   assert.equal(settled.curve.source.aligned, true, 'an empty join is aligned, not refused')
   h.dispose()
@@ -559,7 +564,7 @@ test('a rebaseline drops the previous generation\'s evidence', () => {
   assert.equal(record.attempts.length, 0, 'no previous-generation settlement entered the new generation')
   assert.equal(record.tools.length, 0, 'no previous-generation tool interval entered it')
   assert.equal(record.settled.observedGeneratedTokens, 0, 'and no previous-generation token total was carried over')
-  assert.equal(record.settled.curve.peakTps, 0)
+  assert.equal(record.settled.curve.peakTps, null)
 
   /** The previous generation's own record is gone with its window. */
   assert.equal(h.record(TURN), undefined, 'the superseded generation left no turn record behind')

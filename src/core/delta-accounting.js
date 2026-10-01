@@ -69,6 +69,50 @@ export function classifyDelta(chunk) {
   return null
 }
 
+/**
+ * The complete first-token verdict for one chunk: DSH's predicate, the phase the
+ * boundary belongs to, and whether the chunk also carries a usable magnitude.
+ *
+ * `isTokenDelta` and `classifyDelta` answer two different questions, and exactly
+ * one chunk shape makes them disagree: a **name-bearing** `tool-call-delta` whose
+ * `argumentsDelta` is empty. DSH counts it as the model's first token (the call
+ * has begun; its name is the evidence), while `classifyDelta` finds no argument
+ * text to attribute and answers `null`.
+ *
+ * Before this function existed, three call sites resolved that disagreement
+ * independently, and all three resolved it wrongly for TTFT: the adapter only
+ * published `classifyDelta`, the controller dropped any chunk that produced no
+ * sample, and `LiveMeter.firstTokenMs` was frozen only by an accepted sample. The
+ * turn therefore kept rendering the first-response stopwatch after the model had
+ * already crossed its first-token boundary.
+ *
+ * The verdict is deliberately explicit about both facts:
+ *
+ *   - `countsAsToken` is DSH's boundary and is what TTFT is measured from;
+ *   - `phase` is where the *state transition* belongs. It falls back to
+ *     `output`, because a tool call is model output, and it is never `null` for a
+ *     chunk the predicate accepts;
+ *   - `contributesMagnitude` is `false` precisely when no token mass can be
+ *     attributed. A boundary-only delta freezes TTFT and moves the live machine
+ *     out of its first-response stage, and contributes **no** TPS-shape mass:
+ *     inventing a magnitude to make the numbers look complete is the one repair
+ *     this contract forbids.
+ *
+ * @param {unknown} chunk
+ * @returns {{countsAsToken:boolean, phase:'reasoning'|'output'|null, contributesMagnitude:boolean}}
+ */
+export function tokenEvidence(chunk) {
+  if (!isTokenDelta(chunk)) {
+    return { countsAsToken: false, phase: null, contributesMagnitude: false }
+  }
+  const phase = classifyDelta(chunk)
+  return {
+    countsAsToken: true,
+    phase: phase ?? MODEL_PHASE.OUTPUT,
+    contributesMagnitude: phase !== null,
+  }
+}
+
 /** Generated text of one chunk, or the empty string for non-generated chunks. */
 export function deltaText(chunk) {
   if (!chunk || typeof chunk !== 'object') return ''

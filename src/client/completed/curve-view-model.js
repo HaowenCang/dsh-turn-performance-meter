@@ -91,6 +91,23 @@ function round(value) {
  * coordinates intact, and — since Phase 7 — with `marker` set, so the renderer can
  * place a point where the measurement actually is.
  *
+ * ## A vertex with no rate is a position, not a value
+ *
+ * Since Phase 9.4 a vertex the shared publication policy withholds carries
+ * `tps: null` rather than a fabricated `0` (`src/core/rate-publication.js`), and a
+ * zero-width attempt's single vertex is exactly that: its opening anchor. Those
+ * vertices were dropped from the geometry entirely, which made the run empty and
+ * cost the chart the marker that shows the attempt happened at all. The renderer
+ * wants the opposite: `data-tps="null"` is how it says "something was here and
+ * nothing was measured".
+ *
+ * So a vertex with a non-finite rate keeps its **position** but contributes no
+ * **value**: it can never enter `coordinates`, never becomes a run's `peak`, and
+ * never takes part in the peak comparison in `buildSeries`. A run whose only
+ * vertex is unmeasured is still a singleton — drawn at the axis floor, one
+ * plot-height below any real measurement — and the distinction survives to the
+ * DOM, where `String(null)` is `"null"` rather than `"0"`.
+ *
  * ## Why a marker, and why not a second vertex
  *
  * A run can legitimately hold one vertex: an attempt that produced a single delta has
@@ -107,21 +124,46 @@ function round(value) {
  */
 function buildRun(run, durationMs, axisMax) {
   const coordinates = []
+  /**
+   * The same vertices, carrying their position but not necessarily a rate. A run of
+   * exactly one of these is still a marker; see the note above.
+   */
+  const vertices = []
   for (const point of Array.isArray(run?.points) ? run.points : []) {
-    if (!Number.isFinite(point?.timeMs) || !Number.isFinite(point?.tps)) continue
+    if (!Number.isFinite(point?.timeMs)) continue
     const x = xOf(point.timeMs, durationMs)
     if (x === null) continue
-    coordinates.push({
+    const measured = Number.isFinite(point.tps)
+    const vertex = {
       x,
-      y: yOf(point.tps, axisMax),
-      tps: point.tps,
+      /** `y` is the axis floor when there is no rate to place: a position, not a value. */
+      y: measured ? yOf(point.tps, axisMax) : yOf(0, axisMax),
+      tps: measured ? point.tps : null,
       timeMs: point.timeMs,
       attemptId: run.attemptId ?? null,
-    })
+    }
+    vertices.push(vertex)
+    if (measured) coordinates.push(vertex)
   }
 
   if (coordinates.length < 2) {
-    const single = coordinates.length === 1 ? coordinates[0] : null
+    /**
+     * The one vertex the chart places as a dot. A measured vertex always wins; when the
+     * run holds no measurement at all the earliest vertex is still placed, so the chart
+     * shows that the attempt existed rather than nothing. A run with two or more
+     * unmeasured vertices is a **gap**, not a dot: no rule picks one of them, and
+     * picking one would place a single point where the evidence is a stretch.
+     */
+    const markerFor = coordinates.length === 1
+      ? coordinates[0]
+      : (vertices.length === 1 ? vertices[0] : null)
+    /**
+     * The run's own maximum, or `null` when it holds no measurement. An unmeasured
+     * vertex is deliberately excluded: it is not a zero, and letting it compete would
+     * fabricate a rate for it.
+     */
+    let peak = null
+    for (const point of coordinates) if (peak === null || point.tps > peak.tps) peak = point
     return {
       attemptId: run?.attemptId ?? null,
       startMs: run?.startMs ?? null,
@@ -129,20 +171,21 @@ function buildRun(run, durationMs, axisMax) {
       present: false,
       path: null,
       coordinates,
+      vertices,
       points: coordinates.length,
-      peak: single,
+      peak,
       /**
        * A point the chart must draw even though it cannot draw a line to it. `null`
        * for an empty run, so a caller can distinguish "one measurement" from
        * "nothing measured" without inspecting `coordinates`.
        */
-      marker: single,
+      marker: markerFor,
       /**
        * Stated explicitly so the HTML layer does not have to infer it: exactly one
        * vertex, drawn as a marker. A longer run never carries this flag, and a
        * refused run (zero vertices) never does either.
        */
-      singleton: single !== null,
+      singleton: markerFor !== null,
     }
   }
 
@@ -152,6 +195,9 @@ function buildRun(run, durationMs, axisMax) {
    * `M...L... M...L...` — which is two subpaths, so the break would still be
    * correct — but a renderer that instead concatenated their *coordinates* would
    * draw the bridging line this whole structure exists to forbid.
+   *
+   * Only measured vertices reach here, so no line is ever drawn through a vertex
+   * that carries no rate.
    */
   const path = coordinates
     .map((point, index) => `${index === 0 ? 'M' : 'L'}${round(point.x)} ${round(point.y)}`)
@@ -167,6 +213,7 @@ function buildRun(run, durationMs, axisMax) {
     present: true,
     path,
     coordinates,
+    vertices,
     points: coordinates.length,
     peak,
     /** A drawable run is never a singleton: it has a real segment. */

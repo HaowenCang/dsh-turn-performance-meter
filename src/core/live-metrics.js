@@ -31,15 +31,21 @@
  *     reports `tps: null` and a phase of `tool`/`pending`, never a stale or zero
  *     TPS dressed up as current, and never a continuation of the MiMo decay
  *     across a tool wait (§9);
- *   - a rate is published only once the current episode has at least
- *     `MIN_WARMUP_SAMPLES` generated samples, so a one-sample rate is never
- *     shown (§12);
+ *   - a rate is published only once the current episode satisfies the shared
+ *     publication policy (`src/core/rate-publication.js`): at least
+ *     `MIN_WARMUP_SAMPLES` contributing samples **and** at least
+ *     `MIN_RATE_ELAPSED_MS` of its own clock. A one-sample rate is never shown,
+ *     and neither is a quotient whose denominator is a few milliseconds of
+ *     delivery granularity (§12);
  *   - the first output samples of a fresh output episode may reuse the last
  *     positive reasoning rate for at most `FIRST_OUTPUT_GUARD_MS`, and only while
  *     the output episode has no valid positive rate of its own (§15);
- *   - TTFT is measured once per turn, from turn start to the first non-empty
- *     generated delta, and is never redefined by a later call
- *     (docs/METRICS_SPEC.md §4).
+ *   - TTFT is measured once per turn, from turn start to the first chunk DSH's
+ *     own `isTokenDelta` accepts — `tokenEvidence().countsAsToken` in
+ *     `src/core/delta-accounting.js`, which includes a name-bearing
+ *     `tool-call-delta` whose argument fragment has not arrived yet — and is
+ *     never redefined by a later call (docs/METRICS_SPEC.md §4). A boundary-only
+ *     delta freezes TTFT and contributes no token mass.
  *
  * ## Token evidence priority (§6)
  *
@@ -58,6 +64,7 @@
 import { MetricQuality } from './metric-quality.js'
 import { PHASE } from './phase-duration.js'
 import { analyzePhaseEvidenceFrom } from './phase-evidence.js'
+import { MIN_RATE_ELAPSED_MS, MIN_RATE_SAMPLES, rateAvailability } from './rate-publication.js'
 
 export const LivePhase = Object.freeze({
   IDLE: 'idle',
@@ -68,15 +75,15 @@ export const LivePhase = Object.freeze({
 })
 
 /**
- * Generated samples the current episode needs before a shape rate is published.
+ * Generated samples the current episode needs before a rate is published.
  *
- * MiMo hides a rate until the value is plausible; the DSH port keeps the
- * structurally useful half of that rule — "do not publish an unstable one-sample
- * rate" — without MiMo's Ultra-specific `200 <= TPS <= 1564` visibility gate,
- * which would hide the low rates DSH models legitimately produce
- * (`docs/METRICS_SPEC.md` §12).
+ * This is the shared gate (`src/core/rate-publication.js`), re-exported under the
+ * name the live half has used since Phase 9.2. It is an alias rather than a
+ * second constant so the live pill and the completed curve cannot drift apart:
+ * the live half kept this rule while the curve half had none, and that asymmetry
+ * is what allowed a sub-100 ms quotient to reach `peakTps`.
  */
-export const MIN_WARMUP_SAMPLES = 3
+export const MIN_WARMUP_SAMPLES = MIN_RATE_SAMPLES
 
 /**
  * How long the last positive reasoning rate may stand in for an output episode
@@ -282,6 +289,50 @@ export class LiveMeter {
   }
 
   /**
+   * Record DSH's first-token boundary for a chunk that carries **no** usable
+   * TPS-shape magnitude.
+   *
+   * Exactly one chunk shape reaches this method: a name-bearing
+   * `tool-call-delta` whose `argumentsDelta` is still empty. DSH's `isTokenDelta`
+   * accepts it — the model has begun emitting a call, and the name is the
+   * evidence — while `classifyDelta` cannot attribute any argument text to it. It
+   * therefore freezes the turn's TTFT and opens the phase episode it starts, and
+   * it does neither of the things that would corrupt the numbers: it adds no
+   * token mass, and it does not increment `episodeSampleCount`, so a rate can
+   * never be published from boundary evidence alone.
+   *
+   * Before this method existed, `firstTokenMs` could only be frozen by an
+   * accepted sample, so a turn whose first token was a tool-call boundary kept
+   * rendering the first-response stopwatch after the boundary had passed.
+   *
+   * @param {{attemptId?:string|null, timeMs:number, phase?:string|null}} input
+   * @returns {boolean} whether the boundary was recorded
+   */
+  observeTokenBoundary({ attemptId = null, timeMs, phase = null } = {}) {
+    if (!Number.isFinite(timeMs)) return false
+    if (this.turn === null) return false
+    if (attemptId !== null && attemptId !== undefined && attemptId !== this.attemptId) return false
+    if (this.firstTokenMs === null) this.firstTokenMs = timeMs
+    if (!Number.isFinite(this.lastDeltaMs) || timeMs > this.lastDeltaMs) this.lastDeltaMs = timeMs
+    this.phase = LivePhase.STREAMING
+    const nextPhase = phase ?? null
+    /**
+     * The boundary opens the episode whose clock it starts. It is a *clock*
+     * origin, not a measurement: mass stays at zero and the sample count stays at
+     * zero until a magnitude-bearing delta arrives, so the first publishable rate
+     * of that episode still needs `MIN_RATE_SAMPLES` real samples.
+     */
+    if (nextPhase !== null && (nextPhase !== this.streamingPhase || this.episodeStartMs === null)) {
+      this.streamingPhase = nextPhase
+      this.episodeStartMs = timeMs
+      this.episodeTokenMass = 0
+      this.episodeSampleCount = 0
+      this.episodeUsageBaseline = this.usageBaselineFor(nextPhase)
+    }
+    return true
+  }
+
+  /**
    * Accept the authoritative usage an in-stream `usage` chunk carried.
    *
    * A usage chunk is not a generated sample, so it never becomes one; what it
@@ -415,18 +466,32 @@ export class LiveMeter {
 
   /**
    * The live rate of the active episode at `nowMs`, or `null` while the episode
-   * is still warming up.
+   * is still below the shared publication policy.
    *
-   * The quotient is rounded with `Math.round`, MiMo's observed rule. A
-   * non-positive elapsed time yields no rate at all rather than a division.
+   * Two gates, one contract (`src/core/rate-publication.js`): at least
+   * `MIN_RATE_SAMPLES` contributing samples **and** at least
+   * `MIN_RATE_ELAPSED_MS` since the episode opened. A non-positive elapsed time
+   * yields no rate at all rather than a division, and a quotient below the
+   * horizon is not published as a small number — it is not published.
+   *
+   * The quotient is rounded with `Math.round`, MiMo's observed rule. There is no
+   * clamp of any kind on a rate that passes both gates.
    */
   episodeRate(nowMs) {
     if (this.episodeStartMs === null) return null
-    if (this.episodeSampleCount < MIN_WARMUP_SAMPLES) return null
     const elapsed = nowMs - this.episodeStartMs
-    if (!(elapsed > 0)) return null
+    if (!rateAvailability({ sampleCount: this.episodeSampleCount, elapsedMs: elapsed }).publishable) return null
     const { mass } = this.episodeMass()
     return Math.round(mass * 1000 / elapsed)
+  }
+
+  /**
+   * Why the episode has no publishable rate yet, or `null` when it has one (or
+   * when no episode exists). Diagnostics only: the presentation reads `tps`.
+   */
+  episodeRateGate(nowMs) {
+    if (this.episodeStartMs === null) return null
+    return rateAvailability({ sampleCount: this.episodeSampleCount, elapsedMs: nowMs - this.episodeStartMs })
   }
 
   /**
@@ -478,6 +543,7 @@ export class LiveMeter {
 
     if (this.phase === LivePhase.STREAMING && this.attemptId !== null) {
       const { tps, guard } = this.publishedRate(now)
+      const gate = tps === null && !guard ? this.episodeRateGate(now) : null
       return {
         ...base,
         tps,
@@ -492,6 +558,15 @@ export class LiveMeter {
         episodeElapsedMs: this.episodeStartMs === null ? null : Math.max(0, now - this.episodeStartMs),
         episodeSampleCount: this.episodeSampleCount,
         warmupSamples: MIN_WARMUP_SAMPLES,
+        /** The other half of the shared policy, published for the warming presentation. */
+        minRateElapsedMs: MIN_RATE_ELAPSED_MS,
+        /**
+         * Which gate withheld the rate, when one did. Diagnostics only — the
+         * renderer prints the counter and never a rate — and `null` for a
+         * publishable rate and for the first-output fallback, which is a
+         * deliberately labelled stand-in rather than this episode's own value.
+         */
+        rateGateReason: gate === null ? null : gate.reason,
         /** Whether the published value is the first-output fallback, not this phase's own. */
         fallback: guard,
       }
