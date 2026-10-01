@@ -17,7 +17,7 @@
 
 import { LiveMeter, LivePhase } from '../core/live-metrics.js'
 import { sampleFromChunk, heuristicTokenWeight } from '../core/token-allocation.js'
-import { MODEL_PHASE, tokenEvidence } from '../core/delta-accounting.js'
+import { MODEL_PHASE, firstTokenTime, phaseCutsFromChunks, tokenEvidence } from '../core/delta-accounting.js'
 import { compressAttempts } from '../core/time-axis.js'
 import { curveSource } from '../core/curve-source.js'
 import {
@@ -348,6 +348,113 @@ export class TurnTelemetryStore {
     attempt.samples.push(stamped)
     this.live(record.sessionId).acceptSample(stamped)
     return stamped
+  }
+
+  /**
+   * Reconcile one already-existing attempt with the authoritative stream its
+   * durable settlement carries (Phase 9.4.4).
+   *
+   * ## The mixed plane this exists for
+   *
+   * A reload produces one attempt whose evidence arrives on **both** planes: the
+   * replacement window holds only the transient tail it could still see, and the
+   * settlement that closes the attempt holds the complete compact stream. The
+   * transient rows are real evidence and the durable decode is the authoritative
+   * one, and the completed record has to end up with the second without losing
+   * the identity the first established.
+   *
+   * ## Why replacement, and not a union or a dedupe
+   *
+   * The two planes share **no per-delta identity**. A transient row carries
+   * `(attemptId, index, revision)` from the client fold; a decoded durable delta
+   * carries `(recordIndex, memberIndex)` from the compact record array. Nothing
+   * joins them, so a union would double-count every overlapped delta — and a
+   * dedupe keyed on `timeMs + text` would collapse two genuinely distinct
+   * same-timestamp deltas into one, silently reordering what survived. Both
+   * failure modes corrupt the one thing this project measures.
+   *
+   * Replacement has none of them, and it is what the semantic requirement
+   * actually states: after settlement the attempt's stream-derived evidence *is*
+   * one decode of the durable stream. It is idempotent (reconciling twice is
+   * reconciling once), it cannot duplicate a cut, and it cannot reorder a
+   * same-timestamp pair, because `decodeAssistantStream` already preserves
+   * logical stream order exactly.
+   *
+   * ## What is replaced, and what is deliberately not
+   *
+   * Replaced — the fields derived from the stream, and only those:
+   *
+   *   - `attempt.samples`, rebuilt with `sampleFromChunk` over `decoded.chunks`
+   *     and stamped with the attempt's own `attemptId`, exactly as
+   *     `acceptChunk` stamps them;
+   *   - `attempt.phaseCuts`, rebuilt with `phaseCutsFromChunks` over the same
+   *     decode, so the completed curve closes the episode the live pill closed.
+   *
+   * Not replaced:
+   *
+   *   - `attempt.attemptId`, `step`, `startedAtMs` and every settlement field —
+   *     process-local identity and lifecycle belong to the attempt the
+   *     correlation proved, which is exactly why this method mutates in place
+   *     rather than returning a restored record;
+   *   - `attempt.usage` / `usageSource` — the settlement's own carrier and the
+   *     in-stream `usage` chunk keep their existing precedence
+   *     (`settleAttempt` / `setAttemptUsage` own that policy), and neither is
+   *     recomputed from the decode here;
+   *   - `chunks`, `decoded`, `streamQuality` and `issues`. A record built by the
+   *     live path does not represent them, and this method's job is to complete
+   *     that record, not to convert it into a durable-restored one. Nothing in
+   *     the metric pipeline reads them either (`src/core`, `src/client/completed`).
+   *
+   * The turn's first-token fact is upgraded through `firstTokenObserved`, which
+   * is the **one-way** rule: an earlier authoritative boundary may replace a later
+   * one and a later one may not move it forward. A reload after the true first
+   * token therefore has its TTFT boundary restored without the record ever being
+   * able to regress.
+   *
+   * ## The live meter is not replayed
+   *
+   * Nothing here touches `LiveMeter`. Feeding the historical stream back through
+   * `acceptSample` / `observeTokenBoundary` would re-open episodes the live pill
+   * had already left, reset a frozen TTFT and restart a settled attempt — the
+   * historical *presentation* is a fact about what the session showed, and this
+   * method edits only the record the completed card is built from. The turn's own
+   * terminal boundary clears the meter in any case.
+   *
+   * ## Only a complete decode is authoritative
+   *
+   * `decoded.complete` is `false` as soon as one record failed to decode. Such a
+   * stream is missing evidence the transient plane may still hold, so replacing
+   * with it would *lose* data rather than complete it. The method refuses and
+   * reports why; the caller keeps the transient evidence and counts the refusal.
+   *
+   * @param {object} record the turn record that owns `attempt`
+   * @param {object} attempt the attempt the settlement was correlated to
+   * @param {{decoded?: object|null}} input the settlement's decoded compact stream
+   * @returns {{reconciled:boolean, reason:string, samples:number, cuts:number, firstTokenMs:number|null}}
+   */
+  reconcileAttemptStream(record, attempt, { decoded = null } = {}) {
+    const refusal = reason => ({ reconciled: false, reason, samples: 0, cuts: 0, firstTokenMs: null })
+    if (attempt === null || attempt === undefined) return refusal('no-attempt')
+    if (decoded === null || typeof decoded !== 'object') return refusal('no-decode')
+    if (!Array.isArray(decoded.chunks)) return refusal('no-decode')
+    if (decoded.complete !== true) return refusal('incomplete-decode')
+
+    const chunks = decoded.chunks
+    const attemptId = attempt.attemptId ?? null
+    const samples = []
+    for (const entry of chunks) {
+      const sample = sampleFromChunk(entry.timeMs, entry.chunk, this.estimateTokens)
+      if (sample !== null) samples.push({ ...sample, attemptId })
+    }
+    attempt.samples = samples
+    attempt.phaseCuts = phaseCutsFromChunks(chunks)
+
+    const firstTokenMs = Number.isFinite(decoded.firstTokenTimeMs)
+      ? decoded.firstTokenTimeMs
+      : firstTokenTime(chunks)
+    if (record !== null && record !== undefined) this.firstTokenObserved(record, { timeMs: firstTokenMs })
+
+    return { reconciled: true, reason: 'replaced', samples: samples.length, cuts: attempt.phaseCuts.length, firstTokenMs }
   }
 
   /** Attach authoritative usage from a durable settlement. */

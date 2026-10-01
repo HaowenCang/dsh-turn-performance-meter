@@ -255,9 +255,15 @@ export function createController({
          * stopwatch after the boundary had passed.
          *
          * The boundary is applied as a delta event so the machine advances to its
-         * streaming stage, and nothing else happens: the store has already frozen
-         * TTFT and opened the episode clock, and no magnitude is invented for a
-         * chunk whose argument text does not exist yet.
+         * streaming stage, and nothing else happens: the store has frozen the
+         * turn's TTFT, updated the phase identity, and recorded the phase cut it
+         * declares, and it has opened **no** magnitude episode — so no episode
+         * clock, no numerator and no rate exist for a chunk whose argument text
+         * does not exist yet. (Before Phase 9.4.2 this comment claimed the
+         * boundary had opened the episode clock. It never should have: a
+         * boundary-only delta carries no magnitude, so an origin taken from it
+         * would have been a denominator origin the completed curve could not
+         * reproduce.)
          */
         const evidence = tokenEvidence(event.chunk)
         if (!evidence.countsAsToken) return
@@ -291,6 +297,42 @@ export function createController({
         if (record !== null && attemptId !== null && attemptId !== undefined) {
           const attempt = record.attemptIndex.get(attemptId)
           if (attempt !== undefined) {
+            /**
+             * ## The mixed plane: the settlement completes the attempt it settles
+             *
+             * This is the one path where both planes already hold evidence for the
+             * *same* attempt. A reload leaves a transient attempt holding only the
+             * tail its window could still see, and the settlement that closes that
+             * attempt carries the authoritative complete compact stream. Phase
+             * 9.4.3 taught the completed curve to read a non-magnitude phase cut,
+             * but only the two *pure* planes routed it: here the correlation
+             * succeeded, `settleAttempt` ran, and `event.decoded` was ignored — so
+             * a boundary, and every delta before the reload, survived on the live
+             * card and vanished from the reloaded one.
+             *
+             * Correlating and then discarding is also the one combination the
+             * correlation rules do **not** justify. A proven correlation is a
+             * statement that this settlement's stream *is* this attempt's stream,
+             * and a settlement's embedded stream is the whole attempt: replacing
+             * the stream-derived evidence with it is completing the record, not
+             * merging two records. The alternative — appending — is unavailable in
+             * principle, because the two planes share no per-delta identity and an
+             * overlapped delta would be counted twice (`reconcileAttemptStream`).
+             *
+             * The refusal is as load-bearing as the replacement: a decode with any
+             * malformed record is not the whole attempt, so it is declined and the
+             * transient evidence — which may well hold deltas the decode lost —
+             * is left exactly as it stands.
+             */
+            if (event.decoded !== undefined) {
+              const reconciliation = store.reconcileAttemptStream(record, attempt, { decoded: event.decoded })
+              if (reconciliation.reconciled) state.counters.settlementStreamsReconciled += 1
+              else state.counters.settlementStreamsUncorrelated += 1
+              log(
+                'attempt stream reconciled', sessionId, attemptId, reconciliation.reason,
+                reconciliation.samples, reconciliation.cuts,
+              )
+            }
             store.settleAttempt(attempt, {
               settledAtMs: event.timeMs,
               settlementKind: event.settlementKind,
@@ -336,6 +378,14 @@ export function createController({
           })
           record.attempts.push(restored)
           record.attemptIndex.set(restored.attemptId, restored)
+          /**
+           * The settlement carried a decoded stream and could not be joined to an
+           * existing attempt — either no attempt was proved to own it, or more than
+           * one candidate made the pairing unprovable and the correlation refused to
+           * guess. Counted, so a refused join is visible in `diagnostics()` rather
+           * than indistinguishable from a settlement that never carried a stream.
+           */
+          state.counters.settlementStreamsUncorrelated += 1
           /**
            * The turn TTFT is `turn/start -> first chunk DSH's predicate accepts`,
            * and a restored attempt brings that instant with it: `decoded` carries
@@ -613,6 +663,22 @@ export function createController({
           presenterTurnEndApplied: 0,
           settledSnapshotBuilt: 0,
           matchedToolResults: 0,
+          /**
+           * The mixed plane, counted where it is decided (Phase 9.4.4).
+           *
+           * `settlementStreamsReconciled` is a settlement whose decoded stream was
+           * proved to belong to an attempt this client already held, and therefore
+           * replaced that attempt's stream-derived evidence.
+           * `settlementStreamsUncorrelated` is the complement: a settlement that
+           * carried a decoded stream and could **not** be joined to one attempt —
+           * an unprovable correlation, or a decode that lost a record and is
+           * therefore not the whole attempt. The two are the honest accounting of
+           * "evidence either completed the record it settled, or did not", and the
+           * second is what keeps a regression visible: a change that stopped
+           * correlating would raise it rather than quietly drop deltas.
+           */
+          settlementStreamsReconciled: 0,
+          settlementStreamsUncorrelated: 0,
         },
         /** The kind of view the last `project()` returned. */
         projectedViewKind: null,
