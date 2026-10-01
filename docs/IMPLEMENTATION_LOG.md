@@ -4430,3 +4430,347 @@ created only after the npm publication, the registry artifact verification and a
 `npm unpublish` under any circumstance: a published npm version is an immutable artifact, and a failure after publication
 is reported as a partial state rather than undone.
 
+## Phase 9.4 — TTFT boundary and episode TPS opening stabilization (recovery round)
+
+This phase repairs two independently identified defects in v0.1.2 and is recorded here in the round that actually performed
+it: the original Phase 9.4 session crashed mid-work and its conversation state was lost, so this round began by recovering
+the uncommitted implementation from the working tree. **Nothing is claimed about the lost session's reasoning**; only what
+the repository itself contains is treated as evidence, and every recovered change was re-audited here before it was kept.
+
+### 1. Recovery checkpoint (recorded before any write)
+
+```text
+Recovery status:            RECOVERED UNCOMMITTED
+Remote baseline:           58685f0abe023629eb776ecd5e75b626bd12c428  (release: prepare v0.1.2)
+Local HEAD:                58685f0abe023629eb776ecd5e75b626bd12c428
+Working tree:              26 modified tracked files, 10 untracked files, 0 staged, no stash
+Recovered Phase 9.4 files: see §2
+Recovered Phase 9.4 commits: none — `git rev-list --left-right --count HEAD...origin/main` = 0 0
+Recovery backup path:      E:\Projects\DSHarness\_recovery-backups\phase94-20261001-005951
+```
+
+The recovery audit was deliberately read-only first. `git status --short --branch`, `git rev-parse HEAD`,
+`git rev-parse origin/main`, `git fetch origin --tags`, `git rev-list --left-right --count HEAD...origin/main`,
+`git log --oneline --decorate -20`, `git diff --stat`, `git diff`, `git diff --cached`, `git stash list` and
+`git reflog --date=iso -20` were all run **before** any write, and none of `git reset`, `git clean`, `git checkout .`,
+`git restore .`, `git pull --rebase`, `git rebase`, `git stash push`, `git gc` or `git prune` was run at any point.
+
+`HEAD` was exactly the released baseline and the index held nothing, so this is **CASE B**: no local commit implemented
+Phase 9.4 and the entire implementation existed only as uncommitted work. It was preserved before being inspected:
+
+- `git diff` → `worktree.diff` (816 428 bytes — the complete tracked change set),
+- `git diff --cached` → `index.diff` (0 bytes, confirming an empty index),
+- `git status --short` → `status.txt`, `git rev-parse HEAD` → `HEAD.txt`,
+- all 10 untracked files copied verbatim under `untracked/`.
+
+The untracked set was `src/core/rate-publication.js`, `test/rate-publication.test.js`,
+`test/curve-rate-publication.test.js`, `test/ttft-boundary.test.js` and five `probe-*.mjs` scratch scripts. Because the
+backup is a plain copy outside the repository, the recovered work could then be audited, repaired and extended without any
+risk of losing it.
+
+### 2. Audit of the recovered work
+
+The recovered diff was 27 files, `3606` insertions and `993` deletions. It was classified change by change against the
+phase's own normative sections rather than trusted or discarded wholesale.
+
+**KEEP — the recovered implementation already satisfied the specification and was left semantically intact.**
+
+| Recovered artefact | Verdict |
+| --- | --- |
+| `src/core/rate-publication.js` (new) — `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, `rateAvailability`, `rateIsPublishable`, the four `RateUnavailable` reasons | KEEP — this *is* the one named shared contract the phase requires; both halves already import it |
+| `src/core/delta-accounting.js` — `isTokenDelta` mirroring DSH exactly, `tokenEvidence()` returning `{countsAsToken, phase, contributesMagnitude}` | KEEP — decouples the TTFT boundary from TPS magnitude at the predicate, as required |
+| `src/core/curve.js` — per-episode 100 ms ladder, `tps: null` for non-publishable vertices, `peakTps` skipping non-finite, `peakProvenanceOf` | KEEP — the phase-local ladder is the preferred §12 implementation, not the eligibility-gated fallback |
+| `src/core/live-metrics.js` — `observeTokenBoundary`, `MIN_WARMUP_SAMPLES` as an alias of `MIN_RATE_SAMPLES`, elapsed horizon in `episodeRate` | KEEP |
+| `src/host/telemetry-design.js` — `firstTokenObserved(record, {timeMs})` one-way freeze; boundary-only chunks stamp TTFT without producing a sample | KEEP |
+| `src/client/live/controller.js` — `ATTEMPT_DELTA` consults `tokenEvidence()` instead of returning early on "no sample" | KEEP — this is the exact line the TTFT defect lived behind |
+| `src/dsh/adapter.js` + `src/dsh/stream-decoder.js` — publish `firstTokenMs`/`firstTokenTimeMs` from the predicate, so durable and live agree | KEEP |
+| `test/ttft-boundary.test.js`, `test/rate-publication.test.js`, `test/curve-rate-publication.test.js` (new) | KEEP — audited test by test; every assertion is a genuine contract assertion |
+
+**REPAIR — recovered but incomplete or wrong, and repaired in this round.**
+
+| Finding | Repair |
+| --- | --- |
+| Seven assertions across five test files still encoded the pre-fix contract and failed: `795` tests, `788` pass, `7` fail | Stale expectations updated to the corrected contract with the arithmetic re-derived from episode facts — see §4 |
+| `docs/IMPLEMENTATION_LOG.md`, `docs/TEST_PLAN.md`, `docs/TASKS.md` were untouched by the recovered run, so the phase had no documentation | This section, plus the TEST_PLAN and TASKS records |
+| The five `probe-*.mjs` scratch scripts were untracked repository-root clutter that no gate or documentation references | Not committed; preserved in the recovery backup |
+
+**DROP — nothing.** No recovered artefact was discarded. The one substantive risk — that the recovered `peakTps` repair
+might be *suppressing legitimate high peaks* rather than removing invalid ones — was tested rather than assumed, and is
+recorded in §3.
+
+### 3. The one recovered claim that was verified instead of trusted
+
+A maximum is a statistic, so a rule that removes vertices can silently remove the true peak. The recovered revision
+lowered one frozen expectation from `10 000` to `6 000` tokens/s, which is exactly the signature of an over-broad
+exclusion, so the case was reproduced directly (`probe-recovered-peak.mjs`, since deleted) before the expectation was
+accepted as stale.
+
+The fixture is sixty ordinary calls of three 400-character deltas on a 250 ms grid plus one loud call of five
+4000-character deltas, each block its own attempt. The spike attempt's samples are at local `0, 250, 500, 750, 1000`, each
+weighing 1000 estimated tokens. Its ladder is `0, 100, …, 1250`. The corrected estimator reports:
+
+```text
+local   elapsed  samples  mass   tps
+    0         0        1   1000   null   opening-anchor
+  100       100        1   1000   null   below-sample-warmup
+  200       200        1   1000   null   below-sample-warmup
+  300       300        2   2000   null   below-sample-warmup
+  400       400        2   2000   null   below-sample-warmup
+  500       500        3   3000   6000   <-- publishable peak
+  ...                                    (decaying to 4000 at 1250)
+```
+
+The old `10 000` was `1000 tokens / 100 ms` read off the **attempt-global** grid, which placed a vertex 100 ms after the
+attempt started regardless of where the delta boundaries fell. On the episode's own ladder a sample 250 ms distant cannot
+enter a vertex 100 ms after the origin — the `4000`-character delta weighs 1000 tokens and the episode had accumulated
+exactly one of them — so the honest first publishable measurement is `3000 / 500 ms = 6000`. The spike still **dominates**:
+ordinary attempts peak at `600`, so the ratio survives at 10×, and the winning vertex satisfies both gates
+(`elapsedMs = 500 ≥ 100`, `episodeSampleCount = 3 ≥ 3`). The expectation was therefore stale, not the estimator, and it was
+updated to the value the corrected estimator produces. This is the reason §14's "do not clamp a valid high peak" is not in
+tension with §16's "no sub-100 ms peak survives": the repair removes vertices that were never measurements, and the peak
+remains wherever a real measurement puts it.
+
+### 4. Baseline reproduction — both defects proven on released v0.1.2
+
+A repair is only a repair if the defect is reproducible before it. `58685f0` was extracted read-only with
+`git archive` into `E:\Projects\DSHarness\_recovery-backups\phase94-baseline\repo` — no checkout, reset or stash was used
+— and the same implementation-neutral harness was run against both trees. The harness imports only entry points that exist
+in **both** revisions (`TurnTelemetryStore`, `LiveMeter`, `isTokenDelta`, `classifyDelta`, `curveViewModel`), so the two
+columns below are the same code measuring the same fixtures.
+
+#### BUG A — the first-token boundary
+
+| Observation | v0.1.2 | fixed |
+| --- | --- | --- |
+| `isTokenDelta({type:'tool-call-delta', name:'pwsh', argumentsDelta:''})` | `true` | `true` |
+| `classifyDelta(<same chunk>)` | `null` | `null` |
+| `store.acceptChunk(record, attempt, {timeMs: 1200, chunk: <same>})` | `null` | `null` |
+| `record.firstTokenMs` after that call | **`null`** | **`1200`** |
+| `attempt.samples.length` | `0` | `0` |
+| fabricated token mass | none | none |
+
+The defect is therefore exactly where §7 says it is: the predicate accepts the chunk, the classifier cannot attribute a
+magnitude to it, and the released controller's `if (sample === null) return` (`src/client/live/controller.js:235` in
+v0.1.2) discards the boundary before it can reach the presenter. The state machine itself is **not** at fault — driving
+`reduceLiveUi` with the same `delta` event produces the identical `pending-first-token -> streaming-output` transition in
+both trees, which is why the fix is at the controller's gate rather than in the machine. The step that differs is the one
+that never called it.
+
+**Provenance note.** The live `LiveMeter` half of BUG A cannot be replayed on v0.1.2 by the same harness: TTFT there is
+frozen only inside `acceptSample`, which rejects the boundary chunk because its weight is not `> 0`, so v0.1.2 has no
+equivalent entry point to call. The released *consequence* is still measured — the store-level freeze above is the same
+one-way stamp the live path reads, and the state machine evidence shows the presenter never advanced — but the claim
+"v0.1.2's `LiveMeter.firstTokenMs` stayed `null`" is established by reading the released source, not by executing it.
+
+#### BUG B — the episode TPS opening
+
+`peakTps` on the turn's own curve, from fixtures whose arithmetic is stated in the test names:
+
+| §16 case | fixture | v0.1.2 | fixed |
+| --- | --- | --- | --- |
+| CASE 1 | phase opens at 250 ms; old remainder `300 − 250` | `2000` | `null` (episode never reaches 3 samples) |
+| CASE 2 | phase opens at 299 ms; old remainder `300 − 299 = 1 ms` | **`100 000`** | see CASE 6 |
+| CASE 3 | three samples share one instant | `300`, opening anchor published as `tps: 0` | `null`, reason `opening-anchor` / `below-elapsed-horizon` |
+| CASE 4 | three samples inside 50 ms, episode ends inside the horizon | `600` | `null` |
+| CASE 7 | one sample | `4000` | `null` |
+| CASE 7 | two samples | `3000` | `null` |
+
+The 1 ms denominator is the defect in its purest form: `100 tokens / 1 ms = 100 000` tokens/s, promoted to `peakTps`
+because `peakTps` is a maximum. The observed ≈`23 500` figure in the report that opened this phase is the same
+mechanism with a smaller numerator; the mechanism, not the magnitude, is what is repaired.
+
+#### CASE 6 — the heavy calibrated delta, and what must **not** move
+
+The strongest form of the test is the one that also proves the repair is narrow. An attempt streams reasoning, switches
+to output **off-grid at 299 ms** with a 500-token first delta, then keeps streaming — so the output episode reaches
+publishable vertices and the heavy delta is a measurement rather than a lone sample.
+
+| Quantity | v0.1.2 | fixed |
+| --- | --- | --- |
+| worst published rate | **`500 000`** (the 1 ms quotient) | — |
+| `peakTps` | `500 000` | **`2000`** (600 tokens / 300 ms, 3 samples) |
+| shortest publishable denominator | `1` ms (implied by the above) | **`300` ms** |
+| any vertex below 100 ms | **yes** | **no** |
+| `sumOfSampleWeights` | `870` | `870` |
+| `attemptTrace.tokens` | `870` | `870` |
+| `settled.outputTps` | `1247.920133111481` | `1247.920133111481` |
+| `settled.reasoningTps` | `401.33779264214047` | `401.33779264214047` |
+| `settled.generatedTokens` / `observedGeneratedTokens` | `null` / `0` | `null` / `0` |
+| `settled.attemptCount` | `1` | `1` |
+| `settled.ttftMs` | `0` | `0` |
+
+Every preservation figure is identical to the last digit; only the invalid peak moves. The winning vertex's debug
+provenance names its evidence: `attemptId a1`, phase `output`, `episodeStartMs 299`, `pointTimeMs 599`,
+`elapsedMs 300`, `episodeSampleCount 3`, `episodeMass 600`, `sampleQuality estimated`, contributing sample times
+`[299, 400, 500]`. A future four- or five-figure peak can be audited from that record instead of guessed about.
+
+### 5. The renderer half of the repair, and how it was found
+
+The repaired policy publishes a withheld vertex as `tps: null` rather than `0`, and that change had a consequence outside
+the estimator which the recovered work had not yet carried through. `src/client/completed/curve-view-model.js` treated a
+non-finite rate as "not a vertex" and dropped it, so:
+
+- a zero-width attempt — one whose single delta is its whole trace — produced an **empty** run instead of the point
+  marker it is supposed to draw, so the chart could not show that the attempt had happened; and
+- `curve.renderBudget.elementPoints` (the allocator's count over every budgeted vertex) and
+  `curveViewModel.renderElementPoints` (what the SVG actually receives) stopped being the same number. On a saturated
+  120-call fixture the first read `480` against the second's `240`, so the two published halves of one quantity disagreed
+  by exactly the number of withheld vertices.
+
+Neither was a stale expectation. The test file's own prose already described the intended contract — "published as `null`
+rather than as a fabricated zero", "on the axis floor rather than on a measurement" — and `assert.equal(marker.props['data-tps'], 'null')`
+was already written; the renderer simply could not produce it. Diffing the released test file shows the same assertion
+read `'0'` in v0.1.2, so the assert and its comment had been updated for the new contract while the implementation had
+not. That is the shape of an interrupted round, and it is why the recovery audit compared the recovered tests against the
+recovered sources instead of trusting either alone.
+
+The repair, both halves of one rule: a vertex with no rate keeps its **position** and loses its **value** — placed at the
+axis floor, excluded from every run's drawn path, excluded from the run's own `peak` and from the turn's, and carried to
+the DOM as `data-tps="null"`. `renderBudget.lineVertices` then counts the measured vertices the SVG receives, so
+`elementPoints` and `renderElementPoints` agree again while `curve.drawnPoints` keeps its distinct meaning as the
+allocator's own count. No class of vertex is fabricated and no run bridges a gap: a run holding two or more unmeasured
+vertices is still a gap rather than a dot.
+
+### 6. Isolated real-machine environment (protected environment untouched)
+
+The phase's safety contract requires all real testing to use a disposable profile and forbids any interaction with a
+running one. The environment was therefore inventoried read-only before anything was started, and the inventory corrected
+two assumptions in the task brief itself:
+
+| Item | Measured | Note |
+| --- | --- | --- |
+| `19387` (the operator's live GUI) | **PID 46308**, `DeepSeek Harness.exe`, desktop host, profile `desktop` | the brief paired this port with PID 21088; that pairing is inverted |
+| `3080` | **PID 21088**, `node .../dsh/lib/bin.js web --no-open`, profile `web` | a second independent live instance |
+| operator Chrome | PID 43176 | never attached to, never navigated |
+
+Both live instances, both profiles and both ports were treated as the protected set. The **only** permitted interaction
+was read-only process discovery and directory snapshots.
+
+**Isolation, source-verified rather than guessed.** The mechanism is `--from-default-profile <name>`
+(`lib/bin.js:105`), and `initializeProfileFromDefault` (`lib/profile-boot-BZ2ZjNWi.js:139-169`) takes its template from
+the shipped `PROFILE_TEMPLATES` table, never from a profile directory — so `--from-default-profile web` does **not** read
+`profiles\web`; the doc comment at `:129-133` states that only the template's bundle list is copied and no inheritance
+metadata is persisted, and `mkdirSync` at `:147-155` throws `EEXIST` so an existing profile is never merged or
+overwritten. `--dump-config` runs the same initialization without booting. A second `DSH_HOME` was deliberately **not**
+invented; `$DSH_HOME/cordis.patch.yml` was verified absent, so no home-wide overlay leaked into the isolated boot.
+
+**The disposable profile and instance.**
+
+```text
+profile name : tpm-phase94-isolated
+profile path : C:\Users\20659\.dsh\profiles\tpm-phase94-isolated   (9 files, own identity)
+identity     : dsh-profile-tpm-phase94-isolated
+port         : 29617  (bind-tested free immediately before start, host 127.0.0.1)
+PID          : 1344    (node, the process this round started and the only one it ever stopped or started)
+start command: cd E:\Projects\DSHarness\_recovery-backups\phase94-isolated\workspace
+               node ...\@deepseek-ai\dsh\lib\bin.js --profile tpm-phase94-isolated \
+                 --port 29617 --host 127.0.0.1 --no-open
+plugin form  : plugin --profile tpm-phase94-isolated add "link:E:/Projects/DSHarness/dsh-turn-performance-meter"
+               (exit 0, pnpm 11.7.0, no compatibility exemption at peer 0.2.0-rc.2)
+```
+
+The isolated cwd is a fresh workspace directory, so its sessions cannot land in the operator's session bucket. The boot
+proved the plugin loaded **from the isolated profile's own output**, not from inference: the served page's `__DSH_BOOT__`
+carries `{"id":"dsh-turn-performance-meter","url":"plugins/??dsh-turn-performance-meter/client.js&rev=9924c56da80b",...}`
+and the profile's `dsh.profile.bundles` reads `[dsh-base, dsh-web-app, dsh-turn-performance-meter]`.
+
+**Containment, measured rather than asserted.** Read-only before/after snapshots (SHA-256 + size + mtime per file) of
+`profiles\web` (7441 files) and `profiles\desktop` (3129 files) show **0 added, 0 removed, 0 changed** across the
+isolated start; `task-board` likewise 3 files, unchanged. PID 21088 and PID 46308 are still alive and still own 3080 and
+19387 respectively. No global process kill of any kind was issued at any point, and no write to a protected profile path
+was performed. The instance's `rev=` was also independently reproduced from the live file's metadata
+(`mtimeMs`/`ctimeMs`/`size` → `9924c56da80b`), and the served bundle was shown to be the repository `client.js` at
+byte offset 0 with only the 83-byte `;\n//# sourceMappingURL=…` trailer appended — so the isolated host was serving
+exactly the bytes this round commits.
+
+One measured limit on the isolation claim, stated rather than glossed: `$DSH_HOME` is a single root and some of its state
+is **not** profile-scoped — the workspace registry under `storages\`, the `dsh-usage` ledger and the cost meter are
+global, and any extra instance appends to them. That is how the product behaves for any additional instance (the operator
+already runs two), and no session bucket for the isolated workspace was created. It is not claimed that `DSH_HOME` was
+byte-identical afterwards; it is claimed that no protected *profile* path was written.
+
+**Lifetime honesty.** The isolated host was stopped once, deliberately, by this round (PID 56728) on a mistaken caching
+hypothesis, and restarted as PID 1344 — see §7. No protected process was ever signalled.
+
+### 7. A correction this round made to itself
+
+Two claims in this round were wrong and are recorded rather than quietly dropped, because each changed what was tested.
+
+1. **The stale-bundle claim was wrong.** This round observed a 2-character length difference between the served bundle
+   and the freshly built `client.js` and concluded the module server was serving a cached pre-edit bundle. It is not.
+   `artifactRevision` (`@deepseek-ai/dsh-client-modules/lib/index.js:192-199`) derives `rev` from
+   `[mtimeMs, ctimeMs, size]` — its own comment says "without hashing its contents" — and the served body is the
+   repository file plus a trailer beginning `;\n`. The 2 characters were that `;\n`; the body was byte-identical all
+   along, the `rev` had already moved `ecf9d9b7568a` → `9924c56da80b` with no restart, and the isolation engineer was
+   right to refuse the restart this round asked for. Useful consequence for the future: because `rev` is metadata-derived,
+   a content change that leaves size *and* timestamps unchanged would not be picked up at all, and a page **reload** rather
+   than a host restart is what makes a browser adopt a new revision.
+2. **A test brief port pairing was wrong**, and the isolation engineer did not act on it: the operator's live GUI on 19387
+   is the `desktop` host (PID 46308), while the `web` profile (PID 21088) listens on 3080. Acting on the brief would have
+   mis-identified which process was protected.
+
+Both are recorded because a recovery round that silently "fixes" its own premises is indistinguishable from one that
+guesses.
+
+### 8. Real-machine acceptance: NOT OBSERVED — blocked on a missing provider credential
+
+**The real-machine tests were not performed, and no result is claimed for them.** The isolated host ran, served the plugin
+and accepted a real turn; the turn failed before any model output, and the reason is a credential gap in the disposable
+profile rather than a plugin behaviour:
+
+```text
+This turn failed
+llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY
+through the credentials service (the web Models page writes it), or export DEEPSEEK_API_KEY
+in the launching environment
+MISSING_CREDENTIAL
+```
+
+Read-only diagnosis, so the report is precise about what is missing:
+
+- `DEEPSEEK_API_KEY` is **not** set in this shell's environment;
+- it is **not** set in the live working instance's own environment either (PID 21088 and the isolated PID carry the same
+  variable names, and no credential-shaped variable is among them) — so the operator's instances must be obtaining
+  provider credentials by some other path this round did not replicate;
+- the shared store `C:\Users\20659\.dsh\.credentials.yaml` exists and holds `COMMAND_GOAT_API_KEY`, `CPA_API_KEY` and
+  `COMMANDCODE_API_KEY` — **no `DEEPSEEK_API_KEY`**.
+
+§18 states that a shared global credential store may be **read** by DSH if that is normal DSH architecture, but that this
+task must not modify credentials. Writing a provider key into `.credentials.yaml`, exporting one for the launch, or
+copying the protected profile's provider configuration are all credential modifications or protected-profile reads, so
+none was attempted. The trial is therefore reported exactly as §22 instructs a failed trial to be reported — as an
+environment failure — with the difference that this one is **systemic rather than transient**, so there was no successful
+trial to fall back to. Escalating rather than working around it is the behaviour the safety contract asks for.
+
+**What that costs the phase.** The two browser-observed acceptance items — §22 (a real turn whose first model output is a
+tool call, with the pill leaving 首响应计时 at the boundary) and §23 (a real long reasoning/output/tool turn with a winning
+peak whose provenance shows ≥3 samples and ≥100 ms) — remain **unverified on a real machine**. Their logic is covered
+deterministically instead: `test/ttft-boundary.test.js` and `test/phase94-regressions.test.js` drive the same store,
+controller and view-model entry points the browser drives, and every one of those assertions was proven to fail on the
+released v0.1.2 (§4). That is a real but partial substitute, and the distinction is kept visible here rather than folded
+into a claim of end-to-end verification.
+
+**Consequence for this round's status.** The phase is reported **BLOCKED** on real-machine acceptance, not PASS. All
+automated gates pass and the two defects are repaired and baseline-proven; the browser half of §22/§23 is outstanding.
+
+### 9. Gates at the change set being committed
+
+```text
+npm run build:client            client.js rebuilt (554095 bytes, mirrored to lib/client.js)
+npm run verify                  structure OK (14 required files, 16 core modules, 69 test files,
+                                client bundle fresh, lib/client.js mirrored)
+                                tests 804 · pass 804 · fail 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs
+                                PASS — no personal content, all structural evidence preserved
+git diff --check                clean
+```
+
+The released baseline was 768 tests, 768 pass. The count is now **804 pass, 0 fail, 0 skipped, 0 todo** — 36 more tests
+across `test/rate-publication.test.js`, `test/curve-rate-publication.test.js`, `test/ttft-boundary.test.js` and
+`test/phase94-regressions.test.js`, plus the §9 shape table added to `ttft-boundary` and the repaired expectations in the
+four pre-existing curve suites. No test was skipped, todo'd or deleted to reach that state, and no gate was satisfied by
+widening a tolerance.
+
+`package.json` is unchanged at version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. Nothing was published, no
+version was bumped, staged or tagged, and no `v0.1.3` tag or GitHub Release was created: this round prepares the fix and
+stops, exactly as §29 requires.

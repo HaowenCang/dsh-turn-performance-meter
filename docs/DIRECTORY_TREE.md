@@ -50,7 +50,8 @@ dsh-turn-performance-meter/
 │   │   ├── types.js                  JSDoc normalized domain records
 │   │   ├── metric-quality.js         exact/calibrated/estimated/unavailable + rateQuality
 │   │   ├── quality-model.js          tokenTotal / phaseSplit / temporalShape axes + ceilings
-│   │   ├── delta-accounting.js       Delta classification, strict compact-stream decoder
+│   │   ├── delta-accounting.js       Delta classification, strict compact-stream decoder, first-token evidence
+│   │   ├── rate-publication.js       The one rate-publication policy shared by the live pill and the curve
 │   │   ├── phase-duration.js         Phase-episode duration attribution (MiMo-style, Phase 9.2)
 │   │   ├── phase-evidence.js         The one authority for provider-counter vs stream-phase contradictions and modes
 │   │   ├── token-allocation.js       Delta shape weighting + usage calibration
@@ -159,6 +160,11 @@ dsh-turn-performance-meter/
 │   │                                  settle-assistant semantics, the four window-change kinds, the exact peer pin
 │   ├── background-settlement.test.js  Phase 9.3.1: a settlement ingested with no projection in between must project
 │   │                                  the newest settled turn first; completed identity and memo behaviour
+│   ├── rate-publication.test.js       Phase 9.4: the shared rate-publication policy as a pure function
+│   ├── curve-rate-publication.test.js Phase 9.4: the curve's ladder and eligibility — off-grid openings, 1 ms and
+│   │                                  50 ms denominators, warm-up, peak selection, peak provenance
+│   ├── ttft-boundary.test.js          Phase 9.4: the first-token predicate as the TTFT boundary, live vs durable
+│   ├── phase94-regressions.test.js    Phase 9.4: baseline-proven regressions for the two repaired defects
 │   ├── dsh-client-feed.test.js        SessionEventWindow wire -> normalized events
 │   ├── curve.test.js / curve-axis-endpoint / curve-stream-order /
 │   │   curve-calibration-coverage     Curve primitives: reduced arithmetic, endpoint retention, same-timestamp
@@ -186,7 +192,9 @@ test/          — landed in Phase 5 as curve-view-model.test.js and completed-i
                  cadence-contract and runtime-robustness; Phase 7 added curve-reference-window,
                  curve-episode-opening, curve-render-budget and mid-turn-reload-recovery; Phase 7A.1
                  added curve-peak-priority and rebaseline-generation; Phase 7C added curve-calibration,
-                 curve-source, curve-total-rolling, curve-trace-matrix and curve-long-agent-visual
+                 curve-source, curve-total-rolling, curve-trace-matrix and curve-long-agent-visual;
+                 Phase 9.4 added rate-publication, curve-rate-publication, ttft-boundary and
+                 phase94-regressions
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
                  JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
                  Phase 6 verified the *served* client bundle in the live page instead of taking

@@ -719,3 +719,115 @@ workstation neither activating another tab nor raising a topmost cover window ma
 minimizing stops the page being painted and serviced. Per-trial values are tabulated in
 `docs/IMPLEMENTATION_LOG.md` (Phase 9.3.1 §3), including trial 11, which advances the card 2 → 3 rather than 1 → 2 so the
 superseded card is one the store already held.
+
+## 12. Phase 9.4 — TTFT boundary and episode TPS opening stabilization
+
+Two defects in v0.1.2 were repaired at their causes, and both were first **reproduced on the released commit**. The
+reproduction used a read-only `git archive` extraction of `58685f0` into
+`E:\Projects\DSHarness\_recovery-backups\phase94-baseline\repo` — no checkout, reset or stash — and one
+implementation-neutral harness run against both trees. That is what makes the new tests regression tests rather than
+restatements of the current behaviour.
+
+### 12.1 BUG A — the first-token boundary (§9)
+
+`isTokenDelta({type:'tool-call-delta', name:'pwsh', argumentsDelta:''})` is `true` on DSH `0.2.0-rc.2` while
+`classifyDelta` of the same chunk is `null`. On v0.1.2 the same chunk through `TurnTelemetryStore.acceptChunk` left
+`record.firstTokenMs` at `null` and produced no sample; the fixed tree stamps `1200` and still produces no sample. The
+released controller's `if (sample === null) return` is where the boundary died, which is why the live state machine shows
+the identical `pending-first-token → streaming-output` transition in **both** trees when driven directly: the machine was
+never the defect, the call that would have driven it was.
+
+Coverage, in `test/ttft-boundary.test.js` and `test/phase94-regressions.test.js`:
+
+- **A/B** a name-bearing empty-arguments delta freezes TTFT (live snapshot `ttftMs` and store `firstTokenMs`) and
+  fabricates no mass (`acceptChunk` returns `null`, `samples` 0, `episodeSampleCount` 0, `tps` `null`);
+- **B** the machine leaves `pending-first-token` rather than staying on first-response timing;
+- **C/H** a tool call, its tool result and a retry never redefine the frozen instant — the released tree moved the turn's
+  TTFT to the retry's delta (`900`), the fixed tree keeps `200`;
+- **D** a tool-call delta with **no name** and empty arguments is not token evidence;
+- **E/F** ordinary non-empty reasoning and text deltas are unchanged (controls, green on both trees by design);
+- **G** a durable reconstruction carrying a name-bearing empty-arguments tool call reports the **same** instant as the
+  live path (`1100` both), which v0.1.2 could not do because its adapter did not publish `firstTokenTimeMs` at all;
+- the §9 shape table asserts `countsAsToken` / `contributesMagnitude` / the phase across nine chunk shapes and the
+  `isTokenDelta`-vs-`classifyDelta` disagreement directly.
+
+Two honest limits are recorded rather than smoothed over. The §9 shape table itself cannot be *executed* against v0.1.2
+(the module exports no `tokenEvidence`, so the file fails to load there); its behavioural consequences are covered by the
+tests above, which were. And D/E/F are guards rather than regressions, because the clauses say "ignored" and "unchanged" —
+they are labelled `(control)` and are not counted as coverage.
+
+### 12.2 BUG B — the episode TPS opening and the peak (§16)
+
+| §16 case | fixture | v0.1.2 | fixed |
+| --- | --- | --- | --- |
+| CASE 1 | phase opens at 250 ms | `2000` | unavailable (episode never reaches 3 samples) |
+| CASE 2 | phase opens at 299 ms (1 ms remainder) | **`100 000`** | see CASE 6 below |
+| CASE 3 | three samples share one instant, episode ends inside the horizon | `600`, anchor published as `0` | `null`, reasons `opening-anchor` / `below-elapsed-horizon` |
+| CASE 4 | three samples inside 50 ms, episode ends inside the horizon | `600` | `null` |
+| CASE 5 | three samples over ≥100 ms | `200` | `150` (the episode's own first eligible vertex) |
+| CASE 6 | heavy first delta after an off-grid transition at 299 ms | **`500 000`** | `2000` (600 tokens / 300 ms, 3 samples) |
+| CASE 7 | one sample / two samples | `4000` / `3000` | `null` |
+
+**CASE 3/4 needed a reading decision, and the reading is stated rather than assumed.** "Three samples inside 50 ms" is
+only *unavailable* when the episode cannot reach the horizon; if the episode continues past it, its first ladder vertex at
+exactly `elapsedMs = 100` with three contributing samples is publishable **by §10's own constants**, and publishing `300`
+for a 30-token fixture there is correct rather than a leak. The tests therefore settle the attempt inside the horizon, and
+the horizon-reaching form is kept beside them as an explicitly-labelled **control** — v0.1.2 agrees with the fixed tree on
+it, so it is not claimed as a regression.
+
+**CASE 6 is also the preservation test**, which is what stops the repair from being over-broad. Every quantity that must
+not move is asserted equal across the two trees: sample-weight sum `870`, attempt tokens `870`, `generatedTokens` /
+`observedGeneratedTokens` `null` / `0`, `outputTps` `1247.920133111481`, `reasoningTps` `401.33779264214047`,
+`ttftMs` `0`, `attemptCount` `1`. Only the invalid peak changes. The winning vertex's provenance names its own evidence —
+attempt, phase, episode origin, point instant, elapsed, sample count, mass, calibration quality and contributing sample
+timestamps — so a future four- or five-figure peak can be audited instead of guessed about, and it reaches no renderer.
+
+`test/curve-rate-publication.test.js` additionally freezes the two former spikes (`100 tokens / 50 ms` and
+`200 tokens / 1 ms`) as absent, and asserts that the peak is `null` — never `0` — when nothing is publishable, with the
+card rendering `峰值 —`.
+
+### 12.3 The renderer consequence of `null`-instead-of-`0`
+
+Changing a withheld vertex from `0` to `null` moved work into the renderer, and the recovered round had not carried it
+through. Two properties are asserted here:
+
+- a zero-width attempt's single vertex is drawn as a point marker carrying `data-tps="null"` on the axis floor, rather
+  than being dropped and leaving the chart unable to show that the attempt happened. v0.1.2 rendered the same marker with
+  `data-tps="0"`, so the assertion is a genuine before/after;
+- `renderBudget.elementPoints` and `curveViewModel.renderElementPoints` are one quantity and agree: `lineVertices` counts
+  the **measured** vertices the SVG receives (on a dense fixture `480` allocated versus `240` emitted), while
+  `curve.drawnPoints` keeps its distinct meaning as the allocator's own count. The equality is asserted as strict
+  equality over measured vertices, never weakened to `<=`.
+
+### 12.4 Real-machine acceptance — NOT OBSERVED (blocked)
+
+The isolated-profile protocol was executed: a new disposable profile `tpm-phase94-isolated` created from the shipped web
+template via `--from-default-profile`, its own port `29617`, the development checkout linked into it only, the plugin
+confirmed loaded from the isolated profile's own `__DSH_BOOT__`, and the served bundle confirmed to be the repository
+`client.js` at byte offset 0 with only the module server's 83-byte trailer appended. Read-only before/after snapshots show
+`profiles\web` and `profiles\desktop` at **0 added / 0 removed / 0 changed**, and both protected instances still alive on
+their own ports.
+
+The turn itself failed before any model output:
+
+```text
+llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY
+through the credentials service (the web Models page writes it), or export DEEPSEEK_API_KEY
+in the launching environment
+MISSING_CREDENTIAL
+```
+
+`DEEPSEEK_API_KEY` is absent from the environment (this shell's and both live instances') and absent from the shared
+`.credentials.yaml`, which holds only `COMMAND_GOAT_API_KEY`, `CPA_API_KEY` and `COMMANDCODE_API_KEY`. §18 permits
+*reading* the shared store but forbids modifying credentials, so no key was written, exported or copied from a protected
+profile, and no workaround was attempted. **§22 and §23 are therefore NOT OBSERVED on a real machine**, and the phase's
+real-machine result is BLOCKED rather than PASS. The deterministic coverage above exercises the same store, controller
+and view-model entry points the browser exercises, and every regression in it was proven red on v0.1.2 — but that is a
+partial substitute and is not presented as end-to-end verification.
+
+### 12.5 Totals
+
+**804 tests, 804 pass, 0 fail, 0 skipped, 0 todo** (768 before the phase). `npm run verify` runs
+`scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
+(`node scripts/verify-sanitization.mjs`), and it passes. `git diff --check` is clean. No test was skipped, todo'd or
+deleted, and no tolerance was widened, to reach that state.

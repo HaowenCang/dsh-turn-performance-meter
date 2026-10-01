@@ -1204,3 +1204,125 @@ reproducing the local digest and matching the GitHub asset; the exact-version in
 and a registry-installed cold start all passing; annotated tag `v0.1.2` peeled to the release commit; `HEAD == main ==
 v0.1.2` with divergence `0 0` and a clean working tree at the end; and no force, no re-tag, no movement of `v0.1.0` or
 `v0.1.1`, no widened compatibility claim, no claim beyond DSH `0.2.0-rc.2` and no credential or OTP recorded at any point.
+
+## Phase 9.4 — TTFT boundary and episode TPS opening stabilization (complete)
+
+Two defects identified independently in v0.1.2, repaired at their causes rather than at their symptoms. This round is also
+a **recovery** round: the original Phase 9.4 session crashed and its conversation state was lost, so the work began by
+recovering an uncommitted implementation from the working tree and auditing it against this list before extending it
+(`docs/IMPLEMENTATION_LOG.md`, Phase 9.4 §1–2).
+
+**BUG A — TTFT stayed in 首响应计时 after a name-bearing, empty-arguments tool-call delta.**
+
+- [x] **Recover the interrupted work read-only before any write.** Git was inspected with `status`, `rev-parse`,
+      `fetch --tags`, `rev-list --left-right --count`, `log`, `diff`, `diff --cached`, `stash list` and `reflog` only. No
+      `reset`, `clean`, `checkout .`, `restore .`, `pull --rebase`, `rebase`, `stash push`, `gc` or `prune` was run.
+- [x] **Classify the local state.** **CASE B — uncommitted Phase 9.4 work exists.** `HEAD` was exactly
+      `58685f0abe023629eb776ecd5e75b626bd12c428`, the index was empty, there were no local commits beyond `origin/main`
+      (divergence `0 0`) and no stash; 26 tracked files were modified and 10 files were untracked.
+- [x] **Preserve before inspecting.** The complete `git diff` (816 428 bytes), the empty `git diff --cached`, the status
+      list, the `HEAD` sha and all 10 untracked files were copied to
+      `E:\Projects\DSHarness\_recovery-backups\phase94-20261001-005951` outside the repository.
+- [x] **Audit the recovered work** change by change as KEEP / REPAIR / DROP. Nothing was discarded; one recovered claim
+      (that a legitimate 10 000 tokens/s peak had been suppressed) was reproduced and disproved rather than trusted.
+- [x] **Establish the DSH rule and confirm the defect.** `isTokenDelta({type:'tool-call-delta', name:'pwsh',
+      argumentsDelta:''}) === true` on DSH `0.2.0-rc.2`, while `classifyDelta` of the same chunk is `null` and
+      `sampleFromChunk` therefore yields no sample. Verified against v0.1.2: `record.firstTokenMs` stayed `null` and the
+      attempt held `0` samples; the root cause is `src/client/live/controller.js`'s `if (sample === null) return`, which
+      meant the boundary chunk never reached the presenter.
+- [x] **Decouple TTFT from TPS mass.** `tokenEvidence()` publishes DSH's predicate, the phase, and whether the chunk also
+      carries magnitude. `countsAsToken` freezes the turn's first token and advances the presenter; `contributesMagnitude`
+      gates the sample. No magnitude is fabricated for a boundary-only delta.
+- [x] **One first-token contract, not two.** `TurnTelemetryStore.firstTokenObserved` is the single one-way freeze, used by
+      the live `acceptChunk` path and by the durable reconstruction; the adapter publishes `firstTokenMs` from the same
+      predicate (`stream-decoder.firstTokenTimeMs`). Live and durable agree on the boundary.
+- [x] **Turn-level TTFT, never attempt-level.** A new attempt, a retry and a tool boundary all leave an already-frozen
+      turn TTFT untouched.
+- [x] **Regression tests** for a name-bearing empty-arguments delta (freezes TTFT; presenter leaves `pending-first-token`),
+      a name-absent empty-arguments delta (ignored), ordinary reasoning/text deltas (unchanged), a tool call and result
+      that never return the card to first-response timing, durable/live agreement, and a single freeze across attempts.
+
+**BUG B — completed `peakTps` reaching ≈23 500 tokens/s from a 1–99 ms denominator.**
+
+- [x] **Root cause confirmed against v0.1.2 and reproduced numerically.** The attempt-global 100 ms ladder let a phase
+      episode opening off-grid be first measured over the remainder of a step. Reproduced: a phase opening at 250 ms gave
+      `peakTps = 2000` (`100 tokens / 50 ms`), one opening at 299 ms gave `peakTps = 100000` (`100 tokens / 1 ms`), and
+      three samples sharing one timestamp were published as `300`.
+- [x] **One shared named publication contract.** `MIN_RATE_SAMPLES = 3` and `MIN_RATE_ELAPSED_MS = 100` in
+      `src/core/rate-publication.js`, imported by both halves; `MIN_WARMUP_SAMPLES` is now an alias rather than a second
+      constant. No duplicated magic number remains.
+- [x] **Fix the invalid condition, not the value.** No clamp, winsorization, EMA, moving average, arbitrary replacement
+      ceiling or MiMo 1564 window exists anywhere in the path.
+- [x] **Live TPS policy.** The elapsed horizon joins the existing three-sample gate; a rate is published only when both
+      hold, and phase-local resets, the attempt reset, the 100 ms cadence, stall decay, tool-state null TPS and the
+      first-output guard are preserved. No visual styling changed.
+- [x] **Completed curve policy — the preferred implementation.** Each phase episode owns its own 100 ms ladder from its own
+      origin, so a sub-100 ms denominator does not exist on the grid rather than being filtered afterwards. The attempt's
+      real terminal settlement endpoint is still emitted as a vertex.
+- [x] **Curve warm-up.** A one- or two-sample episode still exists in the provenance, contributes its calibrated token
+      total and duration, and affects settled aggregates — but cannot manufacture a peak. A non-publishable rate is
+      `null`/unavailable, never a measured `0`.
+- [x] **Peak policy.** `peakTps = max(publishable rate points)`; opening anchors, sub-100 ms vertices, below-warm-up
+      episodes, unavailable vertices and geometric-only anchors are all excluded, and `peakTps = null` when no eligible
+      point exists so the UI prints `峰值 —` rather than `峰值 0 tokens/s`.
+- [x] **No upper clamp.** A legitimately high peak that satisfies the evidence contract is published unchanged.
+- [x] **Provenance for the winning peak.** Debug-only `peakProvenance` records attempt, phase, episode origin, point
+      instant, elapsed, episode sample count, episode mass, calibration/quality, temporal allocation mode and the
+      contributing sample timestamps. It reaches no renderer and never appears on the normal card.
+- [x] **Extreme-spike regressions.** The 50 ms and 1 ms off-grid openings, three coincident samples, three samples inside
+      50 ms with the episode ending inside the horizon, three samples over ≥100 ms becoming valid, a calibrated heavy
+      first delta after an off-grid transition, and a one/two-sample terminal episode.
+- [x] **Token integral preserved.** For the calibrated heavy-delta fixture the sample-weight sum, the settled generated
+      totals, the phase averages, the attempt count and TTFT are identical between v0.1.2 and the fix; only the invalid
+      peak changes (`500 000` → `2000`).
+
+**Isolated real-machine acceptance (no operator environment used).**
+
+- [x] **Running DSH instances inventoried read-only before any test** — PID, command line, profile and port — and recorded
+      as the protected set. The measured mapping corrects the brief: port `19387` is the **desktop** host (PID `46308`,
+      profile `desktop`) and the `web` profile (PID `21088`) listens on **3080**. Both are protected, and neither was used
+      as a test target.
+- [x] **A new disposable profile** with its own identity, directory, port and plugin install, created through the
+      source-verified DSH `--from-default-profile` mechanism rather than by guessing, with no session data copied from a
+      protected profile.
+- [x] **Plugin linked only into the isolated profile**; no compatibility exemption required at peer `0.2.0-rc.2`, and the
+      plugin's presence proven from the isolated profile's own `__DSH_BOOT__` and `dsh.profile.bundles`.
+- [x] **Isolated host served exactly the committed bytes** — the repository `client.js` at byte offset 0 with only the
+      module server's 83-byte `//# sourceMappingURL` trailer appended, and its `rev=` reproduced from the live file's
+      metadata.
+- [x] **Containment verified:** read-only before/after snapshots show `profiles\web` (7441 files) and `profiles\desktop`
+      (3129 files) at **0 added / 0 removed / 0 changed**; both protected PIDs still alive on their own ports; protected
+      ports never used by the test; no global process kill at any point.
+- [ ] **BLOCKED — §22 real-machine TTFT test and §23 real-machine long-turn TPS test: NOT OBSERVED.** The turn failed
+      before any model output with `MISSING_CREDENTIAL`: `llm-deepseek: no API key for provider route "deepseek-official"`.
+      `DEEPSEEK_API_KEY` is absent from the environment (this shell's and both live instances') and absent from the shared
+      `.credentials.yaml`, which holds only `COMMAND_GOAT_API_KEY`, `CPA_API_KEY` and `COMMANDCODE_API_KEY`. §18 permits
+      *reading* the shared store but forbids modifying credentials, so no key was written, exported or copied from a
+      protected profile and no workaround was attempted. **The phase is reported BLOCKED, not PASS.** Deterministic
+      coverage exercises the same entry points and every regression in it was proven red on v0.1.2, but that is a partial
+      substitute and is not claimed as end-to-end verification.
+- [ ] **Isolated profile retained, not deleted.** §26 authorises removal of the disposable profile, but it also says that
+      where there is any uncertainty about the delete path, leaving one disposable profile is preferable to risking user
+      data. With the real-machine half still outstanding, the profile and its evidence are kept for the resumed run; the
+      isolated host process is stopped so it consumes nothing.
+
+**Gates, documentation and Git.**
+
+- [x] `npm run build:client`, `npm run verify`, `node scripts/verify-sanitization.mjs`, `git diff --check`.
+- [x] `docs/METRICS_SPEC.md`, `docs/IMPLEMENTATION_LOG.md`, `docs/TEST_PLAN.md`, `docs/TASKS.md` and
+      `docs/DIRECTORY_TREE.md` updated; no historical Phase 9 evidence rewritten.
+- [x] **Version frozen at `0.1.2`.** No `npm publish`, no `npm version`, no `v0.1.3` tag, no GitHub Release.
+- [x] **Ordinary pushes only.** No `--amend` on a pushed commit, no rebase of pushed `main`, no `--force`, no
+      `--force-with-lease`; `HEAD == origin/main`, divergence `0 0`, working tree clean at the end.
+
+Acceptance gate: BUG A and BUG B both reproduced on released v0.1.2 and both repaired at their causes with baseline-proven
+regressions; generated-token totals, reasoning-token inclusion, settlement usage, phase-duration attribution,
+toolWall/toolWork, attempt count, turn elapsed, durable reconstruction and dedupe, tool identity and the `0.2.0` contract
+all unchanged; `peakTps` either `null` or a measurement satisfying ≥3 samples and ≥100 ms; 0 failing tests; sanitization
+PASS; `git diff --check` clean; the operator's running instances never used as a test target and their profile
+directories measured unchanged; and no v0.1.3 publication of any kind.
+
+**Outstanding for the resumed round:** the two real-machine acceptance items in §22/§23, which need a provider credential
+the disposable profile does not have. The operator can unblock them by storing `DEEPSEEK_API_KEY` through the DSH
+credentials service (or exporting it into the isolated launch environment); the isolated profile `tpm-phase94-isolated` is
+retained so the run can resume without rebuilding the environment.

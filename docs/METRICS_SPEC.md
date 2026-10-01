@@ -107,6 +107,36 @@ TTFT=t_{first\ generated\ delta}-t_{turn/start}
 
 The first generated delta may be reasoning, visible text, or tool-call arguments. Empty deltas do not stop the TTFT clock.
 
+**The boundary is DSH's own first-token predicate (corrected in Phase 9.4).** `firstTokenMs` is the time of the first chunk
+`isTokenDelta` accepts (`@deepseek-ai/dsh-llm/lib/types/assistant-stream.js`, 0.2.0-rc.2):
+
+```text
+text-delta | reasoning-delta   ->  text !== ''
+tool-call-delta                ->  argumentsDelta !== '' || name !== undefined
+```
+
+The plugin publishes that verdict as `tokenEvidence(chunk).countsAsToken` (`src/core/delta-accounting.js`), and it is the
+**only** first-token boundary: `LiveMeter.observeTokenBoundary`, `TurnTelemetryStore.acceptChunk` and the durable
+reconstruction all read it. Three consequences are normative.
+
+**A name-bearing tool-call delta with an empty argument fragment is the turn's first token.** DSH counts it — the call has
+begun and its name is the evidence — while `classifyDelta` attributes no argument text to it and `sampleFromChunk`
+therefore produces no sample. The two sets are not the same set, and TTFT is measured from the predicate, not from the
+sample list. Such a delta freezes TTFT, moves the live machine out of its first-response stage, and contributes **no**
+TPS-shape mass: no magnitude is fabricated to make the numbers look complete. The live pill therefore leaves the TTFT
+stopwatch at the boundary and shows the warming counter until the episode satisfies §6's publication policy.
+
+**A tool-call delta with neither a name nor arguments is not token evidence.** It freezes nothing and advances nothing.
+
+**The same boundary applies after a reload.** A durable settlement's decoded stream carries
+`firstTokenTimeMs` from the identical predicate, so a card rebuilt from durable evidence reports the TTFT the live
+session froze rather than an em dash derived from its first *sample*. `firstTokenObserved` is a one-way freeze: a later
+replay can never move an instant already recorded, and an earlier one only replaces it with an earlier instant.
+
+Before this correction the three sites disagreed: the adapter used `classifyDelta`, the client controller returned early
+on "no sample", and `LiveMeter.firstTokenMs` was frozen only by an accepted sample. A tool-first turn therefore kept
+rendering the first-response stopwatch after the model's first token had arrived.
+
 **Unknown start.** A page that attaches in the middle of a turn never observes that turn's `turn/start` (the published window is a live tail), so
 the boundary is *adopted* from the transient rows' own `turn` field (`src/dsh/client-feed.js` `adoptTurn`, marked `recovered`). The adopted turn
 opens with an unknown start time, and both turn TTFT and turn elapsed are then reported as **unknown** — never as `0` or as "time since the page
@@ -185,9 +215,13 @@ Implementation requirements:
 - **a stall decays hyperbolically and never freezes or jumps to zero.** The numerator stops moving while the
   denominator advances; the value is never reset to `0` one second after the last delta, because there is no window
   to leave;
-- **warm-up: at least 3 generated samples in the current episode** (`MIN_WARMUP_SAMPLES`) before any rate is
-  published from shape evidence. Until then the pill keeps the pending/elapsed presentation (an elapsed counter, no
-  number). Authoritative provider counters do not bypass this rule;
+- **warm-up: the shared publication policy must admit the episode** (`src/core/rate-publication.js`): at least
+  `MIN_RATE_SAMPLES` = 3 generated samples in the current episode **and** at least `MIN_RATE_ELAPSED_MS` = 100 ms of that
+  episode's own clock. Until then the pill keeps the pending/elapsed presentation (an elapsed counter, no number), and
+  `snapshot.rateGateReason` names the fact that is missing. Authoritative provider counters do not bypass either gate.
+  The elapsed horizon was added in Phase 9.4: before it, three samples arriving within a few milliseconds published a
+  quotient dominated by delivery granularity rather than by generation speed, which the completed curve then promoted to
+  `peakTps` (§8.2, §9);
 - **first-output guard.** For the first 1000 ms of an output episode that has no valid positive rate of its own yet,
   the last positive reasoning rate is reused rather than displaying a spurious non-positive value
   (`FIRST_OUTPUT_GUARD_MS`). It never overwrites a valid positive output estimate, it expires after 1000 ms, and it
@@ -373,6 +407,27 @@ Three consequences are normative:
    §3/§26, not a window reaching zero.)
 3. **The terminal episode is drawn to the attempt's settlement instant.** The tail is model-attempt elapsed time
    under the MiMo definition; tool waits and inter-attempt waits still own no coordinate.
+
+**Each episode is sampled on its own ladder, and only admissible vertices are measurements (Phase 9.4).** The vertex
+grid is the union of `episodeStart + k · 100 ms` for every phase episode — each ladder running to the next episode's
+origin, or to the attempt's end for the terminal one — plus the attempt's own end instant. The earlier revision used one
+**attempt-global** ladder instead, which gave an episode that opened between two of its instants a first denominator
+equal to the remainder of a step: an episode opening at 250 ms was first measured over `300 − 250 = 50 ms`, and one
+opening at 299 ms over a single millisecond. Because §9 takes a maximum, those quotients became the turn's peak. On its
+own ladder an episode contributes no vertex between its origin and its origin + 100 ms, so the class of sub-100 ms
+denominator does not exist rather than being filtered afterwards.
+
+A vertex is **publishable** only when the shared policy of §6 admits it (≥ 3 contributing samples of the episode, ≥ 100 ms
+of the episode's own clock). A vertex that fails either gate carries `tps: null` — **never `0`**, because "not measured
+yet" and "measured zero" are different facts — together with `publishable: false`, `rateUnavailableReason`
+(`no-episode` | `opening-anchor` | `below-elapsed-horizon` | `below-sample-warmup`), `episodeStartMs`,
+`episodeElapsedMs`, `episodeSampleCount` and `episodeMass`. The opening anchor of an episode is therefore withheld
+rather than drawn at zero. No clamp, smoothing, winsorization or arbitrary ceiling exists anywhere in this path: a rate
+that passes both gates is published exactly as computed, however large.
+
+The consequences are visible in the fixtures: a two-delta attempt has no publishable vertex at all, so its trace carries
+no rate and the turn may have no peak (§9). `test/curve-rate-publication.test.js` freezes both former spikes
+(`100 tokens / 50 ms` and `200 tokens / 1 ms`) as absent.
 
 **The published series is capped at 200 points** (`MAX_SERIES_POINTS`). A series of 200 points or fewer is published
 unchanged; a longer one is resampled to exactly 200 points evenly spaced in time across the full span, each target
@@ -581,7 +636,11 @@ The chart is bounded by one fixed, chart-wide vertex budget, `MAX_RENDER_POINTS_
 
 **What the budget bounds is the plot's elements, not one of its two halves.** `curve.drawnPoints` is the allocator's accounting and counts every budgeted vertex, a one-vertex run included, and it counts a shared phase-transition vertex once per subpath that emits it. `curveViewModel.drawnPoints` counts **path vertices only** — a one-vertex run is drawn as a point marker rather than as a vertex of a line — and the markers are published separately in `curveViewModel.markers`. The bounded quantity is their sum, published as `renderBudget.elementPoints` (with `lineVertices` and `markers` beside it) in the settled snapshot and as `renderElementPoints` in the view model. Asserting `drawnPoints <= 512` alone would leave every marker outside the bound.
 
+**The allocator's count and the plot's count are two different quantities, and neither is renamed into the other.** The allocator charges a run for every vertex it holds, which is the right unit for a *budget*: a vertex the publication policy later withholds still cost its run a seat. What the SVG receives is smaller, because no path is drawn through a withheld vertex (§8.2). So `curve.drawnPoints` stays the allocator's own number over every budgeted vertex, while `renderBudget.lineVertices` counts the **measured** vertices actually emitted — `renderBudget.elementPoints = lineVertices + markers` is then the same quantity as `curveViewModel.renderElementPoints`, computed independently from the view model, and the two agree. `elementPoints <= renderBudget.allocated <= MAX_RENDER_POINTS_TOTAL` holds in that direction, so the bound can only be conservative, never exceeded. On a dense fixture the gap is not a rounding difference: a three-delta attempt on a 250 ms grid is allocated four vertices and measures two, so conflating the two counts would overstate the emitted elements twofold and make the snapshot and the view model disagree by exactly the number of withheld vertices.
+
 **Two marker levels, because a chart of beads is not a chart of peaks.** An ordinary one-vertex run — a genuine one-measurement attempt — is drawn as a small, subdued dot (`0.24 × font`, opacity `0.75`). Only a singleton that **is** the published peak keeps the stronger marker (`0.42 × font`, opacity `1`), which is also the size of the peak dot itself, so the two coincide exactly rather than leaving a ring. `data-peak` carries the distinction to the stylesheet, and both tones resolve through DSH aliases so light and dark themes follow the host.
+
+**An unmeasured vertex keeps its position and loses its value.** Dropping a withheld vertex from the geometry made a zero-width attempt's trace empty, so the chart could not show that the attempt had happened at all. Such a vertex is placed at the **axis floor** — a position, not a rate — never enters a run's drawn path, never becomes that run's `peak`, and never takes part in the peak comparison. The distinction survives into the DOM as `data-tps="null"` rather than the `data-tps="0"` a fabricated zero produced, which is the one place a reader can tell "nothing was measured here" from "zero was measured here". A run holding two or more unmeasured vertices and no measured pair is a **gap**, not a dot: no rule selects one of them, and placing a single point where the evidence is a stretch would be a fabrication.
 
 **The printed peak and the placed peak dot are one measurement.** `curveViewModel.peak.value` is the published-series maximum, but `peak.x`/`peak.y` are taken only from a vertex that survived onto the chart *and* carries that same rate; when the peak-bearing run is not drawable they are `null`. The rejected behaviour took the position from whichever series led the *drawn* points, which after a starved peak printed `≈9,999` and placed the dot on a 400 tokens/s vertex — two different measurements one pixel apart. A missing dot is visibly missing; a dot on a weaker vertex is a false claim about where the chart's maximum was.
 
@@ -597,6 +656,20 @@ definition: MiMo's `peakTps` is the maximum of its published series, not of the 
 (`docs/MIMO_RUNTIME_METRICS.md` §7). A value the 200-point resampling skips is a value the card does not report. The
 **render budget** is a different matter and still may not move the number: `allocateRunBudgets`/`downsampleRun` thin
 the drawing after the peak is read.
+
+**Only publishable vertices compete (Phase 9.4).** `peakTps` is `max(valid publishable rate points)`. Every vertex the
+shared policy of §6/§8.2 withholds carries `tps: null` and is skipped by construction, which excludes: episode opening
+anchors, vertices with `elapsed < 100 ms`, episodes below the three-sample warm-up, and every other unavailable vertex.
+With no valid point the peak is **`null`** and the UI prints `—`; it is never `0`, because a turn whose episodes were
+never measured has no measured throughput, and `0` would be a fabricated measurement. A peak that passes the gates is
+not clamped to any ceiling.
+
+**The winning peak publishes debug-only provenance.** `curve.peakProvenance` (and each attempt's own
+`attempts[].peakProvenance`) names the attempt, the active phase, the episode origin, the winning vertex instant, its
+`elapsedMs`, its `episodeSampleCount` and `episodeMass`, the attempt's `temporalAllocationMode`, whether the
+contributing samples are `calibrated` (`sampleQuality`), and the timestamps of those samples. It exists because the
+defect this phase repairs was a peak produced by a denominator no surface reported; it is **diagnostics only** and is
+never rendered — no module in `src/client` reads it.
 
 **There is no 1564 clamp.** MiMo's display ceiling is a MiMo-Ultra product decision; the DSH plugin must remain
 capable of measuring faster future models, so values above 1564 survive into the published series and into the peak.
