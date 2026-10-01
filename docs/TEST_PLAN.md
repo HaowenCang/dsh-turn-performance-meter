@@ -799,35 +799,48 @@ through. Two properties are asserted here:
   `curve.drawnPoints` keeps its distinct meaning as the allocator's own count. The equality is asserted as strict
   equality over measured vertices, never weakened to `<=`.
 
-### 12.4 Real-machine acceptance — NOT OBSERVED (blocked)
+### 12.4 Real-machine acceptance — OBSERVED (Phase 9.4.1, 2026-10-01)
 
-The isolated-profile protocol was executed: a new disposable profile `tpm-phase94-isolated` created from the shipped web
-template via `--from-default-profile`, its own port `29617`, the development checkout linked into it only, the plugin
-confirmed loaded from the isolated profile's own `__DSH_BOOT__`, and the served bundle confirmed to be the repository
-`client.js` at byte offset 0 with only the module server's 83-byte trailer appended. Read-only before/after snapshots show
-`profiles\web` and `profiles\desktop` at **0 added / 0 removed / 0 changed**, and both protected instances still alive on
-their own ports.
+The isolated-profile protocol was executed end to end in a **new** disposable profile `tpm-phase941-runtime` created from
+the shipped web template via `--from-default-profile` (bundle list only; nothing read from or copied out of any protected
+profile), its own port `19388`, the development checkout linked into it only, no compatibility exemption at peer
+`0.2.0-rc.2`, and the plugin confirmed loaded from the isolated profile's own `__DSH_BOOT__`. The route that unblocked it
+is the already-authorized `command-goat` provider selecting an existing shared credential **by reference**
+(`apiKeyEnv: COMMAND_GOAT_API_KEY`) — the shared store was read, never written, and no secret was read, printed or
+persisted.
 
-The turn itself failed before any model output:
+Six real turns were run through `dsh 0.2.0-rc.2` in a throwaway headless Chrome driven over CDP against port `19388`
+only, asserted before navigation:
 
-```text
-llm-deepseek: no API key for provider route "deepseek-official"; store DEEPSEEK_API_KEY
-through the credentials service (the web Models page writes it), or export DEEPSEEK_API_KEY
-in the launching environment
-MISSING_CREDENTIAL
-```
+- **General runtime — PASS.** Idle renders no meter; the live pill appears at `t+219 ms` on `首响应计时`; it freezes to
+  `思考 ≈67.0 tokens/s` at `t+10245 ms`; settlement produces the collapsed card
+  `已完成 · 思考 ≈109 tokens/s · 输出 ≈318 tokens/s · 838 tokens · 首响应 10.03 s`; expanding shows the four cells and the
+  curve (`峰值 ≈318 tokens/s`, axis `500`); a `Page.reload` reconstructs the card with a byte-identical progress string.
+  **Zero** console errors.
+- **Bug A — the exact name-only boundary WAS observed.** Three tool-first trials produced, as the first chunk
+  `isTokenDelta` accepts, a name-bearing `tool-call-delta` with `argumentsDelta: ""` — preceded only by a
+  `block-start(blockType: "tool-call")`. TTFT froze at that instant (`ttftMs 4376` against a boundary 4381 ms after send),
+  the UI left `首响应计时`, the tool ran (`read`), the follow-up attempt answered, and the next turn worked. That turn
+  published **no** peak: `peakTps: null`, every vertex withheld by name, `峰值 —`, no fabricated dot. (A fourth tool-first
+  trial was reasoning-first and is counted as an early-tool turn, not a boundary observation.)
+- **Bug B — real provenance.** On a 3,644-token, three-attempt turn the published peak `453` carries `elapsedMs 100`,
+  `episodeSampleCount 15`, `phase reasoning`, `temporalAllocationMode total-anchored`, `sampleQuality calibrated` and
+  `contributingSampleTimes` of exactly 15 entries. No opening anchor won and no clamp exists. Peak/phase-average ratios
+  were `1.00`, `2.39` and `0.92` — none near the `10 ×` escalation threshold.
+- **§13 invariant scan — 0 violations** over **264 published** and **11 withheld** vertices: no published vertex used
+  `elapsed < 100 ms` or `episodeSampleCount < 3`, and every withheld vertex named its reason.
 
-`DEEPSEEK_API_KEY` is absent from the environment (this shell's and both live instances') and absent from the shared
-`.credentials.yaml`, which holds only `COMMAND_GOAT_API_KEY`, `CPA_API_KEY` and `COMMANDCODE_API_KEY`. §18 permits
-*reading* the shared store but forbids modifying credentials, so no key was written, exported or copied from a protected
-profile, and no workaround was attempted. **§22 and §23 are therefore NOT OBSERVED on a real machine**, and the phase's
-real-machine result is BLOCKED rather than PASS. The deterministic coverage above exercises the same store, controller
-and view-model entry points the browser exercises, and every regression in it was proven red on v0.1.2 — but that is a
-partial substitute and is not presented as end-to-end verification.
+Containment: the operator's `web` instance (PID `21088`, port `3080`) and desktop instance (PID `46308`, port `19387`)
+were never a test target, never restarted, and `profiles\web` shows **0 files written after task start**. `profiles\desktop`
+did change during the window, and the change is attributed rather than attributed away: its own plugin-manager log records
+two rejected `dsh-mail-notify@0.4.0` installs (both rolled back) plus a GUI-settings rewrite of `cordis.patch.yml` — none
+of which any command this task issued could produce. One blank session landed in the shared `dsh-mail-notify` workspace
+bucket before the composer's workspace chip was moved, and is left in place. `docs/IMPLEMENTATION_LOG.md` (Phase 9.4.1)
+carries the full measurements.
 
 ### 12.5 Totals
 
-**804 tests, 804 pass, 0 fail, 0 skipped, 0 todo** (768 before the phase). `npm run verify` runs
+**805 tests, 805 pass, 0 fail, 0 skipped, 0 todo** (768 before Phase 9.4, 804 before this round). `npm run verify` runs
 `scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
 (`node scripts/verify-sanitization.mjs`), and it passes. `git diff --check` is clean. No test was skipped, todo'd or
 deleted, and no tolerance was widened, to reach that state.

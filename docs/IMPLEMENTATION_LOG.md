@@ -4774,3 +4774,271 @@ widening a tolerance.
 `package.json` is unchanged at version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. Nothing was published, no
 version was bumped, staged or tagged, and no `v0.1.3` tag or GitHub Release was created: this round prepares the fix and
 stops, exactly as §29 requires.
+
+## Phase 9.4.1 — Isolated runtime acceptance closure (2026-10-01)
+
+Baseline `f6d6c46bfd4466ff593769be2db2a95ec2afaf78` (`HEAD == origin/main`, divergence `0 0`, working tree clean), runtime
+`dsh 0.2.0-rc.2`, package version `0.1.2`, peer `@deepseek-ai/dsh` `0.2.0-rc.2`. Phase 9.4's implementation is accepted as
+the starting point and was **not** redesigned: the TTFT boundary handling, `tokenEvidence()`, `firstTokenObserved()`, the
+shared rate-publication policy, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, the phase-local completed-curve
+ladder, the null/unavailable curve vertices and the peak provenance are all untouched. This round closed one view-model
+semantic gap and obtained the real-machine evidence Phase 9.4 was blocked on. The previous round's provider/API failure was
+out of scope and was neither diagnosed nor repaired.
+
+### 1. The view-model hygiene fix (pre-runtime, no visual change)
+
+`src/client/completed/curve-view-model.js` projected a non-finite `curve.peakTps` onto `0` before publishing it, so
+`peak.value === 0` meant either *"the publication policy withheld every vertex"* or *"the published series has a maximum of
+zero"*. The two are different facts about a turn, and the first was asserting the second.
+
+The fix is two lines and one seam:
+
+```js
+const peakValue = Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : null   // published reading
+const axisPeak = peakValue ?? 0                                                        // geometry only
+const axisMax = niceCeiling(axisPeak)
+```
+
+and the peak marker's guard became `peakValue !== null && leaderSeries.peak !== null && Math.abs(…) < 1e-9`, so the `null`
+cannot be coerced in a subtraction — that coercion *is* the "null arithmetic flowing into axis calculations" the brief
+forbids. `peak.display` is still keyed on `axisPeak > 0`, i.e. byte-identical to the old expression for every input, so
+an unavailable peak still prints `—` and a zero peak still prints `—`: the distinction lives in the field, not in the
+pixels.
+
+Two existing assertions were updated (`test/curve-rate-publication.test.js`, `test/phase94-regressions.test.js` §16, both
+of which encoded `view.peak.value === 0`), and one new test was added — `§16b`, which renders one settled turn through
+`curveTree` twice with only `curve.peakTps` moved between `null` and `0` and asserts `assert.deepEqual` on the two element
+trees. That is the no-visual-change proof rather than a claim about it. The new test also asserts `view.peak.value === null`,
+`display === DASH`, `peak.x === null`, `peak.y === null`, a finite positive `axis.max`, and that no surviving marker is
+relabelled `isPeak`.
+
+The change is visible on the real machine and was measured there: the tool-first turn below publishes `peakTps: null`, and
+the expanded card renders `峰值 —`, `axis-max 1`, no `dsh-tpm-peak-dot`, and `aria-label "吞吐曲线 · 峰值 — tokens/s"`.
+Before this round that same card carried `峰值 —` too (the display never changed) but the view model's `peak.value` was
+`0`, which is exactly the conflation the fix removes.
+
+### 2. Terminal terminology (unchanged from the brief)
+
+The **external DSH 0.2.0 wire/stream contract is UNCHANGED**. What Phase 9.4 extended is the **internal normalized adapter
+output**, which now carries durable `firstTokenMs` evidence. That extension was kept, and it is not a DSH contract
+migration.
+
+### 3. Isolated environment — source-verified, never a protected profile
+
+Read-only inventory at task start:
+
+| Item | Measured |
+| --- | --- |
+| `3080` | **PID 21088**, `node …/dsh/lib/bin.js web --no-open`, profile `web` |
+| `19387` | **PID 46308**, `DeepSeek Harness.exe … profiles\desktop`, profile `desktop` (the operator's live GUI) |
+| operator Chrome | PID 43176 — never attached to, never navigated |
+
+Both instances, both profiles and both ports were the protected set. The only interaction permitted with them was
+read-only process and directory discovery.
+
+The disposable profile was created with
+`dsh tpm-phase941-runtime --from-default-profile web --dump-config`, the same source-verified mechanism the previous round
+used: `initializeProfileFromDefault` (`dsh-app-boot/lib/index.js`) copies only the **shipped template's bundle list** and
+never reads `profiles\web`, and `mkdirSync` throws `EEXIST` so an existing profile can never be merged. Nothing was copied
+from any protected profile.
+
+```text
+profile name : tpm-phase941-runtime
+profile path : C:\Users\20659\.dsh\profiles\tpm-phase941-runtime
+identity     : dsh-profile-tpm-phase941-runtime
+port         : 19388   (bind-tested free; not in the protected port list)
+PID          : 4440    (node; the only DSH process this round started or stopped)
+cwd          : E:\Projects\DSHarness\_phase941-runtime\workspace   (a fresh, empty workspace)
+plugin form  : dsh plugin --profile tpm-phase941-runtime add E:\Projects\DSHarness\dsh-turn-performance-meter
+               → link:E:/Projects/DSHarness/dsh-turn-performance-meter, bundles auto-extended, exit 0, pnpm 11.7.0
+exemptions   : dsh plugin --profile tpm-phase941-runtime version-exemptions → {}   (no compatibility exemption)
+```
+
+The plugin's presence was proved from the isolated profile's own output rather than inferred: the served page's
+`__DSH_BOOT__` carries
+`{"id":"dsh-turn-performance-meter","url":"plugins/??dsh-turn-performance-meter/client.js&rev=e1ebfde3d92d","inject":["@deepseek-ai/dsh-api-session-controller","@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-ui-conversation"],"immediately":true}`,
+and the served bundle is the repository `client.js` (556795 bytes) plus the module server's 83-byte trailer (556878 bytes).
+Browser automation (a throwaway `--headless=new` Chrome with its own `--user-data-dir`, driven over CDP) was asserted
+against `port === 19388` **before** any navigation, and never touched 3080 or 19387.
+
+### 4. Provider route — PATH A, no credential written, none read
+
+The shipped `web` template defaults `agent-default-model` to `provider: deepseek-official`, which is exactly the route
+that failed last round with `MISSING_CREDENTIAL`. Rather than debug it, the disposable profile's own `cordis.patch.yml`
+was pointed at an **already-authorized, already-working route**:
+
+```yaml
+- id: agent-default-model
+  config: { provider: command-goat, model: deepseek/deepseek-v4.1-flash, reasoningEffort: max }
+- id: llm-pi-ai
+  config: { providers: { command-goat: { apiKeyEnv: COMMAND_GOAT_API_KEY, api: openai-completions,
+                                          baseURL: https://api.commandcode.ai/provider/v1, models: […] } } }
+```
+
+`apiKeyEnv` is a **reference**, not a secret: `resolveApiKey` (`dsh-llm-pi-ai/lib/index.js:2557-2563`) resolves it through
+the shared credentials service. The shared store `C:\Users\20659\.dsh\.credentials.yaml` was **read from, never written
+to**; no credential value was read, printed, logged, exported or copied, and none was persisted to the repository, the
+docs, the profile or any log. The route name is recorded here and the secret is not. The durable request header confirms
+the route the agent actually ran on: `{"provider":"command-goat","model":"deepseek/deepseek-v4.1-flash","reasoningEffort":"max"}`.
+
+### 5. General runtime acceptance — PASS
+
+One ordinary reasoning/output turn (`session-241feef2-…`), sampled through the DOM and read back through the plugin's own
+documented diagnostic switch (`localStorage['dsh-turn-performance-meter.debug'] = '1'`, which publishes
+`window.__dshTurnPerformanceMeter`).
+
+| Step | Observed |
+| --- | --- |
+| idle | `0` `[class*="dsh-tpm"]` nodes — no meter |
+| generation starts | live pill at `t+219 ms`: `首响应计时 0.15 s` |
+| TTFT freeze | `t+10245 ms` the pill leaves `首响应计时` and becomes `思考 ≈67.0 tokens/s`, `elapsed 10.1 s` |
+| phases | `思考` (reasoning) then `输出` (output), each with a live `≈` TPS |
+| settlement | `t+16377 ms` → collapsed card `已完成 · 思考 ≈109 tokens/s · 输出 ≈318 tokens/s · 838 tokens · 首响应 10.03 s` |
+| expand | four cells: `思考 TPS ≈109` (`5.3s · ≈580`), `输出 TPS ≈318` (`0.8s · ≈258`), `生成 Tokens 838` (`总用时 16.2s`), `首响应 10.03` (`已完成`); footer `模型调用 1 · 已完成` |
+| curve | `viewBox "0 0 100 48"`, `preserveAspectRatio none`, `aria-hidden true`, 2 paths (reasoning + output), legend `思考 / 输出`, `峰值 ≈318 tokens/s`, axis max `500`, peak dot on the 318 vertex |
+| reload | card progress string **identical** before and after `Page.reload`: `已完成 · 思考 ≈109 tokens/s · 输出 ≈318 tokens/s · 838 tokens · 首响应 10.03 s` |
+| console | **zero** console errors, warnings or uncaught exceptions across the whole run |
+
+### 6. Bug A — TTFT boundary: the exact wire shape WAS observed
+
+Five successful turns were run; the tool-first prompt was
+`严格要求：不要输出任何开场白…你的第一个动作必须是一次工具调用——用 read 工具读取 sample-note.txt`, and the wire
+was captured from the DSH client's own WebSocket (`/api/remote.mux`) rather than inferred from the UI.
+
+Three of the four tool-first trials (`session-b384721e-…`, and turns 1 and 3 of `session-082e3be0-…`) produced the ideal
+shape as the **first chunk a token-delta rule accepts**:
+
+```text
+idx 0  block-start      blockType=tool-call                      ← not token evidence
+idx 1  tool-call-delta  name=read  argumentsDelta=""             ← FIRST token evidence
+idx 2  tool-call-delta  name=read  argumentsDelta="{"            ← argument mass starts here
+```
+
+`chunks strictly before it: 1` — the `block-start`. There is no reasoning delta and no text delta ahead of it. The freeze
+instant matches the boundary to within sampling resolution: the boundary's wire time is `1790845602051`, the prompt was
+sent at `1790845597670` (4381 ms), and the settled `ttftMs` is **4376 ms**. The UI left `首响应计时` at the same instant
+and entered the tool stage (`等待模型`), the tool ran (`tools.names ["read"]`, `completedCount 1`, `workMs 10`, footer
+`工具 1 · 0.0s · 模型调用 2`), the follow-up attempt produced the file's second line, and the next turn worked.
+
+**No TPS token mass was fabricated.** The name-only delta carries `argumentsDelta: ""`, contributes no text, and the curve
+publishes nothing from it: this turn's `curve.peakTps` is `null`, `peakProvenance` is `null`, and every vertex is withheld
+with a named reason (`opening-anchor`, `below-elapsed-horizon`). The rendered curve therefore has `0` paths, `峰值 —`,
+axis max `1`, and no peak dot — a chart that claims nothing.
+
+Two honest notes on this turn. First, the fourth tool-first trial (`session-082e3be0` turn 2) was **reasoning-first**: its
+TTFT froze at 13.746 s on a reasoning delta, so the exact name-only boundary was not its *first* token evidence; it is
+counted as an early-tool turn, not as a boundary observation. Second, the class of the exact boundary is additionally
+covered deterministically by `test/phase94-regressions.test.js` §9 A/B and `test/ttft-boundary.test.js`, which were proven
+red on released v0.1.2.
+
+One observation is recorded without action because it is out of this round's scope: for the 16 ms output phase of
+`session-b384721e` the **summary** cell printed `输出 ≈3,500 tokens/s` (56 tokens over a 16 ms phase) while the
+**published curve peak** was correctly unavailable (`峰值 —`). The summary rate is the phase average and the peak is the
+gated series maximum; that is the pre-existing v0.1.2 arithmetic, which this round was required not to change, and it is
+not a §12 escalation because no peak was published at all.
+
+### 7. Bug B — real peak provenance from a substantial turn
+
+`session-41819f3d-…`: a three-step task (glob → read → ~600-character written answer), `3,644` generated tokens, tools
+`["glob","read"]`, three model attempts, 33.5 s.
+
+| Quantity | Measured |
+| --- | --- |
+| reasoning TPS | `130.93` |
+| output TPS | `189.69` |
+| generated tokens | `3,644` |
+| TTFT | `2,686 ms` (`2.69 s` rendered) |
+| peak TPS | `453`  (card `峰值 ≈453 tokens/s`, axis max `500`) |
+
+Debug peak provenance, read from the settled snapshot:
+
+| Field | Value |
+| --- | --- |
+| `attemptId` | `session-41819f3d-…:3` |
+| `phase` | `reasoning` |
+| `episodeStartMs` | `0` |
+| `pointTimeMs` | `439` |
+| `elapsedMs` | **`100`**  (≥ 100 ✔) |
+| `episodeSampleCount` | **`15`**  (≥ 3 ✔) |
+| `episodeMass` | `45.254…` |
+| `tps` | `453` |
+| `sampleQuality` | `calibrated` |
+| `temporalAllocationMode` | `total-anchored` |
+| `contributingSampleTimes` | `[0,0,0,1,1,1,1,1,1,2,2,23,23,23,24]` (15 entries, matching the count) |
+
+The winning vertex is the episode's **first publishable** vertex — at `elapsed 100 ms`, not at the withheld opening anchor,
+which sits at `localMs 0 / elapsed 0 / tps null / reason opening-anchor`. No geometric opening anchor won, no hard clamp
+was introduced anywhere in the estimator, and `renderBudget` reports `allocated 209 / lineVertices 203 / markers 1 /
+elementPoints 204 / degradedRuns 0 / peakRetained true`.
+
+**§12 high-peak escalation did not trigger.** `peak / max(phase average)` is `1.00` and `2.39` on the two graded turns,
+`0.92` on the replication trial and undefined on the turn with no published peak. The highest is `2.39 ×`, far below the
+`10 ×` threshold, so no escalation inspection was required and none was invented.
+
+### 8. The original failure classes are gone — invariant scan
+
+Every published and withheld vertex of every settled turn on the isolated host was scanned:
+
+```text
+TOTAL published vertices : 264
+TOTAL withheld vertices  : 11
+§13 VIOLATIONS           : 0
+```
+
+No published vertex used `elapsed < 100 ms` or `episodeSampleCount < 3`; every withheld vertex carried a named
+`rateUnavailableReason` (`opening-anchor`, `below-elapsed-horizon`), none was published as a fabricated `0`. On the Bug A
+side no successful turn remained at `首响应计时` after a token boundary had been delivered — the pill left it at the
+boundary in every trial, including the `2,686 ms` and `12,538 ms` ones.
+
+### 9. Protected environment — containment, measured and attributed
+
+Read-only post-check after all testing:
+
+| Claim | Measurement |
+| --- | --- |
+| same protected profiles exist | `profiles\web`, `profiles\desktop` both present |
+| test ports never used | 3080 and 19387 were never a test target; only 19388 and the throwaway CDP port 9223 were |
+| not restarted | PID 21088 still owns 3080, PID 46308 still owns 19387 — same processes, same ports, throughout |
+| plugin installation did not touch them | the only profile whose `package.json` gained the link is `tpm-phase941-runtime`; `profiles\web` shows **0 files written after task start** |
+| no sessions created inside them | the operator's repo workspace bucket `--E-…-dsh-turn-performance-meter--` gained **0** sessions |
+
+One thing is reported rather than glossed. `profiles\desktop` shows **8 files written after task start**, and they are
+**not** this task's:
+
+- `.plugin-manager\logs\operation-wwJOyE\pnpm.log` (02:10:12) and `operation-eIzAnO\pnpm.log` (02:10:53) record two
+  attempts to install **`dsh-mail-notify@0.4.0`**, both rejected — `incompatible with dsh 0.2.0-rc.2`, followed by
+  `dsh: restored package.json, pnpm-lock.yaml, and node_modules`, i.e. both rolled back; and
+- `cordis.patch.yml` (02:12:24) was rewritten with `web-ui-pet`, `permission` and `subagent` rows that are absent from the
+  copy read at 01:50 — GUI-settings rows for the operator's own Desktop app.
+
+Every profile-scoped command this task issued named `--profile tpm-phase941-runtime`; none named `web` or `desktop`, and
+neither an unrelated plugin install nor a settings-sync rewrite can be produced by any command recorded above. The
+containment claim is therefore exact: **no write to a protected profile was performed by this task**, `profiles\web` was
+measured untouched, and the operator's own live instance was independently writing to `profiles\desktop` on its own.
+
+A second, smaller shared-state artifact is recorded: one blank session, `session-b78871ec-…`, was created in the shared
+`--E-…-dsh-mail-notify--` workspace bucket at 01:48, because the web client's composer still pointed at the previously
+selected workspace before its chip was moved to the isolated one. It is not inside a protected profile and it is left in
+place, because §15 authorises removal only of the disposable profile.
+
+### 10. Cleanup
+
+The isolated host (PID `4440`) and the throwaway headless Chrome (PID `42468`, verified by its
+`--user-data-dir=…\_phase941-runtime\chrome-profile`) were stopped and nothing else; the operator's Chrome (PID 43176) and
+both DSH instances were left running, and no broad process-kill command was issued at any point. The disposable profile
+was removed only after `Resolve-Path` and its `package.json` identity (`dsh-profile-tpm-phase941-runtime`) were verified
+against the literal path `C:\Users\20659\.dsh\profiles\tpm-phase941-runtime` — no wildcard, no computed path. The retained
+`tpm-phase94-isolated` profile was independently confirmed **not running** and left untouched, which §15 permits.
+
+### 11. Gates at the change set being committed
+
+```text
+npm run build:client             client.js rebuilt (556795 bytes, mirrored to lib/client.js)
+npm run verify                   structure OK; tests 805 · pass 805 · fail 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
+git diff --check                 clean
+```
+
+The baseline was 804 pass; this round adds one test (§16b) and updates two assertions, with no test skipped, todo'd or
+deleted and no tolerance widened. `package.json` remains version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`; nothing
+was published, versioned, tagged or released.

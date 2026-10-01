@@ -1293,18 +1293,23 @@ recovering an uncommitted implementation from the working tree and auditing it a
 - [x] **Containment verified:** read-only before/after snapshots show `profiles\web` (7441 files) and `profiles\desktop`
       (3129 files) at **0 added / 0 removed / 0 changed**; both protected PIDs still alive on their own ports; protected
       ports never used by the test; no global process kill at any point.
-- [ ] **BLOCKED — §22 real-machine TTFT test and §23 real-machine long-turn TPS test: NOT OBSERVED.** The turn failed
-      before any model output with `MISSING_CREDENTIAL`: `llm-deepseek: no API key for provider route "deepseek-official"`.
-      `DEEPSEEK_API_KEY` is absent from the environment (this shell's and both live instances') and absent from the shared
-      `.credentials.yaml`, which holds only `COMMAND_GOAT_API_KEY`, `CPA_API_KEY` and `COMMANDCODE_API_KEY`. §18 permits
-      *reading* the shared store but forbids modifying credentials, so no key was written, exported or copied from a
-      protected profile and no workaround was attempted. **The phase is reported BLOCKED, not PASS.** Deterministic
-      coverage exercises the same entry points and every regression in it was proven red on v0.1.2, but that is a partial
-      substitute and is not claimed as end-to-end verification.
-- [ ] **Isolated profile retained, not deleted.** §26 authorises removal of the disposable profile, but it also says that
-      where there is any uncertainty about the delete path, leaving one disposable profile is preferable to risking user
-      data. With the real-machine half still outstanding, the profile and its evidence are kept for the resumed run; the
-      isolated host process is stopped so it consumes nothing.
+- [x] **RESOLVED in Phase 9.4.1 — §22 real-machine TTFT test and §23 real-machine long-turn TPS test: OBSERVED.** A **new**
+      disposable profile `tpm-phase941-runtime` (port `19388`, PID `4440`, fresh workspace, no compatibility exemption)
+      ran the same plugin against the already-authorized `command-goat` route selected by `apiKeyEnv` **reference** — the
+      shared credential store was read, never written, and no secret was read, printed or persisted. Six real turns ran
+      through `dsh 0.2.0-rc.2`. **Bug A:** three tool-first trials produced the exact ideal wire shape as the first chunk
+      `isTokenDelta` accepts — `tool-call-delta`, `name: "read"`, `argumentsDelta: ""`, preceded only by a
+      `block-start(blockType: "tool-call")`; TTFT froze at that instant (`ttftMs 4376` vs a boundary 4381 ms after send),
+      the UI left `首响应计时`, the tool ran, the follow-up answered, the next turn worked, and the turn published **no**
+      peak rather than a fabricated one. **Bug B:** on a 3,644-token three-attempt turn the peak `453` carries
+      `elapsedMs 100`, `episodeSampleCount 15`, `phase reasoning`, `sampleQuality calibrated` and 15
+      `contributingSampleTimes`; no opening anchor won and no clamp exists. A full §13 scan over **264 published / 11
+      withheld** vertices found **0 violations**. Peak/phase-average ratios were `1.00`, `2.39`, `0.92` — no §12
+      escalation. Zero console errors. See `docs/IMPLEMENTATION_LOG.md` Phase 9.4.1 §5–§8.
+- [x] **Disposable profile removed; the retained one left in place.** The previous round's blocker is gone, so there was
+      nothing left to resume: `tpm-phase941-runtime` was deleted after `Resolve-Path` and its `package.json` identity
+      (`dsh-profile-tpm-phase941-runtime`) were verified against the literal path, with no wildcard. The earlier
+      `tpm-phase94-isolated` profile was independently confirmed **not running** and left untouched, which §15 permits.
 
 **Gates, documentation and Git.**
 
@@ -1326,3 +1331,71 @@ directories measured unchanged; and no v0.1.3 publication of any kind.
 the disposable profile does not have. The operator can unblock them by storing `DEEPSEEK_API_KEY` through the DSH
 credentials service (or exporting it into the isolated launch environment); the isolated profile `tpm-phase94-isolated` is
 retained so the run can resume without rebuilding the environment.
+
+---
+
+## Phase 9.4.1 — Isolated runtime acceptance closure (2026-10-01)
+
+Phase 9.4's implementation is accepted as-is and was not redesigned; this round closed one view-model semantic gap, obtained
+the real-machine evidence Phase 9.4 was blocked on, and determined release readiness. The previous provider/API failure was
+out of scope and was neither diagnosed nor repaired.
+
+**View-model hygiene.**
+
+- [x] **`curveViewModel.peak.value` no longer conflates "unavailable" with "measured zero".** It is
+      `Number.isFinite(curve.peakTps) ? Math.max(0, curve.peakTps) : null`; the axis geometry takes the `null` at exactly
+      one seam (`const axisPeak = peakValue ?? 0`) so no `null` reaches a quotient, a ratio or a comparison, and the peak
+      marker's guard short-circuits on `peakValue === null` before the subtraction that would coerce it.
+- [x] **No visual difference, proven rather than asserted.** `peak.display` keeps its `axisPeak > 0` test, so the em dash
+      and every rendered element are unchanged. New test `§16b` in `test/phase94-regressions.test.js` renders one settled
+      turn through `curveTree` twice with only `curve.peakTps` moved between `null` and `0` and asserts `assert.deepEqual`
+      on the two element trees; it also pins `peak.value === null`, `display === DASH`, `peak.x/y === null`, a finite
+      positive `axis.max`, and `isPeak === false` on every marker.
+- [x] **Two assertions that encoded the old semantics updated** (`test/curve-rate-publication.test.js`,
+      `test/phase94-regressions.test.js` §16), with the axis-validity and no-fabricated-marker proofs added beside them.
+- [x] **Confirmed on the real machine:** the tool-first turn rendered `峰值 —`, `axis-max 1`, no `dsh-tpm-peak-dot`, and
+      `aria-label "吞吐曲线 · 峰值 — tokens/s"`.
+
+**Real-machine acceptance, in a new disposable profile only.**
+
+- [x] **Running DSH instances inventoried read-only first** — PID `21088` on `3080` (`web`) and PID `46308` on `19387`
+      (`desktop`, the operator's live GUI) plus the operator's Chrome PID `43176` — and treated as the protected set. None
+      was installed into, restarted, signalled, or attached to.
+- [x] **A genuinely separate profile**: `tpm-phase941-runtime` created via the source-verified
+      `--from-default-profile web --dump-config`, own directory, own identity, own unused port `19388`, fresh workspace,
+      plugin linked only there, `version-exemptions` empty. Nothing copied from any protected profile.
+- [x] **PATH A credential policy honoured**: the already-authorized `command-goat` route selected *by reference*
+      (`apiKeyEnv: COMMAND_GOAT_API_KEY`). The shared store was read, never written; no credential value was read, printed,
+      logged, exported or persisted; no credential was copied from a protected profile.
+- [x] **General runtime PASS** — idle/no-meter, live pill, TTFT freeze, both phases, collapsed card, expanded summary,
+      curve, reload reconstruction (identical progress string), zero console errors.
+- [x] **Bug A PASS with the exact boundary observed** — `tool-call-delta` / `name: "read"` / `argumentsDelta: ""` as the
+      first chunk `isTokenDelta` accepts, in three trials; TTFT froze there, the UI left `首响应计时`, the tool ran, and no
+      TPS mass was fabricated.
+- [x] **Bug B PASS** — real peak `453` with `elapsedMs 100`, `episodeSampleCount 15`, `total-anchored`, `calibrated`; no
+      opening anchor; no clamp; peak/phase-average ratios `1.00` / `2.39` / `0.92`, so no §12 escalation.
+- [x] **§13 invariants hold** — 264 published and 11 withheld vertices scanned, **0 violations**, every withheld vertex
+      named.
+- [x] **Containment measured and attributed** — `profiles\web` 0 files written after task start; the operator's two
+      instances alive on their own ports throughout; the 8 files `profiles\desktop` did gain are its own plugin-manager's
+      two rejected `dsh-mail-notify@0.4.0` installs (both rolled back) plus a GUI-settings rewrite, which no command this
+      task issued could produce. One blank session in the shared `dsh-mail-notify` workspace bucket is reported and left
+      in place.
+
+**Gates, documentation and Git.**
+
+- [x] `npm run build:client`, `npm run verify` (**805 pass, 0 fail, 0 skipped, 0 todo**), `node scripts/verify-sanitization.mjs`,
+      `git diff --check`; `client.js` mirrored to `lib/client.js`.
+- [x] `docs/IMPLEMENTATION_LOG.md`, `docs/TEST_PLAN.md`, `docs/TASKS.md` and `docs/METRICS_SPEC.md` updated; historical
+      evidence not rewritten.
+- [x] **Version frozen at `0.1.2`** with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No `npm publish`, no `npm version`, no
+      `v0.1.3` tag, no GitHub Release.
+- [x] **Ordinary pushes only.** No `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`.
+
+Acceptance gate: `peak.value` distinguishes unavailable from measured zero with no visual change; the general runtime path is
+intact; Bug A's exact name-only boundary observed on the real provider stream with TTFT freezing there and no fabricated
+mass; Bug B's real peak carries ≥100 ms, ≥3 samples and full provenance with no clamp and no escalation; §13 invariants
+clean; the operator's environment never used as a test target, never restarted and measured untouched where measurable;
+0 failing tests; sanitization PASS; `git diff --check` clean; and no v0.1.3 publication of any kind.
+
+**Recommendation: READY FOR v0.1.3 RELEASE REVIEW.**
