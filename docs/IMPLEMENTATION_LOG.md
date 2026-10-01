@@ -5042,3 +5042,190 @@ git diff --check                 clean
 The baseline was 804 pass; this round adds one test (§16b) and updates two assertions, with no test skipped, todo'd or
 deleted and no tolerance widened. `package.json` remains version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`; nothing
 was published, versioned, tagged or released.
+
+## Phase 9.4.2 — Boundary-only TTFT evidence / TPS episode-origin parity closure (2026-10-01)
+
+Phase 9.4.1's real-machine acceptance stands for everything it observed (Bug A's exact name-bearing empty-arguments
+boundary freezing TTFT and leaving `首响应计时`; Bug B's publication gates; `peak.value === null` for an unavailable peak).
+Neither of those repairs was redesigned. This round closes one source-level defect found by independent review after
+9.4.1: a **boundary-only** first-token event started the live TPS episode clock, so the live pill and the completed curve
+used different denominator origins for the same phase episode.
+
+### 1. Starting state (verified before any write)
+
+```text
+git fetch origin; git status --short    (clean)
+HEAD             6506bd0cc8f9ef348eb7cf6418db60d5ad98f6dc
+origin/main      6506bd0cc8f9ef348eb7cf6418db60d5ad98f6dc
+divergence       0       0
+```
+
+### 2. The defect, measured before the fix (not quoted from the audit)
+
+A scratch probe (`dev/scratch/phase942-probe.mjs`, git-ignored) drove the phase brief's fixture through the real
+store/live/curve path — `TurnTelemetryStore.beginTurn/beginAttempt/acceptChunk` → `liveSnapshot` → `settleAttempt/
+endTurn` → `settled.curve` — with turn start `t = 0`, a name-bearing empty-arguments `tool-call-delta` at `t = 100`, and
+three 100-token output samples at `t = 200 / 250 / 300`. Measured on `6506bd0`:
+
+| observation | baseline `6506bd0` | after the fix |
+| --- | --- | --- |
+| live episode origin (`LiveMeter.episodeStartMs`) | `100` (the boundary) | `200` (the first sample) |
+| live episode elapsed at `t = 300` | `200` | `100` |
+| live mass / sample count | `300` / `3` | `300` / `3` |
+| **live TPS at `t = 300`** | **`1500`** | **`3000`** |
+| completed episode origin (curve, absolute) | `200` | `200` |
+| completed elapsed / mass / count | `100` / `300` / `3` | `100` / `300` / `3` |
+| **completed TPS at the `t = 300` vertex** | **`3000`** | **`3000`** |
+| `curve.peakTps` | `3000` | `3000` |
+
+The live episode's `/1000` quotient was correct arithmetic over the wrong interval: the boundary at `100` is a TTFT
+instant the completed curve never sees, because the curve opens an episode at its first sample.
+
+### 3. Root cause
+
+`LiveMeter.observeTokenBoundary` — the method Phase 9.4 added for the one chunk shape that is a first token while
+carrying no magnitude — established the episode *and its clock*:
+
+```js
+if (nextPhase !== null && (nextPhase !== this.streamingPhase || this.episodeStartMs === null)) {
+  this.streamingPhase = nextPhase
+  this.episodeStartMs = timeMs                 // <- a boundary instant became a denominator origin
+  this.episodeTokenMass = 0
+  this.episodeSampleCount = 0
+  this.episodeUsageBaseline = this.usageBaselineFor(nextPhase)   // <- and the numerator's origin with it
+}
+```
+
+Two invariants broke at once. The live denominator origin became an instant the completed estimator cannot represent
+(`compressAttempts` gives an attempt's local zero to its first generated sample; `cumulativePhaseTpsSeries` opens each
+episode at `filtered[startIndex].activeTimeMs`), and `episodeUsageBaseline` was captured at that same boundary instant,
+so the provider-counter numerator — `counter - baseline` — measured an interval the denominator did not describe. The
+TTFT boundary, the magnitude sample and the TPS episode origin are three facts, and the method collapsed them into one.
+
+### 4. The change
+
+One method, and only its episode handling (`src/core/live-metrics.js`). `acceptSample` remains the **only** writer of
+`episodeStartMs`, `episodeTokenMass`, `episodeSampleCount` and `episodeUsageBaseline`:
+
+```js
+if (nextPhase !== null && nextPhase !== this.streamingPhase) {
+  this.streamingPhase = nextPhase     // the phase identity is established immediately
+  this.episodeStartMs = null          // no TPS episode clock is started
+  this.episodeTokenMass = 0
+  this.episodeSampleCount = 0
+  this.episodeUsageBaseline = null    // and no counter baseline is attached to a boundary
+}
+```
+
+- `acceptSample` already opened an episode when `episodeStartMs === null`, so a phase announced by a boundary is now
+  *backed* by the first magnitude sample that arrives: origin = that sample's instant, mass = its weight, count = 1,
+  baseline = `usageBaselineFor(phase)` evaluated at that instant.
+- The `|| this.episodeStartMs === null` half of `acceptSample`'s open condition is what carries the new state, which is
+  why it was left exactly as it was and merely re-documented.
+- A **same-phase** boundary inside an already magnitude-open episode now changes nothing at all (the condition is a pure
+  phase comparison), which is the required behaviour: an origin, a numerator and a sample count established by real
+  samples are not reset by boundary evidence.
+
+Behavioural consequences of the new state, all asserted:
+
+| state | before | after |
+| --- | --- | --- |
+| boundary-only, before any magnitude | `episodeStartMs = boundary`, `episodeElapsedMs` advanced, `episodeSampleCount 0` | `episodeStartMs = null`, `episodeElapsedMs = null`, `episodeSampleCount 0` |
+| `snapshot.tps` in that state | `null` (gated) | `null` (no episode at all) |
+| `snapshot.rateGateReason` in that state | `no-episode` | `null` — no episode exists to gate |
+| first-output guard in that state | could fire from the boundary instant | cannot fire: there is no episode to stand in for |
+| phase identity | immediate | immediate (unchanged) |
+| TTFT | frozen at the boundary | frozen at the boundary (unchanged) |
+
+### 5. Provider-counter baseline semantics after the fix (§4 of the brief)
+
+The baseline is now taken where the denominator origin is, and the three audited orderings resolve as follows.
+
+- **A. No usage known at the boundary, usage before the first magnitude sample.** The first magnitude sample opens the
+  episode and takes that usage as its baseline. `test/boundary-episode-origin.test.js` CASE E1 drives exactly this
+  (`outputTotal 600` known before the sample, `630` after) and asserts `episodeUsageBaseline === {phase:'output',
+  counter:600}`, `episodeMass() === {mass:30, source:'provider-counter'}` and `tps === 300` over the episode's own
+  100 ms. On `6506bd0` the same fixture could not take a baseline at all (the boundary had already opened the episode
+  with none, and `observeUsage` deliberately never explains an episode retroactively) and read `1667` from shape mass.
+- **B. Usage already known before the boundary.** The pre-boundary snapshot is *not* the baseline; the snapshot known at
+  the magnitude origin is. CASE E2 runs output → reasoning → boundary → output with counters known throughout: the
+  boundary's `outputTotal 600` is not used, the episode that opens at 400 ms takes `660`, and the published rate is
+  `10 counter tokens / 100 ms = 100`. On `6506bd0` the boundary took `600` and the numerator then spanned `[320, 500]`
+  as `70` tokens, publishing `389` over an interval the curve never measures.
+- **C. Usage becomes known between the boundary and the first magnitude sample.** The counter used at the real episode
+  start is the latest snapshot observed **at or before** that instant — in E1, `600`. The reason is stated rather than
+  assumed: counters are cumulative and only ever replaced by a newer chunk, so the value held when the episode opens was
+  never observed after the origin; the later snapshot is a *newer* observation and using it as the baseline would make
+  the numerator start after the denominator; and no value is interpolated to the origin, because that would fabricate an
+  observation the provider never made. This is the same policy `acceptSample` has always applied to any episode that
+  opens while counters are known — it is now applied at the episode's real origin instead of at a boundary.
+- **Unchanged:** a usage chunk arriving *inside* an open episode still never explains it retroactively (CASE E3), and a
+  contradicted split still falls back to shape mass (§8.3.1).
+
+### 6. Phase transitions, the first-output guard, attempts
+
+- **Phase transition.** A boundary-only event that is a genuine phase change updates the identity immediately, discards
+  the previous phase's episode rather than bridging it, and starts no new clock. CASE C asserts the reasoning episode's
+  `300 tokens / 100 ms` is not carried into the output episode (which reads `3000`, not `6000`).
+- **First-output guard, audited because it depends on `episodeStartMs`.** `publishedRate` requires
+  `episodeStartMs !== null`, so with no episode open the guard cannot fire: the reasoning rate is **not** extended across
+  a phase that has produced nothing, which is what §3 of the brief requires (`publishable rate = null`). The guard is
+  preserved, anchored at the output episode's own origin: CASE C2 asserts it applies 950 ms after the first output
+  magnitude sample and is gone one millisecond past `FIRST_OUTPUT_GUARD_MS`. The window moved with the episode rather
+  than with the boundary, which is the only reading consistent with "the first second of a fresh output episode".
+- **Attempt boundaries.** Unchanged and re-proved: `attemptStarted` clears the episode, the numerator, the sample count,
+  the provider baseline and the guard, while turn TTFT stays frozen (CASE F). A boundary in the *new* attempt opens no
+  clock either.
+- **Tool and turn boundaries.** Unchanged (`clearEpisode` already emptied all four fields).
+
+### 7. The completed curve required no change
+
+The curve was not touched, because the source already has the right origin: `compressAttempts` sets an attempt's local
+zero to its first generated sample (`src/core/time-axis.js`), and `cumulativePhaseTpsSeries` opens each maximal same-phase
+run at `filtered[startIndex].activeTimeMs` (`src/core/curve.js`). A boundary-only delta produces no sample at all
+(`sampleFromChunk` → `null`, `attempt.samples` untouched), so it never reached the curve. The defect was one-sided and it
+is repaired on the one side that had it. After the fix the live measurement at `t = 300` and the completed vertex at
+`t = 300` were confirmed to carry the same episode facts — origin `200`, elapsed `100`, count `3`, mass `300`,
+TPS `3000` — with the curve's published peak unchanged at `3000`.
+
+### 8. Regression matrix and its baseline proof
+
+`test/boundary-episode-origin.test.js` (12 tests) drives the host/store/live/curve path and the real controller. It was
+executed against a read-only `git worktree` checked out at `6506bd0` (created and removed for this measurement; the
+working tree was never reset, stashed or checked out) before the fix was written:
+
+```text
+baseline 6506bd0 : tests 12 · pass 4 · fail 8
+fixed tree       : tests 12 · pass 12 · fail 0
+```
+
+The eight baseline failures are CASE A, B, C, C2, E1, E2, F and the controller-level A/C test. The four that pass on
+both trees are **controls**, deliberately labelled in the file: CASE D (a same-phase boundary must not reset an active
+episode), CASE E3 (an episode that opened with no counters keeps its shape mass), CASE G (`MIN_RATE_SAMPLES = 3`,
+`MIN_RATE_ELAPSED_MS = 100`, and the §16 CASE 6 `299 ms` fixture still peaking at `2000`, not `500 000`) and CASE H
+(`curve.peakTps` `null` ⇒ `peak.value` `null` ⇒ `峰值 —`). They are not counted as coverage of this defect.
+
+### 9. Documentation
+
+`docs/METRICS_SPEC.md` §4 now states the two origins as an explicit pair and states that a boundary-only delta
+establishes the former and the phase identity while establishing neither the magnitude nor the episode origin; §6 defines
+the episode clock as the first magnitude sample and bounds the first-output guard to that clock; §6.1 makes the
+provider-counter baseline part of the same invariant; §8.2 names the shared origin and the fixture that proves parity.
+`docs/TEST_PLAN.md` §13 carries the matrix and the baseline result, `docs/TASKS.md` carries the phase closeout, and
+`docs/DIRECTORY_TREE.md` lists the new test file. Historical Phase 9.4 / 9.4.1 evidence was not rewritten.
+
+### 10. Gates at the change set being committed
+
+```text
+npm run build:client             client.js rebuilt (558994 bytes, mirrored to lib/client.js)
+npm run verify                   structure OK; tests 817 · pass 817 · fail 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
+git diff --check                 clean
+client.js == lib/client.js       byte-identical
+```
+
+The suite stood at 805 tests before this round and stands at 817 after it; no test was skipped, todo'd or deleted and no
+tolerance was widened. `package.json` remains version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. **No
+real-machine run happened in this phase** by design: no DSH profile was started, stopped, attached to or installed into,
+the retained `tpm-phase94-isolated` profile was not touched, and no browser/runtime acceptance was repeated. Nothing was
+published, versioned, tagged or released.

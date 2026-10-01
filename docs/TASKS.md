@@ -1399,3 +1399,68 @@ clean; the operator's environment never used as a test target, never restarted a
 0 failing tests; sanitization PASS; `git diff --check` clean; and no v0.1.3 publication of any kind.
 
 **Recommendation: READY FOR v0.1.3 RELEASE REVIEW.**
+
+## Phase 9.4.2 — Boundary-only TTFT evidence / TPS episode-origin parity closure (2026-10-01)
+
+One narrowly scoped source-level defect found by independent review after Phase 9.4.1. Phase 9.4.1's real-machine
+acceptance remains valid for what it observed (Bug A's name-bearing empty-arguments boundary, Bug B's rate-publication
+gates, and the `null` unavailable-peak semantics); none of those repairs was redesigned. This phase is a deterministic
+source-contract closure: **no DSH profile was started, stopped, attached to or installed into, no browser/runtime
+acceptance was repeated, and the retained `tpm-phase94-isolated` profile was not touched.**
+
+**Baseline and starting state.**
+
+- [x] `git fetch origin`; `HEAD == origin/main == 6506bd0cc8f9ef348eb7cf6418db60d5ad98f6dc`; divergence `0 0`; working
+      tree clean. No history was repaired, amended, rebased or forced at any point.
+
+**The defect, reproduced before it was repaired.**
+
+- [x] The brief's fixture (turn start `0`, name-only empty-arguments `tool-call-delta` at `100`, 100-token output samples
+      at `200 / 250 / 300`) was driven through the real store/live/curve path and **measured** on `6506bd0`: live
+      `origin 100 / elapsed 200 / TPS 1500` against the curve's `origin 200 / elapsed 100 / TPS 3000`.
+- [x] Root cause: `LiveMeter.observeTokenBoundary` set `episodeStartMs` (and `episodeUsageBaseline`) at the boundary
+      instant, so a TTFT boundary that carries no magnitude became the sample-based denominator origin — and the
+      provider-counter numerator's origin with it.
+
+**The repair.**
+
+- [x] `src/core/live-metrics.js` only: a boundary establishes the TTFT instant and the streaming phase identity, and
+      `acceptSample` remains the sole opener of an episode (origin = the first magnitude sample, baseline taken there).
+      A same-phase boundary inside an already magnitude-open episode resets nothing.
+- [x] The first-output guard was audited because it reads `episodeStartMs`: it cannot fire before an episode exists, and
+      its window is now the output episode's own, so the reasoning rate is never extended across a phase that has
+      produced nothing.
+- [x] The completed curve, the DSH adapter and the publication gates were **not** modified: `compressAttempts` and
+      `cumulativePhaseTpsSeries` already open an episode at its first sample, so the defect was one-sided.
+- [x] Provider-counter baseline audited in all three orderings (none known / known before the boundary / known between
+      the boundary and the first sample) and the counter used at the real episode start is stated with its reason.
+- [x] No forbidden repair: no clamp, no winsorization, no EMA or moving average, no ceiling, no fabricated magnitude or
+      sample count, no fixture special-case in production code, no weakened gate.
+
+**Evidence.**
+
+- [x] New deterministic suite `test/boundary-episode-origin.test.js` (12 tests, cases A–H plus two controls and a
+      controller-level presentation case), proven **red on baseline `6506bd0`** in a disposable read-only `git worktree`
+      (12 tests: 4 pass / 8 fail) and green on the fixed tree (12 pass / 0 fail). The four baseline-passing cases are
+      labelled controls and are not counted as coverage.
+- [x] Live/completed parity after the fix: both halves report origin `200`, elapsed `100 ms`, sample count `3`, mass
+      `300`, TPS `3000` for the fixture, with `curve.peakTps` unchanged at `3000`.
+
+**Gates, documentation and Git.**
+
+- [x] `npm run build:client`, `npm run verify` (**817 pass, 0 fail, 0 skipped, 0 todo**, up from 805),
+      `node scripts/verify-sanitization.mjs`, `git diff --check`; `client.js` byte-identical to `lib/client.js`.
+- [x] `docs/METRICS_SPEC.md` (the two origins stated as a pair, the episode clock, the guard, the provider-counter
+      baseline, §8.2 parity), `docs/IMPLEMENTATION_LOG.md`, `docs/TEST_PLAN.md` §13, `docs/TASKS.md` and the test-file
+      listing in `docs/DIRECTORY_TREE.md` updated; historical evidence not rewritten.
+- [x] **Version frozen at `0.1.2`** with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No `npm publish`, no `npm version`, no
+      tag, no GitHub Release.
+- [x] **Ordinary commits only.** No `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`.
+
+Acceptance gate: `HEAD == origin/main`, divergence `0 0` and a clean tree after the push; the new suite red on `6506bd0`
+and green on the fixed tree; live and completed episode origins identical for the fixture; the provider baseline
+describing the same interval as the denominator; the Phase 9.4 gates and the unavailable-peak semantics unchanged; 0
+failing tests; sanitization PASS; `git diff --check` clean; and no version, tag or publication change.
+
+**Status: source-level closure complete; a separate narrowly scoped isolated-runtime smoke may be authorized after
+independent GitHub review. No release-readiness claim is made in this phase.**

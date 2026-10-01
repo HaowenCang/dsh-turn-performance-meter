@@ -844,3 +844,66 @@ carries the full measurements.
 `scripts/verify-structure.mjs` and then the Node test runner over `test/*.test.js`; sanitization remains a separate gate
 (`node scripts/verify-sanitization.mjs`), and it passes. `git diff --check` is clean. No test was skipped, todo'd or
 deleted, and no tolerance was widened, to reach that state.
+
+## 13. Phase 9.4.2 — boundary-only TTFT evidence vs the TPS episode clock
+
+One defect, one file. `LiveMeter.observeTokenBoundary` opened the phase episode **at the boundary instant** for a
+name-bearing empty-arguments `tool-call-delta`, so the live pill's phase-cumulative denominator ran from a TTFT instant
+the completed curve never sees (the curve opens an episode at its first sample) and `episodeUsageBaseline` was attached to
+that same wrong instant. `src/core/live-metrics.js` now establishes only the TTFT boundary and the phase identity there;
+`acceptSample` remains the sole opener of an episode. `src/core/curve.js`, `src/core/time-axis.js`, the DSH adapter and
+the publication gates were **not** modified.
+
+### 13.1 The fixture, and the pre-fix measurement
+
+```text
+turn start  t = 0
+boundary    t = 100   name-bearing tool-call-delta, argumentsDelta "", phase fallback output
+samples     t = 200 / 250 / 300   output, 100 tokens each
+```
+
+Measured through the real path (`TurnTelemetryStore` → `liveSnapshot` → `endTurn().curve`) on baseline `6506bd0` versus
+the fixed tree:
+
+| quantity | `6506bd0` live | `6506bd0` curve | fixed live | fixed curve |
+| --- | --- | --- | --- | --- |
+| episode origin | `100` | `200` | `200` | `200` |
+| elapsed at `t = 300` | `200` | `100` | `100` | `100` |
+| mass / sample count | `300` / `3` | `300` / `3` | `300` / `3` | `300` / `3` |
+| TPS at `t = 300` | `1500` | `3000` | `3000` | `3000` |
+
+The curve's coordinate is attempt-local (its zero is the first generated sample, `src/core/time-axis.js`); the test
+translates a vertex through that documented zero before comparing, and compares the two halves as equalities rather than
+as two coincidences.
+
+### 13.2 The matrix — `test/boundary-episode-origin.test.js`
+
+Every case drives the store/live/curve path or the real controller; no test constructs or mutates a `LiveMeter`.
+
+| case | proves | `6506bd0` | fixed |
+| --- | --- | --- | --- |
+| A — pure boundary | TTFT freezes, the phase identity is `output`, `episodeElapsedMs` is `null`, mass `0`, count `0`, no rate, and a boundary-only turn has no publishable vertex and a `null` peak | FAIL | PASS |
+| B — the fixture above | live and completed use one origin: `200` / `100 ms` / `3` / `300` / `3000`, asserted as four equalities plus the absolute origin | FAIL | PASS |
+| C — reasoning → boundary-only output → output | phase transition immediate, reasoning episode not bridged (`3000`, not `6000`), no output clock and no guard before the first output magnitude sample | FAIL | PASS |
+| C2 — first-output guard | the guard is anchored at the output episode's own origin: `950 ms` after the first output sample it still stands in; one millisecond past `FIRST_OUTPUT_GUARD_MS` it is gone | FAIL | PASS |
+| D — same-phase boundary inside an active episode | the origin (`200`), numerator (`300`) and sample count (`3`) are untouched, and live and curve still agree after it | PASS (control) | PASS |
+| E1 — usage known after the boundary | the first magnitude sample takes the baseline the provider contract needs (`{output, 600}`), and the numerator is a counter delta (`30`) over the episode's own `100 ms` | FAIL | PASS |
+| E2 — usage known before the boundary | the pre-boundary counter (`600`) is not the baseline; the magnitude origin takes `660`, so numerator (`10`) and denominator (`100 ms`) describe `[400, 500]` | FAIL | PASS |
+| E3 — no counters when the episode opened | unchanged policy: a usage chunk inside an episode still never explains it retroactively (shape mass kept) | PASS (control) | PASS |
+| F — retry / new attempt | the episode, numerator, count and baseline reset; a boundary in the new attempt opens no clock; turn TTFT stays frozen at `100` | FAIL | PASS |
+| G — Phase 9.4 gates | `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, and the §16 CASE 6 `299 ms` fixture still peaks at `2000` with no sub-`100 ms` denominator | PASS (control) | PASS |
+| H — unavailable peak | `curve.peakTps` `null`, `peak.value` `null`, `peak.display` `—`, no fabricated marker | PASS (control) | PASS |
+| A/C on the live path | the pill leaves `首响应计时` at the boundary, never returns, and warms from the first magnitude sample rather than 100 ms earlier | FAIL | PASS |
+
+The file was run against a read-only `git worktree` at `6506bd0` (created and removed for the measurement; the working
+tree was never reset, stashed or checked out): **12 tests, 4 pass, 8 fail** on the baseline and **12 pass, 0 fail** on the
+fixed tree. The four baseline-passing cases are controls and are labelled as such in the file; they are not counted as
+coverage of this defect.
+
+### 13.3 Totals
+
+**817 tests, 817 pass, 0 fail, 0 skipped, 0 todo** (805 before this round). `npm run verify` passes,
+`node scripts/verify-sanitization.mjs` passes, `git diff --check` is clean, `client.js` and `lib/client.js` are
+byte-identical, and `package.json` remains version `0.1.2` with peer `@deepseek-ai/dsh` `0.2.0-rc.2`. No test was
+skipped, todo'd or deleted, and no tolerance was widened, to reach that state. No real-machine run was performed in this
+phase, by design.

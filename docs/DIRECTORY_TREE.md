@@ -165,6 +165,8 @@ dsh-turn-performance-meter/
 │   │                                  50 ms denominators, warm-up, peak selection, peak provenance
 │   ├── ttft-boundary.test.js          Phase 9.4: the first-token predicate as the TTFT boundary, live vs durable
 │   ├── phase94-regressions.test.js    Phase 9.4: baseline-proven regressions for the two repaired defects
+│   ├── boundary-episode-origin.test.js Phase 9.4.2: a boundary-only first token opens no TPS episode clock; the
+│   │                                  live/completed denominator-origin parity fixture and the provider-baseline matrix
 │   ├── dsh-client-feed.test.js        SessionEventWindow wire -> normalized events
 │   ├── curve.test.js / curve-axis-endpoint / curve-stream-order /
 │   │   curve-calibration-coverage     Curve primitives: reduced arithmetic, endpoint retention, same-timestamp
@@ -194,7 +196,7 @@ test/          — landed in Phase 5 as curve-view-model.test.js and completed-i
                  added curve-peak-priority and rebaseline-generation; Phase 7C added curve-calibration,
                  curve-source, curve-total-rolling, curve-trace-matrix and curve-long-agent-visual;
                  Phase 9.4 added rate-publication, curve-rate-publication, ttft-boundary and
-                 phase94-regressions
+                 phase94-regressions; Phase 9.4.2 added boundary-episode-origin
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
                  JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
                  Phase 6 verified the *served* client bundle in the live page instead of taking

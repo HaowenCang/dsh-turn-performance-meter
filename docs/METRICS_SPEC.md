@@ -123,8 +123,29 @@ reconstruction all read it. Three consequences are normative.
 begun and its name is the evidence — while `classifyDelta` attributes no argument text to it and `sampleFromChunk`
 therefore produces no sample. The two sets are not the same set, and TTFT is measured from the predicate, not from the
 sample list. Such a delta freezes TTFT, moves the live machine out of its first-response stage, and contributes **no**
-TPS-shape mass: no magnitude is fabricated to make the numbers look complete. The live pill therefore leaves the TTFT
-stopwatch at the boundary and shows the warming counter until the episode satisfies §6's publication policy.
+TPS-shape mass: no magnitude is fabricated to make the numbers look complete. It also establishes the streaming **phase
+identity** immediately — `output`, the fallback `tokenEvidence` publishes for a boundary it cannot attribute. The live
+pill therefore leaves the TTFT stopwatch at the boundary and shows the warming presentation until the episode satisfies
+§6's publication policy.
+
+**The TTFT boundary is not the TPS episode origin (frozen in Phase 9.4.2).** Three instants are deliberately distinct,
+and conflating the first two with the third is the defect Phase 9.4.2 closes:
+
+```text
+TTFT origin:         the first chunk DSH's first-token predicate accepts
+TPS magnitude sample: a generated delta carrying a usable tokens/weight magnitude
+TPS episode origin:  the first magnitude-bearing generated sample of that phase episode
+```
+
+A boundary-only `tool-call-delta` establishes the first and the phase identity, and **not** the third. It opens no
+episode clock, holds mass `0` and sample count `0`, publishes no rate (`snapshot.tps` is `null`), and cannot arm the
+first-output guard of §6 — there is no episode for a guard to stand in for. The TPS clock starts at the first magnitude
+sample of the phase, which is also the origin the completed curve uses (§8.2), and the provider-counter baseline of §6.1
+is taken at that same instant, so the counter numerator and the elapsed denominator describe one interval. A same-phase
+boundary inside an episode that is already magnitude-open is TTFT/state evidence only: it resets no origin, no numerator
+and no sample count. A boundary that *is* a genuine phase transition ends the previous phase's episode immediately — the
+old phase's clock and numerator are never bridged into the new one — and leaves the new phase's episode unopened until
+its first magnitude sample.
 
 **A tool-call delta with neither a name nor arguments is not token evidence.** It freezes nothing and advances nothing.
 
@@ -201,6 +222,11 @@ rounded with `Math.round`, which is MiMo's observed rule (`docs/MIMO_RUNTIME_MET
 **Phase episode.** A phase episode is the maximal run of consecutive generated samples carrying one phase
 (`reasoning` or `output`) inside one model attempt. It begins at its first generated sample and ends at the first
 generated sample of another phase, or — for the terminal episode of an attempt — at that attempt's settlement.
+That first sample's instant **is** the episode's origin and the only denominator origin the estimator has: a boundary-only
+first token (§4) may announce the phase before any sample exists, and it starts neither the clock, nor the numerator, nor
+the provider-counter baseline. Until the first magnitude sample arrives the phase is known and no episode exists:
+`episodeElapsedMs` is `null`, `episodeSampleCount` is `0`, and no rate — not even the first-output fallback — is
+published.
 
 Implementation requirements:
 
@@ -225,7 +251,9 @@ Implementation requirements:
 - **first-output guard.** For the first 1000 ms of an output episode that has no valid positive rate of its own yet,
   the last positive reasoning rate is reused rather than displaying a spurious non-positive value
   (`FIRST_OUTPUT_GUARD_MS`). It never overwrites a valid positive output estimate, it expires after 1000 ms, and it
-  does not survive a tool wait, an attempt boundary or a turn boundary;
+  does not survive a tool wait, an attempt boundary or a turn boundary. The window is the **output episode's own**: it is
+  measured from the episode's origin, so a boundary-only instant neither opens it nor extends the reasoning rate across a
+  phase that has produced nothing yet (Phase 9.4.2);
 - **UI refresh target: 100 ms** (10 presentation updates/s). Phase 9.2 selected 100 ms as a *fidelity* decision:
   MiMo's metric sampling and its visible presentation are both ~100 ms. 200 ms, 50 ms (the Phase 5A winner) and 10 ms
   remain reachable through the diagnostic override. The cadence has one home,
@@ -243,9 +271,14 @@ Phase 9.2; the presentation cadence bounds *presentation* only.
    every chunk, including `usage`, and the client fold republishes it as `assistant/live-chunk`). When a usage chunk
    has been observed for the active attempt and its split is usable per the phase-evidence policy of §8.3.1, the
    episode numerator is the counter **delta since the episode started** (`counter - baseline`), where the baseline is
-   the counter snapshot taken when that episode began. A usage chunk arriving *inside* an episode never retroactively
+   the counter snapshot known when that episode's **first magnitude sample opened it** — the same instant as the
+   denominator origin, so the numerator and the denominator describe one interval, never a boundary-anchored one
+   (Phase 9.4.2). The snapshot used is the latest one observed at or before that instant: counters are cumulative and
+   only ever replaced by a newer chunk, so no value observed *after* the origin is ever used as its baseline, and no
+   value is interpolated to the origin. A usage chunk arriving *inside* an episode never retroactively
    explains it, because the counter value at the episode's start was never observed; that episode keeps its shape
-   magnitude.
+   magnitude. A usage chunk that arrives between a boundary-only first token and the first magnitude sample is
+   therefore available to the episode that sample opens.
 2. **Generated-delta shape weights.** Otherwise the numerator is the episode's accumulated `sample.tokens ??
    sample.weight` — the same evidence the project has always accepted. No client-side tokenizer is used, and
    `outputTokens + reasoningTokens` is never computed: `reasoningTokens` is already included in `outputTokens`, so the
@@ -393,6 +426,12 @@ the newest sample at or before `t`, and the mass is the calibrated/estimated mag
 before `t`. Every generated sample counts toward the episode in force — reasoning deltas, text deltas and tool-call
 argument deltas alike — which is what `LiveMeter` measures. There is no trailing window and no smoothing beyond
 `Math.round`.
+
+**The live meter and the curve use one episode origin (Phase 9.4.2).** Both open an episode at its **first magnitude
+sample**: `cumulativePhaseTpsSeries` at `episode.startMs = filtered[startIndex].activeTimeMs`, and `LiveMeter` in
+`acceptSample`. A TTFT boundary that carries no magnitude (§4) therefore consumes no width on this axis and opens no
+episode in either half — the two halves cannot disagree about the denominator of a phase episode, which is what the
+`100/200/250/300` fixture in `test/boundary-episode-origin.test.js` freezes from both sides at once.
 
 Three consequences are normative:
 
