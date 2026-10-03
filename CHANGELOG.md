@@ -7,6 +7,53 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## 0.1.3 — 2026-10-02
+
+Supported and tested against DSH `0.2.0-rc.2` only. **No support claim is made beyond DSH `0.2.0-rc.2`**, and the
+`v0.1.1` claim stays bounded to `0.1.7-rc.2`; the two are separate claims, not one range.
+
+Correctness and recovery release for DSH `0.2.0-rc.2`. It repairs how first-token evidence, phase boundaries and
+reload-time reconciliation produce live and completed numbers; it is not a redesign, and no metric definition, UI
+surface or DSH adapter contract is redefined.
+
+- **TTFT without a fabricated rate.** A name-bearing tool-call delta with empty arguments now establishes TTFT — that
+  is real model output arriving at a real time — while contributing no TPS magnitude of its own. First-token time and
+  the first magnitude sample are separate facts rather than one conflated one.
+- **A live episode starts at its first magnitude sample.** The live TPS episode's origin is that sample, not a
+  boundary-only TTFT event that may precede it, so a phase cannot open with a denominator it has no numerator for.
+- **No short-denominator spikes.** Shared publication gates keep a sub-100-ms denominator out of both the live pill and
+  the completed curve: a rate is published only over an interval the evidence can support.
+- **Unavailable stays unavailable.** Unavailable peak semantics remain `null` in the model and `—` in the card, and are
+  never replaced by a synthetic zero.
+- **A phase boundary closes, it does not open.** A non-magnitude phase boundary closes the completed outgoing phase
+  episode without opening an incoming magnitude episode, so the boundary itself is not counted as new evidence.
+- **The cut gap is preserved.** Completed curves and phase-duration summaries keep the gap between a boundary and the
+  next magnitude sample, instead of bridging it or redistributing it into the neighbouring episode.
+- **Reload reconciliation.** A mid-turn browser reload followed by durable settlement replaces partial transient stream
+  evidence with the complete durable stream; samples and cuts are **replaced**, never unioned or deduplicated by
+  heuristic.
+- **Explicit evidence authority.** Durable temporal evidence carries explicit provenance — `live`,
+  `durable-incomplete`, `durable-complete` — and an incomplete durable decode can no longer claim
+  `temporalShapeQuality = reconstructed`.
+- **Settlement diagnostics.** Settlement outcomes are classified `reconciled`, `rejected` or `uncorrelated`, so a
+  settlement that cannot be matched to held evidence is visible rather than silent.
+- **Rendering.** An absent duration renders `—`; a measured zero remains `0.00 s`.
+- **Compatibility is unchanged.** The exact peer remains `@deepseek-ai/dsh = 0.2.0-rc.2`; no other DSH version is
+  claimed or exercised by this release.
+
+Real-runtime acceptance (Phase 9.4.6) against an installed `@deepseek-ai/dsh 0.2.0-rc.2`:
+
+```text
+mid-turn browser reload:
+691 durable samples
+663 magnitude deltas observed by the browser
+completed result adopted the full durable attempt
+```
+
+Distribution is unchanged from `0.1.2`: public npm registry as the primary form, GitHub Release `.tgz` as the offline
+fallback, and a runtime-only file allowlist. The standard install command resolves this version through the `latest`
+dist-tag; `…@0.1.3` pins it.
+
 ## 0.1.2 — 2026-09-29
 
 Supported and tested against DSH `0.2.0-rc.2` only (public reference commit

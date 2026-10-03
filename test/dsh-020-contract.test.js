@@ -129,11 +129,11 @@ test('the DSH peer is pinned exactly to 0.2.0-rc.2, and the package version is t
   }
   assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
 
-  // §10: the peer migration itself never moved the version; the 0.1.2 bump
+  // §10: the peer migration itself never moved the version; the version bump
   // belongs to the release round that ships this peer, and the two must stay
   // paired so the published artifact cannot claim a runtime its version does
   // not name.
-  assert.equal(manifest.version, '0.1.2', 'the release round carries the version paired with the 0.2.0-rc.2 peer')
+  assert.equal(manifest.version, '0.1.3', 'the release round carries the version paired with the 0.2.0-rc.2 peer')
 })
 
 // ---------------------------------------------------------------------------
