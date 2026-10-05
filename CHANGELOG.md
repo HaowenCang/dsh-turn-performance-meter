@@ -7,6 +7,25 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## 0.1.4 — 2026-10-05
+
+Supported and tested against DSH `0.2.0-rc.2` only. **No support claim is made beyond DSH `0.2.0-rc.2`**, and the
+`v0.1.1` claim stays bounded to `0.1.7-rc.2`; the two are separate claims, not one range.
+
+Presentation and precision release for the live turn meter:
+
+- **Shared typographic baseline.** Live panel text now shares a typographic baseline across mixed font sizes;
+  fixes visible vertical drift in waiting/warming/streaming/tool states.
+- **Tenths stopwatch precision.** Running live stopwatches now show tenths rather than hundredths;
+  display precision now matches the 10 Hz / 100 ms presentation cadence.
+- **Timing calculations unchanged.** Internal millisecond timing and all TPS/TTFT calculations are unchanged.
+- **Completed card unchanged.** Completed-card precision and metrics are unchanged.
+- **Compatibility unchanged.** DSH compatibility remains exactly 0.2.0-rc.2.
+
+Distribution is unchanged: public npm registry as the primary form, GitHub Release `.tgz` as the offline fallback, and
+a runtime-only file allowlist. The standard install command resolves this version through the `latest` dist-tag;
+`…@0.1.4` pins it.
+
 ## 0.1.3 — 2026-10-02
 
 Supported and tested against DSH `0.2.0-rc.2` only. **No support claim is made beyond DSH `0.2.0-rc.2`**, and the
