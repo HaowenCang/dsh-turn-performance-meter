@@ -11017,13 +11017,19 @@ function formatElapsed(ms) {
   return formatDuration(ms)
 }
 
-/** TTFT stopwatch and waiting stopwatch: `2.80 s`. */
-function formatStopwatch(ms, digits = 2) {
+/**
+ * 10 Hz presentation contract: running live stopwatches render with tenths
+ * precision, matching the 100 ms refresh cadence.
+ */
+const LIVE_STOPWATCH_DIGITS = 1
+
+/** TTFT stopwatch and waiting stopwatch: `2.8 s`. */
+function formatStopwatch(ms, digits = LIVE_STOPWATCH_DIGITS) {
   return formatCountdown(ms, digits)
 }
 
 /**
- * The same stopwatch as separately styleable parts: `2.80` + `s`.
+ * The same stopwatch as separately styleable parts: `2.8` + `s`.
  *
  * The live pill renders the number at the top of its type scale and the unit two
  * steps below it, which is only possible if the two are separate runs.
@@ -11034,7 +11040,7 @@ function formatStopwatch(ms, digits = 2) {
  * duration, while `null` means the duration does not exist (no phase episode is
  * open yet, or the turn start was never observed).
  */
-function stopwatchParts(ms, digits = 2) {
+function stopwatchParts(ms, digits = LIVE_STOPWATCH_DIGITS) {
   return countdownParts(ms, digits)
 }
 
@@ -11068,7 +11074,7 @@ function formatToolLabel(names, count) {
 
 
 
-;Object.assign(__exports, { DASH, formatTps, formatApproxTps, formatElapsed, formatStopwatch, stopwatchParts, truncateToolName, formatToolLabel })
+;Object.assign(__exports, { DASH, formatTps, formatApproxTps, formatElapsed, LIVE_STOPWATCH_DIGITS, formatStopwatch, stopwatchParts, truncateToolName, formatToolLabel })
 			},
 			"src/client/live/LiveMeter.js": function (__exports) {
 /**
@@ -11090,8 +11096,8 @@ function formatToolLabel(names, count) {
  *     `docs/assets/reference-live-streaming.png`, where the rate is the focus and
  *     the elapsed reading is visibly subordinate;
  *   - high-frequency numbers are plain text: NO `aria-live` region, so a screen
- *     reader is never read a new TPS twenty times a second. The root carries a
- *     per-state `aria-label` and `data-state` instead.
+ *     reader is never read a new TPS ten times a second (matching the 10 Hz cadence).
+ *     The root carries a per-state `aria-label` and `data-state` instead.
  */
 
 const { createElement: h } = __ext("react")
@@ -11128,7 +11134,7 @@ function stateLabelKey(view) {
   }
 }
 
-/** A value and its unit as one non-wrapping run: `2.80` `s`, `≈338` `tokens/s`. */
+/** A value and its unit as one non-wrapping run: `2.8` `s`, `≈338` `tokens/s`. */
 function metric(value, unit, { tone = 'primary', className = 'dsh-tpm-number' } = {}) {
   return h('span', { className: 'dsh-tpm-metric' }, [
     h('span', { key: 'v', className, 'data-tone': tone }, value),
@@ -11156,11 +11162,11 @@ function pillContent(view, label) {
     case 'ttft': {
       /**
        * The running first-response counter is the state's only number, so it is
-       * the state's focus: `2.80 S` beside the state label.
+       * the state's focus: `2.8 s` beside the state label.
        *
        * The duration is passed through uncoerced. `stopwatchParts` renders a
        * non-finite duration as the shared em dash with no unit, which is the
-       * honest reading for a turn whose `turn/start` was never observed: `0.00 S`
+       * honest reading for a turn whose `turn/start` was never observed: `0.0 s`
        * would be a fabricated measurement (`docs/METRICS_SPEC.md` §4).
        */
       const parts = stopwatchParts(view.counterMs)
@@ -12774,7 +12780,7 @@ const LIVE_CSS = `
   box-sizing: border-box;
   max-width: min(100%, var(--dsh-composer-card-max-width, 100%));
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: center;
   flex-wrap: wrap;
   gap: calc(var(--dsh-tpm-font) * .5);

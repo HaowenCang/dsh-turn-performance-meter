@@ -29,7 +29,7 @@ export const LIVE_CSS = `
   box-sizing: border-box;
   max-width: min(100%, var(--dsh-composer-card-max-width, 100%));
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: center;
   flex-wrap: wrap;
   gap: calc(var(--dsh-tpm-font) * .5);

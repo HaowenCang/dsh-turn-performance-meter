@@ -27,13 +27,19 @@ export function formatElapsed(ms) {
   return formatDuration(ms)
 }
 
-/** TTFT stopwatch and waiting stopwatch: `2.80 s`. */
-export function formatStopwatch(ms, digits = 2) {
+/**
+ * 10 Hz presentation contract: running live stopwatches render with tenths
+ * precision, matching the 100 ms refresh cadence.
+ */
+export const LIVE_STOPWATCH_DIGITS = 1
+
+/** TTFT stopwatch and waiting stopwatch: `2.8 s`. */
+export function formatStopwatch(ms, digits = LIVE_STOPWATCH_DIGITS) {
   return formatCountdown(ms, digits)
 }
 
 /**
- * The same stopwatch as separately styleable parts: `2.80` + `s`.
+ * The same stopwatch as separately styleable parts: `2.8` + `s`.
  *
  * The live pill renders the number at the top of its type scale and the unit two
  * steps below it, which is only possible if the two are separate runs.
@@ -44,7 +50,7 @@ export function formatStopwatch(ms, digits = 2) {
  * duration, while `null` means the duration does not exist (no phase episode is
  * open yet, or the turn start was never observed).
  */
-export function stopwatchParts(ms, digits = 2) {
+export function stopwatchParts(ms, digits = LIVE_STOPWATCH_DIGITS) {
   return countdownParts(ms, digits)
 }
 

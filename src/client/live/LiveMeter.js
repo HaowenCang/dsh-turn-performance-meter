@@ -17,8 +17,8 @@
  *     `docs/assets/reference-live-streaming.png`, where the rate is the focus and
  *     the elapsed reading is visibly subordinate;
  *   - high-frequency numbers are plain text: NO `aria-live` region, so a screen
- *     reader is never read a new TPS twenty times a second. The root carries a
- *     per-state `aria-label` and `data-state` instead.
+ *     reader is never read a new TPS ten times a second (matching the 10 Hz cadence).
+ *     The root carries a per-state `aria-label` and `data-state` instead.
  */
 
 import { createElement as h } from 'react'
@@ -60,7 +60,7 @@ function stateLabelKey(view) {
   }
 }
 
-/** A value and its unit as one non-wrapping run: `2.80` `s`, `≈338` `tokens/s`. */
+/** A value and its unit as one non-wrapping run: `2.8` `s`, `≈338` `tokens/s`. */
 function metric(value, unit, { tone = 'primary', className = 'dsh-tpm-number' } = {}) {
   return h('span', { className: 'dsh-tpm-metric' }, [
     h('span', { key: 'v', className, 'data-tone': tone }, value),
@@ -88,11 +88,11 @@ function pillContent(view, label) {
     case 'ttft': {
       /**
        * The running first-response counter is the state's only number, so it is
-       * the state's focus: `2.80 S` beside the state label.
+       * the state's focus: `2.8 s` beside the state label.
        *
        * The duration is passed through uncoerced. `stopwatchParts` renders a
        * non-finite duration as the shared em dash with no unit, which is the
-       * honest reading for a turn whose `turn/start` was never observed: `0.00 S`
+       * honest reading for a turn whose `turn/start` was never observed: `0.0 s`
        * would be a fabricated measurement (`docs/METRICS_SPEC.md` §4).
        */
       const parts = stopwatchParts(view.counterMs)

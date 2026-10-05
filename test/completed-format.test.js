@@ -108,9 +108,9 @@ test('the card keeps one-decimal seconds at every magnitude', () => {
   assert.equal(formatSeconds(4420, 2), '4.42s')
 })
 
-test('the running stopwatch shows hundredths and the card value does not', () => {
-  assert.equal(formatStopwatch(2800), '2.80 s')
-  assert.equal(formatStopwatch(0), '0.00 s')
+test('the running stopwatch shows tenths and the card seconds format can show hundredths', () => {
+  assert.equal(formatStopwatch(2800), '2.8 s')
+  assert.equal(formatStopwatch(0), '0.0 s')
   assert.equal(formatSeconds(2800, 2), '2.80s')
 })
 
