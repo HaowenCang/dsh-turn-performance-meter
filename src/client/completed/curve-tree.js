@@ -113,6 +113,19 @@ function plotTree(createElement, curveView, translate) {
         vectorEffect: 'non-scaling-stroke',
       }))
     }
+    for (const [cIndex, connector] of (Array.isArray(series.connectors) ? series.connectors : []).entries()) {
+      if (typeof connector?.path !== 'string') continue
+      paths.push(createElement('path', {
+        key: `connector:${series.key}:${connector.from?.attemptId ?? 'unknown'}-${connector.to?.attemptId ?? 'unknown'}:${cIndex}`,
+        className: 'dsh-tpm-series dsh-tpm-connector',
+        'data-series': series.key,
+        'data-connector': 'true',
+        'data-from-attempt': connector.from?.attemptId === null ? '' : String(connector.from?.attemptId ?? ''),
+        'data-to-attempt': connector.to?.attemptId === null ? '' : String(connector.to?.attemptId ?? ''),
+        d: connector.path,
+        vectorEffect: 'non-scaling-stroke',
+      }))
+    }
   }
 
   const svg = createElement('svg', {
@@ -199,6 +212,7 @@ function plotTree(createElement, curveView, translate) {
      * render budget bounds, `data-markers` is decoration layered on top of it.
      */
     'data-markers': curveView.markers.length,
+    'data-connectors': curveView.connectors?.length ?? 0,
   }, [
     createElement('div', { key: 'area', className: 'dsh-tpm-plot-area' }, area),
     createElement('span', { key: 'axis', className: 'dsh-tpm-axis-max' }, curveView.axis.display),

@@ -11434,6 +11434,19 @@ function plotTree(createElement, curveView, translate) {
         vectorEffect: 'non-scaling-stroke',
       }))
     }
+    for (const [cIndex, connector] of (Array.isArray(series.connectors) ? series.connectors : []).entries()) {
+      if (typeof connector?.path !== 'string') continue
+      paths.push(createElement('path', {
+        key: `connector:${series.key}:${connector.from?.attemptId ?? 'unknown'}-${connector.to?.attemptId ?? 'unknown'}:${cIndex}`,
+        className: 'dsh-tpm-series dsh-tpm-connector',
+        'data-series': series.key,
+        'data-connector': 'true',
+        'data-from-attempt': connector.from?.attemptId === null ? '' : String(connector.from?.attemptId ?? ''),
+        'data-to-attempt': connector.to?.attemptId === null ? '' : String(connector.to?.attemptId ?? ''),
+        d: connector.path,
+        vectorEffect: 'non-scaling-stroke',
+      }))
+    }
   }
 
   const svg = createElement('svg', {
@@ -11520,6 +11533,7 @@ function plotTree(createElement, curveView, translate) {
      * render budget bounds, `data-markers` is decoration layered on top of it.
      */
     'data-markers': curveView.markers.length,
+    'data-connectors': curveView.connectors?.length ?? 0,
   }, [
     createElement('div', { key: 'area', className: 'dsh-tpm-plot-area' }, area),
     createElement('span', { key: 'axis', className: 'dsh-tpm-axis-max' }, curveView.axis.display),
@@ -12144,8 +12158,12 @@ function buildRun(run, durationMs, axisMax) {
 }
 
 /** One series entry: every run of one phase, each with its own path. */
-function buildSeries(entry, durationMs, axisMax) {
-  const runs = (Array.isArray(entry?.runs) ? entry.runs : []).map(run => buildRun(run, durationMs, axisMax))
+function buildSeries(entry, durationMs, axisMax, runMap = null) {
+  const runs = (Array.isArray(entry?.runs) ? entry.runs : []).map(run => {
+    const built = buildRun(run, durationMs, axisMax)
+    if (runMap) runMap.set(run, built)
+    return built
+  })
   const drawable = runs.filter(run => run.present)
   /**
    * The peak spans every run, drawable or not. A run of one vertex cannot be drawn
@@ -12275,6 +12293,129 @@ function calibrationCoverageOf(curve) {
 }
 
 /**
+ * Whether a real non-magnitude phase cut or unassigned phase gap lies between two consecutive attempts.
+ *
+ * A Phase 9.4.3 phase cut separates episodes (for instance, a tool-call boundary that ends
+ * reasoning before output starts). In that case, the outgoing episode ends at the cut and
+ * no continuity connector may bridge across it.
+ */
+function hasPhaseCutBetween(attA, runA, attB, runB) {
+  const runALastLocal = runA.points?.[runA.points.length - 1]?.localMs ?? 0
+  if (Array.isArray(attA.cuts) && attA.cuts.some(c => c.localMs >= runALastLocal - 1e-9)) {
+    return true
+  }
+  const runBFirstLocal = runB.points?.[0]?.localMs ?? 0
+  if (Array.isArray(attB.cuts) && attB.cuts.some(c => c.localMs <= runBFirstLocal + 1e-9)) {
+    return true
+  }
+  const lastPointA = runA.points?.[runA.points.length - 1]
+  if (lastPointA && Number.isFinite(lastPointA.episodeEndMs) && Number.isFinite(attA.localEndMs)) {
+    if (lastPointA.episodeEndMs < attA.localEndMs - 1e-9) {
+      return true
+    }
+  }
+  const firstPointB = runB.points?.[0]
+  if (firstPointB && Number.isFinite(firstPointB.episodeStartMs)) {
+    if (firstPointB.episodeStartMs > 1e-9) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Build visual continuity connectors between adjacent attempts on the compressed timeline.
+ *
+ * ## Presentation geometry vs TPS statistic (Phase 10.1)
+ *
+ * In multi-attempt agent turns, tool and inter-attempt wall time is already compressed
+ * to zero coordinate width on the completed curve axis. However, because every attempt
+ * owns its own independent TPS trace and episode clock, an attempt boundary alone
+ * previously forced a visible break in the rendered SVG path.
+ *
+ * An attempt boundary alone is not a reason to break visual continuity when:
+ *   1. the attempts are consecutive contributing attempts on the compressed axis;
+ *   2. the outgoing and incoming runs belong to the same phase;
+ *   3. both sides contain a finite publishable measurement;
+ *   4. no real phase cut or phase transition lies between them;
+ *   5. no intervening rendered run of another phase exists;
+ *   6. neither run was refused by the chart-wide render budget.
+ *
+ * Connectors are presentation-only: they do not alter any curve vertex, do not
+ * contribute to `peakTps` or `drawnPoints`, do not change token counts or phase durations,
+ * and preserve the attempt-local statistic reset.
+ *
+ * Retries: on a compressed timeline where inter-attempt gaps have zero width,
+ * consecutive attempts that satisfy the above conditions are visually stitched
+ * to represent continuous generation geometry. The statistical estimator remains
+ * strictly reset per attempt.
+ */
+function buildContinuityConnectors(attempts, runMap) {
+  if (!Array.isArray(attempts) || attempts.length < 2 || !(runMap instanceof Map)) return []
+  const connectors = []
+
+  for (let i = 0; i < attempts.length - 1; i++) {
+    const attA = attempts[i]
+    const attB = attempts[i + 1]
+    if (!attA || !attB) continue
+
+    // 1. Consecutive contributing attempts on compressed axis
+    if (!Number.isFinite(attA.endMs) || !Number.isFinite(attB.startMs)) continue
+    if (Math.abs(attA.endMs - attB.startMs) > 1e-9) continue
+
+    const runsA = Array.isArray(attA.runs) ? attA.runs : []
+    const runsB = Array.isArray(attB.runs) ? attB.runs : []
+    if (runsA.length === 0 || runsB.length === 0) continue
+
+    const runA = runsA[runsA.length - 1] // Outgoing run
+    const runB = runsB[0] // Incoming run
+
+    // 2. Same phase
+    if (!runA.phase || runA.phase !== runB.phase) continue
+
+    // 6. Does not cross render-budget-refused runs
+    if (runA.degraded || runB.degraded) continue
+
+    // 4. No real phase cut or phase transition between them
+    if (hasPhaseCutBetween(attA, runA, attB, runB)) continue
+
+    const builtA = runMap.get(runA)
+    const builtB = runMap.get(runB)
+    if (!builtA || !builtB) continue
+
+    // 3. Both sides contain a finite publishable measurement
+    if (builtA.coordinates.length === 0 || builtB.coordinates.length === 0) continue
+
+    const fromPoint = builtA.coordinates[builtA.coordinates.length - 1]
+    const toPoint = builtB.coordinates[0]
+
+    const path = `M${round(fromPoint.x)} ${round(fromPoint.y)} L${round(toPoint.x)} ${round(toPoint.y)}`
+    connectors.push({
+      outgoingAttemptId: runA.attemptId ?? null,
+      incomingAttemptId: runB.attemptId ?? null,
+      phase: runA.phase,
+      from: {
+        attemptId: runA.attemptId ?? null,
+        timeMs: fromPoint.timeMs,
+        x: round(fromPoint.x),
+        y: round(fromPoint.y),
+        tps: fromPoint.tps,
+      },
+      to: {
+        attemptId: runB.attemptId ?? null,
+        timeMs: toPoint.timeMs,
+        x: round(toPoint.x),
+        y: round(toPoint.y),
+        tps: toPoint.tps,
+      },
+      path,
+    })
+  }
+
+  return connectors
+}
+
+/**
  * Build the curve panel's view model.
  *
  * @param {object|null|undefined} settled the settled turn snapshot
@@ -12320,16 +12461,23 @@ function curveViewModel(settled) {
    * which has no `attempts`, it is the whole of the evidence.
    */
   const attemptRuns = runsOfAll(curve)
+  const runMap = new Map()
   const reasoning = buildSeries({
     key: 'reasoning',
     tone: 'neutral',
     runs: attemptRuns === null ? runsOf(curve, 'reasoning').runs : attemptRuns.filter(run => run.phase === 'reasoning'),
-  }, durationMs, axisMax)
+  }, durationMs, axisMax, runMap)
   const output = buildSeries({
     key: 'output',
     tone: 'accent',
     runs: attemptRuns === null ? runsOf(curve, 'output').runs : attemptRuns.filter(run => run.phase === 'output'),
-  }, durationMs, axisMax)
+  }, durationMs, axisMax, runMap)
+
+  const connectors = buildContinuityConnectors(curve?.attempts, runMap)
+  const reasoningConnectors = connectors.filter(c => c.phase === 'reasoning')
+  const outputConnectors = connectors.filter(c => c.phase === 'output')
+  reasoning.connectors = reasoningConnectors
+  output.connectors = outputConnectors
 
   /**
    * The series holding the global peak, so the marker sits on it. A tie resolves to
@@ -12388,7 +12536,7 @@ function curveViewModel(settled) {
   const hasSegment = reasoning.runs.concat(output.runs).some(run => (
     run.present && run.coordinates.length >= 2
     && run.coordinates[run.coordinates.length - 1].x > run.coordinates[0].x
-  ))
+  )) || connectors.some(c => c.to.x > c.from.x)
 
   /**
    * The marker is placed only when the leading series' strongest **drawn** vertex is the
@@ -12481,6 +12629,15 @@ function curveViewModel(settled) {
     /** Rendered subpath count: one per drawable run, never one per series. */
     drawnRuns,
     /**
+     * Presentation continuity connectors between adjacent attempts.
+     * Stored separately so they can be distinguished from measured curve vertices.
+     */
+    connectors,
+    connectorCount: connectors.length,
+    continuityConnectors: connectors.length,
+    /** Total rendered plot elements: measured runs, continuity connectors, and markers. */
+    renderedElementTotal: drawnRuns + connectors.length + markers.length,
+    /**
      * Point markers for one-vertex runs, one per measured instant.
      *
      * Each carries the tone of its own series, so a reasoning singleton and an output
@@ -12522,7 +12679,7 @@ function curveViewModel(settled) {
   }
 }
 
-;Object.assign(__exports, { CURVE_VIEW_WIDTH, CURVE_PLOT_HEIGHT, niceCeiling, curveViewModel })
+;Object.assign(__exports, { CURVE_VIEW_WIDTH, CURVE_PLOT_HEIGHT, niceCeiling, buildContinuityConnectors, curveViewModel })
 			},
 			"src/client/completed/view-mode.js": function (__exports) {
 /**
@@ -13153,6 +13310,9 @@ const COMPLETED_CSS = `
 }
 .dsh-tpm-series[data-series="reasoning"] { stroke: var(--dsw-alias-label-tertiary, #a2a4a6); }
 .dsh-tpm-series[data-series="output"] { stroke: var(--dsh-tpm-accent); }
+.dsh-tpm-connector {
+  stroke-linecap: round;
+}
 .dsh-tpm-peak-dot {
   position: absolute;
   width: calc(var(--dsh-tpm-font) * .42);

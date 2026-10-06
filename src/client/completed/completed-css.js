@@ -306,6 +306,9 @@ export const COMPLETED_CSS = `
 }
 .dsh-tpm-series[data-series="reasoning"] { stroke: var(--dsw-alias-label-tertiary, #a2a4a6); }
 .dsh-tpm-series[data-series="output"] { stroke: var(--dsh-tpm-accent); }
+.dsh-tpm-connector {
+  stroke-linecap: round;
+}
 .dsh-tpm-peak-dot {
   position: absolute;
   width: calc(var(--dsh-tpm-font) * .42);
