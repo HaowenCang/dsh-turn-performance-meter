@@ -71,6 +71,12 @@ function isStatic(view) {
   return view.kind === 'completed'
 }
 
+/** Whether the browser document is currently in the foreground. */
+function isDocumentVisible(doc) {
+  if (!doc) return true
+  return doc.visibilityState === 'visible'
+}
+
 function acquireStyle() {
   let element = document.getElementById(LIVE_STYLE_ID)
   if (element === null) {
@@ -95,10 +101,18 @@ function acquireStyle() {
  * registration site (`src/client/main.js`), so the component itself stays a pure
  * function of `(props, controller state)`.
  *
- * @param {{controller: object, t: (key: string) => string, debug?: boolean}} options
+ * @param {{
+ *   controller: object,
+ *   t: (key: string) => string,
+ *   debug?: boolean,
+ *   documentTarget?: Document | object | null,
+ *   windowTarget?: Window | object | null,
+ * }} options
  */
-export function makeMeterSlot({ controller, t, debug = false }) {
+export function makeMeterSlot({ controller, t, debug = false, documentTarget, windowTarget }) {
   const translate = typeof t === 'function' ? t : (key => key)
+  const doc = documentTarget !== undefined ? documentTarget : (typeof document !== 'undefined' ? document : null)
+  const win = windowTarget !== undefined ? windowTarget : (typeof window !== 'undefined' ? window : null)
 
   return function TurnPerformanceMeter(props) {
     const sessionId = typeof props?.sessionId === 'string' && props.sessionId !== '' ? props.sessionId : null
@@ -131,12 +145,16 @@ export function makeMeterSlot({ controller, t, debug = false }) {
     sessionIdRef.current = sessionId
     const viewRef = useRef(view)
     viewRef.current = view
+    const lastRecoverRef = useRef(0)
+
     const refreshView = () => {
       meterDiagnostics().refreshCalls += 1
       const id = sessionIdRef.current
-      setView(id === null
+      const nextView = id === null
         ? { kind: 'hidden', state: 'inactive', turn: null }
-        : controller.project(id, Date.now()))
+        : controller.project(id, Date.now())
+      viewRef.current = nextView
+      setView(nextView)
     }
 
     /** Created once per mounted meter; disposed implicitly by the effect below. */
@@ -155,6 +173,41 @@ export function makeMeterSlot({ controller, t, debug = false }) {
       return created
     })
 
+    /**
+     * Authoritative foreground recovery (Phase 10.1R Section 11):
+     *
+     * 1. controller.resync(current session)
+     * 2. authoritative projection from the recovered controller state
+     * 3. setView immediately (recovery render edge outside 10 Hz cadence)
+     * 4. if resulting view is live: resume/start scheduler; else leave stopped.
+     */
+    const recoverForeground = (reason) => {
+      if (!isDocumentVisible(doc)) return
+      const now = Date.now()
+      // Coalescing guard: avoid redundant duplicate re-renders if multiple lifecycle events
+      // (e.g. visibilitychange + focus) fire in the same foreground transition edge (< 50ms)
+      if (now - lastRecoverRef.current < 50) return
+      lastRecoverRef.current = now
+
+      const id = sessionIdRef.current
+      if (id !== null && typeof controller.resync === 'function') {
+        controller.resync(id, reason)
+      }
+      meterDiagnostics().refreshCalls += 1
+      const recoveredView = id === null
+        ? { kind: 'hidden', state: 'inactive', turn: null }
+        : controller.project(id, Date.now())
+      viewRef.current = recoveredView
+      setView(recoveredView)
+      scheduler.resume()
+      const isLive = recoveredView.kind !== 'hidden' && !isStatic(recoveredView)
+      if (isLive) {
+        scheduler.start()
+      } else {
+        scheduler.stop()
+      }
+    }
+
     useEffect(() => acquireStyle(), [])
 
     useEffect(() => {
@@ -169,6 +222,9 @@ export function makeMeterSlot({ controller, t, debug = false }) {
       refreshView()
       return controller.subscribe(() => {
         meterDiagnostics().notifyCalls += 1
+        // Gate presentation notifications by document foreground state:
+        // when document is backgrounded, do not churn React updates or timers.
+        if (!isDocumentVisible(doc)) return
         /**
          * A static projection can only change on a new event, so it is rebuilt
          * once per event and never re-rendered by a timer. `refreshView` runs
@@ -178,21 +234,75 @@ export function makeMeterSlot({ controller, t, debug = false }) {
         if (isStatic(viewRef.current)) refreshView()
         else scheduler.notify()
       })
-    }, [sessionId, controller, scheduler, debug])
+    }, [sessionId, controller, scheduler, debug, doc])
 
-    // The single presentation ticker: on only while a live view is visible,
-    // stopped on hide, on completion and on unmount. Ingestion is never
-    // throttled.
+    // Document visibility lifecycle (Phase 10.1R Section 10-12):
+    // Minimization / backgrounding suspends the presentation ticker.
+    // Foreground transitions trigger authoritative resync and immediate render.
+    useEffect(() => {
+      if (!doc && !win) return undefined
+
+      const onVisibilityChange = () => {
+        if (!isDocumentVisible(doc)) {
+          scheduler.suspend()
+        } else {
+          recoverForeground('visibilitychange')
+        }
+      }
+
+      const onPageShow = () => {
+        if (isDocumentVisible(doc)) {
+          recoverForeground('pageshow')
+        }
+      }
+
+      const onFocus = () => {
+        if (isDocumentVisible(doc)) {
+          recoverForeground('focus')
+        }
+      }
+
+      if (doc?.addEventListener) {
+        doc.addEventListener('visibilitychange', onVisibilityChange)
+      }
+      if (win?.addEventListener) {
+        win.addEventListener('pageshow', onPageShow)
+        win.addEventListener('focus', onFocus)
+      }
+
+      if (!isDocumentVisible(doc)) {
+        scheduler.suspend()
+      }
+
+      return () => {
+        if (doc?.removeEventListener) {
+          doc.removeEventListener('visibilitychange', onVisibilityChange)
+        }
+        if (win?.removeEventListener) {
+          win.removeEventListener('pageshow', onPageShow)
+          win.removeEventListener('focus', onFocus)
+        }
+      }
+    }, [scheduler, doc, win])
+
+    // The single presentation ticker: on only while a live view is visible in foreground,
+    // suspended when document is backgrounded, stopped on completion and on unmount.
+    // Ingestion is never throttled.
     const visible = view.kind !== 'hidden'
     const live = visible && !isStatic(view)
     useEffect(() => {
+      if (!isDocumentVisible(doc)) {
+        scheduler.suspend()
+        return undefined
+      }
       if (!live) {
         scheduler.stop()
         return undefined
       }
+      scheduler.resume()
       scheduler.start()
       return () => scheduler.stop()
-    }, [live, scheduler])
+    }, [live, scheduler, doc])
 
     if (!visible) return null
     if (view.kind === 'completed') return h(CompletedMeter, { view, translate })

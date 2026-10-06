@@ -634,6 +634,7 @@ export function createController({
         presenter: new LivePresenter(),
         feed: null,
         unsub: null,
+        currentEventSource: source,
         currentRecord: null,
         openAttemptId: null,
         ignoredEvents: 0,
@@ -704,6 +705,8 @@ export function createController({
           settlementStreamsReconciled: 0,
           settlementStreamsUncorrelated: 0,
           settlementStreamsRejected: 0,
+          eventSourceRebinds: 0,
+          foregroundResyncs: 0,
         },
         /** The kind of view the last `project()` returned. */
         projectedViewKind: null,
@@ -726,7 +729,8 @@ export function createController({
       })
       const read = () => {
         try {
-          state.feed.applyWindow(source.getSnapshot())
+          const snap = state.currentEventSource?.getSnapshot?.()
+          if (snap) state.feed.applyWindow(snap)
         } catch (error) {
           log('event window read failed', sessionId, error)
         }
@@ -750,6 +754,90 @@ export function createController({
       if (typeof listener !== 'function') return () => {}
       listeners.add(listener)
       return () => listeners.delete(listener)
+    },
+
+    /**
+     * Authoritative foreground resynchronization (Phase 10.1R).
+     *
+     * 1. Resolves the current session binding.
+     * 2. Inspects current binding.eventSource and detects source identity replacement.
+     * 3. On source replacement: unbinds old source, adopts new source, subscribes,
+     *    and performs a full generation rebaseline (restarting revision numbering).
+     * 4. On same source identity: obtains authoritative snapshot and feeds through
+     *    recovery-safe SessionEventFeed (which detects revision gaps and rebaselines if needed).
+     * 5. Invalidates presentation cache and records foreground recovery diagnostics.
+     *
+     * @param {string} sessionId
+     * @param {string} [reason]
+     * @returns {object} diagnostic result
+     */
+    resync(sessionId, reason = 'foreground-recovery') {
+      if (disposed || typeof sessionId !== 'string' || sessionId === '') {
+        return { resynced: false, reason: 'invalid-session' }
+      }
+      let state = sessionsMap.get(sessionId)
+      if (state === undefined) {
+        const attached = this.attach(sessionId)
+        if (!attached) return { resynced: false, reason: 'binding-unavailable', sessionId }
+        state = sessionsMap.get(sessionId)
+        if (state === undefined) return { resynced: false, reason: 'state-unavailable', sessionId }
+      }
+
+      const binding = typeof sessions?.binding === 'function' ? sessions.binding(sessionId) : undefined
+      if (binding === undefined || binding === null || binding.eventSource === undefined || binding.eventSource === null) {
+        return { resynced: false, reason: 'no-binding', sessionId }
+      }
+
+      const currentSource = binding.eventSource
+      let sourceRebound = false
+
+      if (state.currentEventSource !== currentSource) {
+        sourceRebound = true
+        state.counters.eventSourceRebinds = (state.counters.eventSourceRebinds ?? 0) + 1
+        log('eventSource rebind', sessionId)
+        if (typeof state.unsub === 'function') {
+          try { state.unsub() } catch { /* ignore */ }
+          state.unsub = null
+        }
+        state.currentEventSource = currentSource
+        const read = () => {
+          try {
+            const snap = state.currentEventSource?.getSnapshot?.()
+            if (snap) state.feed.applyWindow(snap)
+          } catch (error) {
+            log('event window read failed', sessionId, error)
+          }
+        }
+        state.unsub = currentSource.subscribe(read)
+
+        const snapshot = currentSource.getSnapshot()
+        state.feed.rebaseline()
+        state.feed.revision = Number.isFinite(snapshot?.revision) ? snapshot.revision : -1
+        if (Array.isArray(snapshot?.entries)) {
+          state.feed.processEntries(snapshot.entries)
+        }
+        invalidate(state)
+        emit()
+      } else {
+        const snapshot = currentSource.getSnapshot()
+        state.feed.applyWindow(snapshot)
+        invalidate(state)
+      }
+
+      state.counters.foregroundResyncs = (state.counters.foregroundResyncs ?? 0) + 1
+
+      return {
+        resynced: true,
+        sessionId,
+        reason,
+        sourceRebound,
+        lastFeedRevision: state.feed?.revision ?? -1,
+        lastSourceRevision: currentSource.getSnapshot?.()?.revision ?? -1,
+        revisionGapsDetected: state.feed?.counters?.revisionGapsDetected ?? 0,
+        revisionGapRebaselines: state.feed?.counters?.revisionGapRebaselines ?? 0,
+        eventSourceRebinds: state.counters?.eventSourceRebinds ?? 0,
+        foregroundResyncs: state.counters?.foregroundResyncs ?? 0,
+      }
     },
 
     /**
@@ -833,6 +921,12 @@ export function createController({
          */
         liveRunningTools: unresolved,
         livePresentedToolCount: meter !== undefined && meter.phase === 'tool' ? unresolved : 0,
+        foregroundResyncs: state.counters?.foregroundResyncs ?? 0,
+        eventSourceRebinds: state.counters?.eventSourceRebinds ?? 0,
+        revisionGapsDetected: state.feed?.counters?.revisionGapsDetected ?? 0,
+        revisionGapRebaselines: state.feed?.counters?.revisionGapRebaselines ?? 0,
+        lastFeedRevision: state.feed?.revision ?? -1,
+        lastSourceRevision: state.currentEventSource?.getSnapshot?.()?.revision ?? -1,
         counters: { ...(state.feed?.counters ?? {}), ...state.counters },
       }
     },
@@ -840,6 +934,16 @@ export function createController({
     /** Attached session ids, for lifecycle assertions. */
     attachedSessions() {
       return [...sessionsMap.keys()]
+    },
+
+    /** Sessions service reference (for diagnostics and lifecycle inspections). */
+    get sessions() {
+      return sessions
+    },
+
+    /** Read internal session feed by id (diagnostic inspection). */
+    feed(sessionId) {
+      return sessionsMap.get(sessionId)?.feed ?? null
     },
 
     /** Tear down every subscription and all stored state (HMR / unload). */

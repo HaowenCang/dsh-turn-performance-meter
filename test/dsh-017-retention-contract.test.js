@@ -346,11 +346,11 @@ test('retainedDurableEvents is a cumulative admission count, not the current row
 
   /** A duplicate is not an admission. */
   const replay = [row(admitted, admitted)]
-  feed.applyWindow({ entries: windowEntries(replay), revision: 1000, change: { kind: 'append', entries: windowEntries(replay) } })
+  feed.applyWindow({ entries: windowEntries(replay), revision: admitted + 1, change: { kind: 'append', entries: windowEntries(replay) } })
   assert.equal(feed.counters.retainedDurableEvents, admitted, 'a refused duplicate did not increment the counter')
   /** Neither is a row that names no finite turn: there is no turn to retrieve it by. */
   const unkeyable = [{ type: 'event', event: { type: 'assistant/message', seq: 99999, time: 1, data: {} } }]
-  feed.applyWindow({ entries: unkeyable, revision: 1001, change: { kind: 'append', entries: unkeyable } })
+  feed.applyWindow({ entries: unkeyable, revision: admitted + 2, change: { kind: 'append', entries: unkeyable } })
   assert.equal(feed.counters.retainedDurableEvents, admitted, 'an unkeyable row is not retained, and not an admission')
   assert.equal(feed.retainedTurnCount(), MAX_RETAINED_TURNS, 'and it occupies no slot')
 })

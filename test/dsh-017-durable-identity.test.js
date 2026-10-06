@@ -150,7 +150,7 @@ test('a duplicate appended after its turn was evicted cannot re-enter retention'
   for (let revision = 4; revision <= 7; revision += 1) {
     const turn = revision + 30
     appendRows(feed, revision, [row(turn, turn)])
-    appendRows(control, revision, [row(turn, turn)])
+    appendRows(control, revision - 1, [row(turn, turn)])
   }
 
   assert.deepEqual(

@@ -49,10 +49,11 @@ export function createPresentationScheduler({
   let intervalId = null
   let leadId = null
   let disposed = false
+  let suspended = false
 
   function flushLead() {
     leadId = null
-    if (!disposed) onRender()
+    if (!disposed && !suspended) onRender()
   }
 
   return {
@@ -68,6 +69,11 @@ export function createPresentationScheduler({
       return disposed
     },
 
+    /** Whether the scheduler is suspended (e.g. document in background). */
+    get suspended() {
+      return suspended
+    },
+
     /** Count of live timers this scheduler owns (0..2), for structural tests. */
     get timerCount() {
       return (intervalId === null ? 0 : 1) + (leadId === null ? 0 : 1)
@@ -76,15 +82,16 @@ export function createPresentationScheduler({
     /**
      * Data-side notification. While the ticker runs it already covers the
      * update; while hidden, one coalesced zero-delay render is scheduled.
+     * When suspended (e.g. document backgrounded), no timers are scheduled.
      */
     notify() {
-      if (disposed || intervalId !== null) return
+      if (disposed || suspended || intervalId !== null) return
       if (leadId === null) leadId = setTimeoutImpl(flushLead, 0)
     },
 
     /** Begin the bounded periodic refresh (called while the view is visible). */
     start() {
-      if (disposed || intervalId !== null) return
+      if (disposed || suspended || intervalId !== null) return
       intervalId = setIntervalImpl(onRender, intervalMs)
     },
 
@@ -98,6 +105,17 @@ export function createPresentationScheduler({
         clearTimeoutImpl(leadId)
         leadId = null
       }
+    },
+
+    /** Suspend presentation refresh and clear all timers (e.g. when document is backgrounded). */
+    suspend() {
+      suspended = true
+      this.stop()
+    },
+
+    /** Resume scheduler from suspended state. */
+    resume() {
+      suspended = false
     },
 
     /** Final cleanup: no timer may survive this call. */

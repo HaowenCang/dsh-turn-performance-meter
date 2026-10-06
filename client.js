@@ -8408,6 +8408,9 @@ class SessionEventFeed {
     /** Counts of deliberately skipped window changes, for diagnostics. */
     this.ignoredPrepends = 0
     this.eventCount = 0
+    this.revisionGapsDetected = 0
+    this.revisionGapRebaselines = 0
+    this.lastGap = null
     /** Debug-only counters; `controller.diagnostics()` reads them. */
     this.counters = {
       rawDurableEvents: 0,
@@ -8433,6 +8436,8 @@ class SessionEventFeed {
       abandonmentsResolved: 0,
       lateTurnRows: 0,
       lateTurnEvents: 0,
+      revisionGapsDetected: 0,
+      revisionGapRebaselines: 0,
     }
   }
 
@@ -8463,6 +8468,36 @@ class SessionEventFeed {
     }
 
     if (Number.isFinite(window.revision) && window.revision <= this.revision) return
+
+    const incomingRevision = Number.isFinite(window.revision) ? window.revision : -1
+    const currentRevision = this.revision
+
+    // Normative revision-gap rule (Phase 10.1R):
+    // In DSH 0.2.0-rc.2, MutableSessionEventSource publishes revision + 1 for every mutation.
+    // If incomingRevision > currentRevision + 1, one or more intermediate deltas were missed.
+    // The latest window.change is NOT sufficient recovery evidence; the contiguous window.entries
+    // is authoritative. Perform a full generation rebaseline over window.entries.
+    if (
+      Number.isFinite(currentRevision)
+      && currentRevision >= 0
+      && Number.isFinite(incomingRevision)
+      && incomingRevision > currentRevision + 1
+    ) {
+      this.revisionGapsDetected += 1
+      this.revisionGapRebaselines += 1
+      this.counters.revisionGapsDetected += 1
+      this.counters.revisionGapRebaselines += 1
+      this.lastGap = {
+        previousRevision: currentRevision,
+        incomingRevision,
+        missedRevisionCount: incomingRevision - currentRevision - 1,
+      }
+      this.rebaseline()
+      this.revision = incomingRevision
+      this.processEntries(window.entries)
+      return
+    }
+
     if (Number.isFinite(window.revision)) this.revision = window.revision
 
     switch (change.kind) {
@@ -10649,6 +10684,7 @@ function createController({
         presenter: new LivePresenter(),
         feed: null,
         unsub: null,
+        currentEventSource: source,
         currentRecord: null,
         openAttemptId: null,
         ignoredEvents: 0,
@@ -10719,6 +10755,8 @@ function createController({
           settlementStreamsReconciled: 0,
           settlementStreamsUncorrelated: 0,
           settlementStreamsRejected: 0,
+          eventSourceRebinds: 0,
+          foregroundResyncs: 0,
         },
         /** The kind of view the last `project()` returned. */
         projectedViewKind: null,
@@ -10741,7 +10779,8 @@ function createController({
       })
       const read = () => {
         try {
-          state.feed.applyWindow(source.getSnapshot())
+          const snap = state.currentEventSource?.getSnapshot?.()
+          if (snap) state.feed.applyWindow(snap)
         } catch (error) {
           log('event window read failed', sessionId, error)
         }
@@ -10765,6 +10804,90 @@ function createController({
       if (typeof listener !== 'function') return () => {}
       listeners.add(listener)
       return () => listeners.delete(listener)
+    },
+
+    /**
+     * Authoritative foreground resynchronization (Phase 10.1R).
+     *
+     * 1. Resolves the current session binding.
+     * 2. Inspects current binding.eventSource and detects source identity replacement.
+     * 3. On source replacement: unbinds old source, adopts new source, subscribes,
+     *    and performs a full generation rebaseline (restarting revision numbering).
+     * 4. On same source identity: obtains authoritative snapshot and feeds through
+     *    recovery-safe SessionEventFeed (which detects revision gaps and rebaselines if needed).
+     * 5. Invalidates presentation cache and records foreground recovery diagnostics.
+     *
+     * @param {string} sessionId
+     * @param {string} [reason]
+     * @returns {object} diagnostic result
+     */
+    resync(sessionId, reason = 'foreground-recovery') {
+      if (disposed || typeof sessionId !== 'string' || sessionId === '') {
+        return { resynced: false, reason: 'invalid-session' }
+      }
+      let state = sessionsMap.get(sessionId)
+      if (state === undefined) {
+        const attached = this.attach(sessionId)
+        if (!attached) return { resynced: false, reason: 'binding-unavailable', sessionId }
+        state = sessionsMap.get(sessionId)
+        if (state === undefined) return { resynced: false, reason: 'state-unavailable', sessionId }
+      }
+
+      const binding = typeof sessions?.binding === 'function' ? sessions.binding(sessionId) : undefined
+      if (binding === undefined || binding === null || binding.eventSource === undefined || binding.eventSource === null) {
+        return { resynced: false, reason: 'no-binding', sessionId }
+      }
+
+      const currentSource = binding.eventSource
+      let sourceRebound = false
+
+      if (state.currentEventSource !== currentSource) {
+        sourceRebound = true
+        state.counters.eventSourceRebinds = (state.counters.eventSourceRebinds ?? 0) + 1
+        log('eventSource rebind', sessionId)
+        if (typeof state.unsub === 'function') {
+          try { state.unsub() } catch { /* ignore */ }
+          state.unsub = null
+        }
+        state.currentEventSource = currentSource
+        const read = () => {
+          try {
+            const snap = state.currentEventSource?.getSnapshot?.()
+            if (snap) state.feed.applyWindow(snap)
+          } catch (error) {
+            log('event window read failed', sessionId, error)
+          }
+        }
+        state.unsub = currentSource.subscribe(read)
+
+        const snapshot = currentSource.getSnapshot()
+        state.feed.rebaseline()
+        state.feed.revision = Number.isFinite(snapshot?.revision) ? snapshot.revision : -1
+        if (Array.isArray(snapshot?.entries)) {
+          state.feed.processEntries(snapshot.entries)
+        }
+        invalidate(state)
+        emit()
+      } else {
+        const snapshot = currentSource.getSnapshot()
+        state.feed.applyWindow(snapshot)
+        invalidate(state)
+      }
+
+      state.counters.foregroundResyncs = (state.counters.foregroundResyncs ?? 0) + 1
+
+      return {
+        resynced: true,
+        sessionId,
+        reason,
+        sourceRebound,
+        lastFeedRevision: state.feed?.revision ?? -1,
+        lastSourceRevision: currentSource.getSnapshot?.()?.revision ?? -1,
+        revisionGapsDetected: state.feed?.counters?.revisionGapsDetected ?? 0,
+        revisionGapRebaselines: state.feed?.counters?.revisionGapRebaselines ?? 0,
+        eventSourceRebinds: state.counters?.eventSourceRebinds ?? 0,
+        foregroundResyncs: state.counters?.foregroundResyncs ?? 0,
+      }
     },
 
     /**
@@ -10848,6 +10971,12 @@ function createController({
          */
         liveRunningTools: unresolved,
         livePresentedToolCount: meter !== undefined && meter.phase === 'tool' ? unresolved : 0,
+        foregroundResyncs: state.counters?.foregroundResyncs ?? 0,
+        eventSourceRebinds: state.counters?.eventSourceRebinds ?? 0,
+        revisionGapsDetected: state.feed?.counters?.revisionGapsDetected ?? 0,
+        revisionGapRebaselines: state.feed?.counters?.revisionGapRebaselines ?? 0,
+        lastFeedRevision: state.feed?.revision ?? -1,
+        lastSourceRevision: state.currentEventSource?.getSnapshot?.()?.revision ?? -1,
         counters: { ...(state.feed?.counters ?? {}), ...state.counters },
       }
     },
@@ -10855,6 +10984,16 @@ function createController({
     /** Attached session ids, for lifecycle assertions. */
     attachedSessions() {
       return [...sessionsMap.keys()]
+    },
+
+    /** Sessions service reference (for diagnostics and lifecycle inspections). */
+    get sessions() {
+      return sessions
+    },
+
+    /** Read internal session feed by id (diagnostic inspection). */
+    feed(sessionId) {
+      return sessionsMap.get(sessionId)?.feed ?? null
     },
 
     /** Tear down every subscription and all stored state (HMR / unload). */
@@ -10926,10 +11065,11 @@ function createPresentationScheduler({
   let intervalId = null
   let leadId = null
   let disposed = false
+  let suspended = false
 
   function flushLead() {
     leadId = null
-    if (!disposed) onRender()
+    if (!disposed && !suspended) onRender()
   }
 
   return {
@@ -10945,6 +11085,11 @@ function createPresentationScheduler({
       return disposed
     },
 
+    /** Whether the scheduler is suspended (e.g. document in background). */
+    get suspended() {
+      return suspended
+    },
+
     /** Count of live timers this scheduler owns (0..2), for structural tests. */
     get timerCount() {
       return (intervalId === null ? 0 : 1) + (leadId === null ? 0 : 1)
@@ -10953,15 +11098,16 @@ function createPresentationScheduler({
     /**
      * Data-side notification. While the ticker runs it already covers the
      * update; while hidden, one coalesced zero-delay render is scheduled.
+     * When suspended (e.g. document backgrounded), no timers are scheduled.
      */
     notify() {
-      if (disposed || intervalId !== null) return
+      if (disposed || suspended || intervalId !== null) return
       if (leadId === null) leadId = setTimeoutImpl(flushLead, 0)
     },
 
     /** Begin the bounded periodic refresh (called while the view is visible). */
     start() {
-      if (disposed || intervalId !== null) return
+      if (disposed || suspended || intervalId !== null) return
       intervalId = setIntervalImpl(onRender, intervalMs)
     },
 
@@ -10975,6 +11121,17 @@ function createPresentationScheduler({
         clearTimeoutImpl(leadId)
         leadId = null
       }
+    },
+
+    /** Suspend presentation refresh and clear all timers (e.g. when document is backgrounded). */
+    suspend() {
+      suspended = true
+      this.stop()
+    },
+
+    /** Resume scheduler from suspended state. */
+    resume() {
+      suspended = false
     },
 
     /** Final cleanup: no timer may survive this call. */
@@ -13552,6 +13709,12 @@ function isStatic(view) {
   return view.kind === 'completed'
 }
 
+/** Whether the browser document is currently in the foreground. */
+function isDocumentVisible(doc) {
+  if (!doc) return true
+  return doc.visibilityState === 'visible'
+}
+
 function acquireStyle() {
   let element = document.getElementById(LIVE_STYLE_ID)
   if (element === null) {
@@ -13576,10 +13739,18 @@ function acquireStyle() {
  * registration site (`src/client/main.js`), so the component itself stays a pure
  * function of `(props, controller state)`.
  *
- * @param {{controller: object, t: (key: string) => string, debug?: boolean}} options
+ * @param {{
+ *   controller: object,
+ *   t: (key: string) => string,
+ *   debug?: boolean,
+ *   documentTarget?: Document | object | null,
+ *   windowTarget?: Window | object | null,
+ * }} options
  */
-function makeMeterSlot({ controller, t, debug = false }) {
+function makeMeterSlot({ controller, t, debug = false, documentTarget, windowTarget }) {
   const translate = typeof t === 'function' ? t : (key => key)
+  const doc = documentTarget !== undefined ? documentTarget : (typeof document !== 'undefined' ? document : null)
+  const win = windowTarget !== undefined ? windowTarget : (typeof window !== 'undefined' ? window : null)
 
   return function TurnPerformanceMeter(props) {
     const sessionId = typeof props?.sessionId === 'string' && props.sessionId !== '' ? props.sessionId : null
@@ -13612,12 +13783,16 @@ function makeMeterSlot({ controller, t, debug = false }) {
     sessionIdRef.current = sessionId
     const viewRef = useRef(view)
     viewRef.current = view
+    const lastRecoverRef = useRef(0)
+
     const refreshView = () => {
       meterDiagnostics().refreshCalls += 1
       const id = sessionIdRef.current
-      setView(id === null
+      const nextView = id === null
         ? { kind: 'hidden', state: 'inactive', turn: null }
-        : controller.project(id, Date.now()))
+        : controller.project(id, Date.now())
+      viewRef.current = nextView
+      setView(nextView)
     }
 
     /** Created once per mounted meter; disposed implicitly by the effect below. */
@@ -13636,6 +13811,41 @@ function makeMeterSlot({ controller, t, debug = false }) {
       return created
     })
 
+    /**
+     * Authoritative foreground recovery (Phase 10.1R Section 11):
+     *
+     * 1. controller.resync(current session)
+     * 2. authoritative projection from the recovered controller state
+     * 3. setView immediately (recovery render edge outside 10 Hz cadence)
+     * 4. if resulting view is live: resume/start scheduler; else leave stopped.
+     */
+    const recoverForeground = (reason) => {
+      if (!isDocumentVisible(doc)) return
+      const now = Date.now()
+      // Coalescing guard: avoid redundant duplicate re-renders if multiple lifecycle events
+      // (e.g. visibilitychange + focus) fire in the same foreground transition edge (< 50ms)
+      if (now - lastRecoverRef.current < 50) return
+      lastRecoverRef.current = now
+
+      const id = sessionIdRef.current
+      if (id !== null && typeof controller.resync === 'function') {
+        controller.resync(id, reason)
+      }
+      meterDiagnostics().refreshCalls += 1
+      const recoveredView = id === null
+        ? { kind: 'hidden', state: 'inactive', turn: null }
+        : controller.project(id, Date.now())
+      viewRef.current = recoveredView
+      setView(recoveredView)
+      scheduler.resume()
+      const isLive = recoveredView.kind !== 'hidden' && !isStatic(recoveredView)
+      if (isLive) {
+        scheduler.start()
+      } else {
+        scheduler.stop()
+      }
+    }
+
     useEffect(() => acquireStyle(), [])
 
     useEffect(() => {
@@ -13650,6 +13860,9 @@ function makeMeterSlot({ controller, t, debug = false }) {
       refreshView()
       return controller.subscribe(() => {
         meterDiagnostics().notifyCalls += 1
+        // Gate presentation notifications by document foreground state:
+        // when document is backgrounded, do not churn React updates or timers.
+        if (!isDocumentVisible(doc)) return
         /**
          * A static projection can only change on a new event, so it is rebuilt
          * once per event and never re-rendered by a timer. `refreshView` runs
@@ -13659,21 +13872,75 @@ function makeMeterSlot({ controller, t, debug = false }) {
         if (isStatic(viewRef.current)) refreshView()
         else scheduler.notify()
       })
-    }, [sessionId, controller, scheduler, debug])
+    }, [sessionId, controller, scheduler, debug, doc])
 
-    // The single presentation ticker: on only while a live view is visible,
-    // stopped on hide, on completion and on unmount. Ingestion is never
-    // throttled.
+    // Document visibility lifecycle (Phase 10.1R Section 10-12):
+    // Minimization / backgrounding suspends the presentation ticker.
+    // Foreground transitions trigger authoritative resync and immediate render.
+    useEffect(() => {
+      if (!doc && !win) return undefined
+
+      const onVisibilityChange = () => {
+        if (!isDocumentVisible(doc)) {
+          scheduler.suspend()
+        } else {
+          recoverForeground('visibilitychange')
+        }
+      }
+
+      const onPageShow = () => {
+        if (isDocumentVisible(doc)) {
+          recoverForeground('pageshow')
+        }
+      }
+
+      const onFocus = () => {
+        if (isDocumentVisible(doc)) {
+          recoverForeground('focus')
+        }
+      }
+
+      if (doc?.addEventListener) {
+        doc.addEventListener('visibilitychange', onVisibilityChange)
+      }
+      if (win?.addEventListener) {
+        win.addEventListener('pageshow', onPageShow)
+        win.addEventListener('focus', onFocus)
+      }
+
+      if (!isDocumentVisible(doc)) {
+        scheduler.suspend()
+      }
+
+      return () => {
+        if (doc?.removeEventListener) {
+          doc.removeEventListener('visibilitychange', onVisibilityChange)
+        }
+        if (win?.removeEventListener) {
+          win.removeEventListener('pageshow', onPageShow)
+          win.removeEventListener('focus', onFocus)
+        }
+      }
+    }, [scheduler, doc, win])
+
+    // The single presentation ticker: on only while a live view is visible in foreground,
+    // suspended when document is backgrounded, stopped on completion and on unmount.
+    // Ingestion is never throttled.
     const visible = view.kind !== 'hidden'
     const live = visible && !isStatic(view)
     useEffect(() => {
+      if (!isDocumentVisible(doc)) {
+        scheduler.suspend()
+        return undefined
+      }
       if (!live) {
         scheduler.stop()
         return undefined
       }
+      scheduler.resume()
       scheduler.start()
       return () => scheduler.stop()
-    }, [live, scheduler])
+    }, [live, scheduler, doc])
 
     if (!visible) return null
     if (view.kind === 'completed') return h(CompletedMeter, { view, translate })
@@ -13959,6 +14226,7 @@ function apply(ctx) {
       try {
         window.__dshTurnPerformanceMeter = {
           controller,
+          resync: (sessionId, reason) => controller.resync(sessionId, reason),
           diagnostics: (sessionId) => controller.diagnostics(sessionId),
           attachedSessions: () => controller.attachedSessions(),
           meter: () => {

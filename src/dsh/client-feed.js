@@ -332,6 +332,9 @@ export class SessionEventFeed {
     /** Counts of deliberately skipped window changes, for diagnostics. */
     this.ignoredPrepends = 0
     this.eventCount = 0
+    this.revisionGapsDetected = 0
+    this.revisionGapRebaselines = 0
+    this.lastGap = null
     /** Debug-only counters; `controller.diagnostics()` reads them. */
     this.counters = {
       rawDurableEvents: 0,
@@ -357,6 +360,8 @@ export class SessionEventFeed {
       abandonmentsResolved: 0,
       lateTurnRows: 0,
       lateTurnEvents: 0,
+      revisionGapsDetected: 0,
+      revisionGapRebaselines: 0,
     }
   }
 
@@ -387,6 +392,36 @@ export class SessionEventFeed {
     }
 
     if (Number.isFinite(window.revision) && window.revision <= this.revision) return
+
+    const incomingRevision = Number.isFinite(window.revision) ? window.revision : -1
+    const currentRevision = this.revision
+
+    // Normative revision-gap rule (Phase 10.1R):
+    // In DSH 0.2.0-rc.2, MutableSessionEventSource publishes revision + 1 for every mutation.
+    // If incomingRevision > currentRevision + 1, one or more intermediate deltas were missed.
+    // The latest window.change is NOT sufficient recovery evidence; the contiguous window.entries
+    // is authoritative. Perform a full generation rebaseline over window.entries.
+    if (
+      Number.isFinite(currentRevision)
+      && currentRevision >= 0
+      && Number.isFinite(incomingRevision)
+      && incomingRevision > currentRevision + 1
+    ) {
+      this.revisionGapsDetected += 1
+      this.revisionGapRebaselines += 1
+      this.counters.revisionGapsDetected += 1
+      this.counters.revisionGapRebaselines += 1
+      this.lastGap = {
+        previousRevision: currentRevision,
+        incomingRevision,
+        missedRevisionCount: incomingRevision - currentRevision - 1,
+      }
+      this.rebaseline()
+      this.revision = incomingRevision
+      this.processEntries(window.entries)
+      return
+    }
+
     if (Number.isFinite(window.revision)) this.revision = window.revision
 
     switch (change.kind) {

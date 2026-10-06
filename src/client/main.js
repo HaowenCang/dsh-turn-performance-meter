@@ -165,6 +165,7 @@ export function apply(ctx) {
       try {
         window.__dshTurnPerformanceMeter = {
           controller,
+          resync: (sessionId, reason) => controller.resync(sessionId, reason),
           diagnostics: (sessionId) => controller.diagnostics(sessionId),
           attachedSessions: () => controller.attachedSessions(),
           meter: () => {
