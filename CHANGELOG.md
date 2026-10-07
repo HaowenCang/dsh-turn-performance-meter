@@ -7,6 +7,30 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## 0.1.5 — 2026-10-07
+
+Supported and tested against DSH `0.2.0-rc.2` only. **No support claim is made beyond DSH `0.2.0-rc.2`**, and the
+`v0.1.1` claim stays bounded to `0.1.7-rc.2`; the two are separate claims, not one range.
+
+Visual continuity and lifecycle recovery release for DSH `0.2.0-rc.2`:
+
+- Completed throughput curves now visually stitch eligible same-phase generation segments across compressed
+  multi-attempt/tool boundaries.
+- Continuity connectors are presentation-only and do not alter TPS, peak, token accounting, phase duration or
+  attempt-local estimator resets.
+- Fixes stale live-panel state after the DSH page is backgrounded.
+- Live presentation timers are suspended while the document is hidden.
+- Foreground return performs an authoritative session resynchronization before the first recovered render.
+- Missed event revisions trigger full authoritative window rebaseline rather than applying only the latest delta.
+- Controller defensively rebinds if the session event-source generation changes.
+- Foreground lifecycle recovery is generation-safe: each real hidden -> visible transition recovers exactly once.
+- 100 ms / 10 Hz presentation cadence remains unchanged.
+- DSH compatibility remains exactly 0.2.0-rc.2.
+
+Distribution is unchanged: public npm registry as the primary form, GitHub Release `.tgz` as the offline fallback, and
+a runtime-only file allowlist. The standard install command resolves this version through the `latest` dist-tag;
+`…@0.1.5` pins it.
+
 ## 0.1.4 — 2026-10-05
 
 Supported and tested against DSH `0.2.0-rc.2` only. **No support claim is made beyond DSH `0.2.0-rc.2`**, and the

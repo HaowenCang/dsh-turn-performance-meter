@@ -8,13 +8,13 @@ provides two UI modes: a compact live meter during execution and a completed tur
 重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计
 卡片。完成态卡片按整个 turn 聚合。
 
-> **Released as `v0.1.4` on npm and GitHub, for DSH `0.2.0-rc.2`.** Version `0.1.4`, published to the public npm
+> **Released as `v0.1.5` on npm and GitHub, for DSH `0.2.0-rc.2`.** Version `0.1.5`, published to the public npm
 > registry. The primary distribution is the npm package `dsh-turn-performance-meter`; the GitHub Release asset
-> `dsh-turn-performance-meter-0.1.4.tgz` is an offline fallback, and the local checkout is for development. §2.1 holds
+> `dsh-turn-performance-meter-0.1.5.tgz` is an offline fallback, and the local checkout is for development. §2.1 holds
 > the release/runtime matrix.
 >
-> **已发布 npm 与 GitHub `v0.1.4`，面向 DSH `0.2.0-rc.2`。** 版本 `0.1.4`，已发布到公开 npm registry。主要分发方式为
-> npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.4.tgz` 作为离线回退，本地检出
+> **已发布 npm 与 GitHub `v0.1.5`，面向 DSH `0.2.0-rc.2`。** 版本 `0.1.5`，已发布到公开 npm registry。主要分发方式为
+> npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.5.tgz` 作为离线回退，本地检出
 > 目录用于开发。发布与运行时对应关系见 §2.1。
 
 ## 1. What it does / 功能
@@ -44,9 +44,10 @@ React layer never re-derives a metric.
 ## 2. Support status / 支持状态
 
 ```text
-Version (working tree): 0.1.4
+Version (working tree): 0.1.5
 Development target:     DSH 0.2.0-rc.2 only
-Released:               v0.1.4 -> DSH 0.2.0-rc.2
+Released:               v0.1.5 -> DSH 0.2.0-rc.2
+                        v0.1.4 -> DSH 0.2.0-rc.2
                         v0.1.3 -> DSH 0.2.0-rc.2
                         v0.1.2 -> DSH 0.2.0-rc.2
                         v0.1.1 -> DSH 0.1.7-rc.2
@@ -63,6 +64,7 @@ plugin v0.1.1  ->  DSH 0.1.7-rc.2   reference commit 477b4f420553e8a52c2fbccc464
 plugin v0.1.2  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.3  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.4  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
+plugin v0.1.5  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 ```
 
 **`0.2.0-rc.2` is the normative runtime for the current working tree.** Phase 9.3 moved the development target to it and
@@ -77,12 +79,12 @@ The claim is bounded on purpose: it is not `0.2.0+`, not `0.2.x` and not "the la
 been exercised. Local evidence for the claim is the CLI (`dsh --version`), the installed package
 (`npm list -g @deepseek-ai/dsh`) and the composed profile tree, all recorded in `docs/IMPLEMENTATION_LOG.md`.
 
-`v0.1.2` is the release in which that target became the shipped one, and `v0.1.3` and `v0.1.4` carry it forward unchanged: the
-working tree carries `version: 0.1.4` with the same `0.2.0-rc.2` peer, while the published `v0.1.3`, `v0.1.2` and `v0.1.1`
-artifacts are immutable — `v0.1.4`, `v0.1.3` and `v0.1.2` declare `0.2.0-rc.2` and `v0.1.1` still declares `0.1.7-rc.2`. The releases are
+`v0.1.2` is the release in which that target became the shipped one, and `v0.1.3`, `v0.1.4` and `v0.1.5` carry it forward unchanged: the
+working tree carries `version: 0.1.5` with the same `0.2.0-rc.2` peer, while the published `v0.1.4`, `v0.1.3`, `v0.1.2` and `v0.1.1`
+artifacts are immutable — `v0.1.5`, `v0.1.4`, `v0.1.3` and `v0.1.2` declare `0.2.0-rc.2` and `v0.1.1` still declares `0.1.7-rc.2`. The releases are
 **separately bounded** rather than expressed as one range — each declares exactly one runtime, and the plugin does not
 claim to run on both. Multi-runtime packaging would require explicit two-runtime verification and is not part of this
-release. `v0.1.4` is a presentation alignment and precision release on the `0.2.0-rc.2` line: it moves no runtime target, and no earlier release
+release. `v0.1.5` is a visual continuity and lifecycle recovery release on the `0.2.0-rc.2` line: it moves no runtime target, and no earlier release
 is restamped.
 
 **`0.2.0-rc.2` 是当前工作树的规范运行时。** Phase 9.3 将开发目标迁移到该版本，并对照本机 `0.2.0-rc.2` 安装与上述公开
@@ -95,10 +97,10 @@ TodoPanel 视觉契约。全部十四项声明在两个参考 commit 之间**逐
 （`dsh --version`）、已安装包（`npm list -g @deepseek-ai/dsh`）与组合后的 profile 树，均记录在
 `docs/IMPLEMENTATION_LOG.md`。
 
-`v0.1.2` 即该目标转为正式发布的那个版本，`v0.1.3` 与 `v0.1.4` 原样延续该目标：工作树携带 `version: 0.1.4` 与同一个 `0.2.0-rc.2`
-peer，而已发布的 `v0.1.3`、`v0.1.2` 与 `v0.1.1` 产物不可变更——`v0.1.4`、`v0.1.3` 与 `v0.1.2` 声明 `0.2.0-rc.2`，`v0.1.1` 仍声明 `0.1.7-rc.2`。各发布
+`v0.1.2` 即该目标转为正式发布的那个版本，`v0.1.3`、`v0.1.4` 与 `v0.1.5` 原样延续该目标：工作树携带 `version: 0.1.5` 与同一个 `0.2.0-rc.2`
+peer，而已发布的 `v0.1.4`、`v0.1.3`、`v0.1.2` 与 `v0.1.1` 产物不可变更——`v0.1.5`、`v0.1.4`、`v0.1.3` 与 `v0.1.2` 声明 `0.2.0-rc.2`，`v0.1.1` 仍声明 `0.1.7-rc.2`。各发布
 版本是**各自限定**的，而不是写成一个范围——每个版本只声明一个运行时，插件不声称可同时运行于两者。多运行时打包需要
-显式的双运行时验证，不属于本次发布范围。`v0.1.4` 是 `0.2.0-rc.2` 线上的表现层对齐与精度发布：不移动运行时目标，也不改写任何
+显式的双运行时验证，不属于本次发布范围。`v0.1.5` 是 `0.2.0-rc.2` 线上的视觉连续性与生命周期恢复发布：不移动运行时目标，也不改写任何
 既有发布。
 
 Phase 7D migrated the adapter, the client feed and the completion path to that version: tool results are identified
@@ -144,14 +146,15 @@ runtime, so the prerequisite follows §2.1: **install the runtime that matches t
 
 | Installing | Required DSH |
 |---|---|
-| `@0.1.4` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.5` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.4` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.3` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | the development checkout (§3.4) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 
 ```powershell
-# released v0.1.4, and the development checkout
+# released v0.1.5, and the development checkout
 npm install -g @deepseek-ai/dsh@0.2.0-rc.2
 
 # historical v0.1.1 only
@@ -166,7 +169,8 @@ compatibility only, and no DSH release other than the two named above has been e
 
 | 安装对象 | 所需 DSH |
 |---|---|
-| `@0.1.4`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.5`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.4`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.3`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.1.7-rc.2` |
@@ -186,24 +190,24 @@ Pin the version for a reproducible install:
 固定版本以获得可复现的安装：
 
 ```powershell
-dsh plugin --profile web add dsh-turn-performance-meter@0.1.4
+dsh plugin --profile web add dsh-turn-performance-meter@0.1.5
 ```
 
-The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.4` exactly. Both install a frozen
+The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.5` exactly. Both install a frozen
 copy of the published artifact.
 
-无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.4`。两者安装的都是已发布产物的冻结副本。
+无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.5`。两者安装的都是已发布产物的冻结副本。
 
 ### 3.3 GitHub Release tarball (offline fallback) / GitHub Release tarball（离线回退）
 
-Download `dsh-turn-performance-meter-0.1.4.tgz` from the
-[v0.1.4 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.4), then install it:
+Download `dsh-turn-performance-meter-0.1.5.tgz` from the
+[v0.1.5 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.5), then install it:
 
-从 [v0.1.4 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.4) 下载
-`dsh-turn-performance-meter-0.1.4.tgz` 后安装：
+从 [v0.1.5 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.5) 下载
+`dsh-turn-performance-meter-0.1.5.tgz` 后安装：
 
 ```powershell
-dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.4.tgz"
+dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.5.tgz"
 ```
 
 This is the offline and immutable fallback, and the asset is the same tarball the npm registry serves. `file:` on a
@@ -219,8 +223,8 @@ Verify the download before installing:
 安装前校验下载内容：
 
 ```powershell
-Get-FileHash .\dsh-turn-performance-meter-0.1.4.tgz -Algorithm SHA256
-Get-Content .\dsh-turn-performance-meter-0.1.4.tgz.sha256
+Get-FileHash .\dsh-turn-performance-meter-0.1.5.tgz -Algorithm SHA256
+Get-Content .\dsh-turn-performance-meter-0.1.5.tgz.sha256
 ```
 
 ### 3.4 Development checkout / 开发检出
@@ -453,9 +457,9 @@ this repository is a local test result, not CI. The implementation log keeps the
 ```text
 dsh-turn-performance-meter/
 ├─ README.md
-├─ CHANGELOG.md                      Release history (0.1.4)
+├─ CHANGELOG.md                      Release history (0.1.5)
 ├─ LICENSE                           MIT
-├─ package.json                      version 0.1.4, published to npm, scripts: test / build:client / verify
+├─ package.json                      version 0.1.5, published to npm, scripts: test / build:client / verify
 ├─ cordis.patch.yml                  Bundle row insertion; the only DSH composition this plugin adds
 ├─ index.js                          host entry (no-op by design; telemetry is client-side)
 ├─ client.js                         GENERATED browser bundle (npm run build:client)
