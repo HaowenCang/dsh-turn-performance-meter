@@ -655,3 +655,359 @@ test('15N. completed card: completed view remains static with no periodic timer 
   assert.equal(scheduler.timerCount, 0, 'zero timers for completed card')
   scheduler.dispose()
 })
+
+test('15O. lifecycle regression: < 50 ms hidden->visible edge must not be suppressed by previous foreground recovery', async () => {
+  const factory = await loadMeterSlotModule()
+  const { doc, win } = createMockDom('visible')
+
+  let hookState = []
+  let hookSetters = []
+  let hookEffects = []
+  let hookRefs = []
+  let slotIndex = 0
+  let effectIndex = 0
+  let refIndex = 0
+
+  const reactStub = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useRef: init => {
+      const idx = refIndex++
+      if (idx >= hookRefs.length) {
+        hookRefs.push({ current: init })
+      }
+      return hookRefs[idx]
+    },
+    useState: init => {
+      const idx = slotIndex++
+      if (idx >= hookState.length) {
+        hookState.push(typeof init === 'function' ? init() : init)
+      }
+      const setter = val => {
+        hookState[idx] = typeof val === 'function' ? val(hookState[idx]) : val
+      }
+      hookSetters[idx] = setter
+      return [hookState[idx], setter]
+    },
+    useEffect: (fn, deps) => {
+      const idx = effectIndex++
+      hookEffects[idx] = { fn, deps }
+    },
+  }
+
+  const { makeMeterSlot } = factory(spec => spec === 'react' ? reactStub : null)
+  const sessions = fakeSessionsService()
+  const source = sessions.createSource('s-coalesce')
+  const controller = createController({ sessions })
+
+  try {
+    source.replaceEntries([
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+    ], 2)
+
+    const Component = makeMeterSlot({
+      controller,
+      t: k => k,
+      documentTarget: doc,
+      windowTarget: win,
+    })
+
+    // Mount
+    slotIndex = 0
+    refIndex = 0
+    effectIndex = 0
+    Component({ sessionId: 's-coalesce' })
+    for (const eff of hookEffects) if (typeof eff?.fn === 'function') eff.cleanup = eff.fn()
+
+    const scheduler = hookState[1]
+    assert.equal(scheduler.suspended, false, 'scheduler starts unsuspended')
+
+    // 1. Foreground recovery A
+    win.fire('focus')
+    assert.equal(controller.diagnostics('s-coalesce').foregroundResyncs, 1, 'recovery A executed')
+
+    // 2. < 50 ms later: visibility -> hidden
+    doc.setVisibility('hidden')
+    assert.equal(scheduler.suspended, true, 'scheduler suspended after hidden')
+
+    // Advance session while hidden
+    source.replaceEntries([
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+      transientEntry('att-1', 1080, chunk(' second chunk')),
+    ], 3)
+
+    // 3. < 50 ms later: visibility -> visible, then focus
+    doc.setVisibility('visible')
+    win.fire('focus')
+
+    // On f8246227, the 50 ms guard rejects visible recovery:
+    // resync is NOT called for new generation (stays 1 instead of 2)
+    // and scheduler remains suspended!
+    assert.equal(
+      controller.diagnostics('s-coalesce').foregroundResyncs,
+      2,
+      'controller.resync must be called for new foreground generation'
+    )
+    assert.equal(
+      scheduler.suspended,
+      false,
+      'scheduler must not remain suspended after genuine visible recovery'
+    )
+  } finally {
+    clearAllActiveTimers()
+    controller.dispose()
+  }
+})
+
+/* ================================================================== *
+ * Section 16: Generation-Safe Foreground Recovery & Coalescing (A - E)
+ * ================================================================== */
+
+async function mountMeterSlot({ sessionId, initialEntries = [], initialVisibility = 'visible' } = {}) {
+  const factory = await loadMeterSlotModule()
+  const { doc, win } = createMockDom(initialVisibility)
+
+  let hookState = []
+  let hookSetters = []
+  let hookEffects = []
+  let hookRefs = []
+  let slotIndex = 0
+  let effectIndex = 0
+  let refIndex = 0
+  let renderCount = 0
+
+  const reactStub = {
+    createElement: (type, props, ...children) => ({ type, props, children }),
+    useRef: init => {
+      const idx = refIndex++
+      if (idx >= hookRefs.length) {
+        hookRefs.push({ current: init })
+      }
+      return hookRefs[idx]
+    },
+    useState: init => {
+      const idx = slotIndex++
+      if (idx >= hookState.length) {
+        hookState.push(typeof init === 'function' ? init() : init)
+      }
+      const setter = val => {
+        renderCount++
+        hookState[idx] = typeof val === 'function' ? val(hookState[idx]) : val
+      }
+      hookSetters[idx] = setter
+      return [hookState[idx], setter]
+    },
+    useEffect: (fn, deps) => {
+      const idx = effectIndex++
+      hookEffects[idx] = { fn, deps }
+    },
+  }
+
+  const { makeMeterSlot } = factory(spec => spec === 'react' ? reactStub : null)
+  const sessions = fakeSessionsService()
+  const source = sessions.createSource(sessionId)
+  const controller = createController({ sessions })
+
+  if (initialEntries.length > 0) {
+    source.replaceEntries(initialEntries, initialEntries.length)
+  }
+
+  const Component = makeMeterSlot({
+    controller,
+    t: k => k,
+    documentTarget: doc,
+    windowTarget: win,
+  })
+
+  // Mount
+  slotIndex = 0
+  refIndex = 0
+  effectIndex = 0
+  Component({ sessionId })
+  for (const eff of hookEffects) if (typeof eff?.fn === 'function') eff.cleanup = eff.fn()
+
+  return {
+    doc,
+    win,
+    source,
+    controller,
+    getScheduler: () => hookState[1],
+    getView: () => hookState[0],
+    getRenderCount: () => renderCount,
+    dispose: () => {
+      clearAllActiveTimers()
+      controller.dispose()
+    },
+  }
+}
+
+test('16A. focus -> hidden -> visible all within 50 ms: visible recovery MUST happen', async () => {
+  const s = await mountMeterSlot({
+    sessionId: 's-16a',
+    initialEntries: [
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+    ],
+  })
+  try {
+    const scheduler = s.getScheduler()
+    assert.equal(scheduler.suspended, false)
+
+    // Initial recovery on focus
+    s.win.fire('focus')
+    assert.equal(s.controller.diagnostics('s-16a').foregroundResyncs, 1)
+
+    // < 50 ms later: visibility -> hidden
+    s.doc.setVisibility('hidden')
+    assert.equal(scheduler.suspended, true)
+
+    // < 50 ms later: visibility -> visible
+    s.doc.setVisibility('visible')
+    assert.equal(
+      s.controller.diagnostics('s-16a').foregroundResyncs,
+      2,
+      'visible recovery must occur despite preceding focus < 50 ms ago'
+    )
+    assert.equal(scheduler.suspended, false, 'scheduler must be resumed')
+
+    // Same generation focus does not cause second destructive recovery
+    s.win.fire('focus')
+    assert.equal(s.controller.diagnostics('s-16a').foregroundResyncs, 2)
+  } finally {
+    s.dispose()
+  }
+})
+
+test('16B. pageshow -> hidden -> visible within 50 ms: visible recovery MUST happen', async () => {
+  const s = await mountMeterSlot({
+    sessionId: 's-16b',
+    initialEntries: [
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+    ],
+  })
+  try {
+    const scheduler = s.getScheduler()
+    assert.equal(scheduler.suspended, false)
+
+    // Initial recovery on pageshow
+    s.win.fire('pageshow')
+    assert.equal(s.controller.diagnostics('s-16b').foregroundResyncs, 1)
+
+    // < 50 ms later: visibility -> hidden
+    s.doc.setVisibility('hidden')
+    assert.equal(scheduler.suspended, true)
+
+    // < 50 ms later: visibility -> visible
+    s.doc.setVisibility('visible')
+    assert.equal(
+      s.controller.diagnostics('s-16b').foregroundResyncs,
+      2,
+      'visible recovery must occur despite preceding pageshow < 50 ms ago'
+    )
+    assert.equal(scheduler.suspended, false, 'scheduler must be resumed')
+
+    // Subsequent pageshow on same generation coalesced
+    s.win.fire('pageshow')
+    assert.equal(s.controller.diagnostics('s-16b').foregroundResyncs, 2)
+  } finally {
+    s.dispose()
+  }
+})
+
+test('16C. one visible edge fires visibilitychange + focus + pageshow: exactly one authoritative resync', async () => {
+  const s = await mountMeterSlot({
+    sessionId: 's-16c',
+    initialEntries: [
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+    ],
+  })
+  try {
+    const scheduler = s.getScheduler()
+
+    // Transition to hidden
+    s.doc.setVisibility('hidden')
+    assert.equal(scheduler.suspended, true)
+    const resyncBefore = s.controller.diagnostics('s-16c').foregroundResyncs
+
+    // Single visible edge fires all three events in rapid succession
+    s.doc.setVisibility('visible')
+    s.win.fire('focus')
+    s.win.fire('pageshow')
+
+    const resyncAfter = s.controller.diagnostics('s-16c').foregroundResyncs
+    assert.equal(
+      resyncAfter - resyncBefore,
+      1,
+      'exactly one authoritative resync for the combined visibilitychange + focus + pageshow edge'
+    )
+    assert.equal(scheduler.suspended, false, 'scheduler resumed')
+  } finally {
+    s.dispose()
+  }
+})
+
+test('16D. two separate hidden -> visible cycles inside a short interval: exactly two recoveries, one per generation', async () => {
+  const s = await mountMeterSlot({
+    sessionId: 's-16d',
+    initialEntries: [
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+    ],
+  })
+  try {
+    const resyncBase = s.controller.diagnostics('s-16d').foregroundResyncs
+
+    // Cycle 1
+    s.doc.setVisibility('hidden')
+    s.doc.setVisibility('visible')
+    assert.equal(
+      s.controller.diagnostics('s-16d').foregroundResyncs,
+      resyncBase + 1,
+      'cycle 1 triggers recovery 1'
+    )
+
+    // Cycle 2 immediately (short interval)
+    s.doc.setVisibility('hidden')
+    s.doc.setVisibility('visible')
+    assert.equal(
+      s.controller.diagnostics('s-16d').foregroundResyncs,
+      resyncBase + 2,
+      'cycle 2 triggers recovery 2 (one per generation)'
+    )
+  } finally {
+    s.dispose()
+  }
+})
+
+test('16E. hidden notification storm: zero presentation timers and zero renders', async () => {
+  const s = await mountMeterSlot({
+    sessionId: 's-16e',
+    initialEntries: [
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+    ],
+  })
+  try {
+    const scheduler = s.getScheduler()
+    s.doc.setVisibility('hidden')
+    assert.equal(scheduler.suspended, true)
+
+    const rendersBefore = s.getRenderCount()
+
+    // Ingest 500 events while hidden
+    for (let i = 0; i < 500; i++) {
+      s.source.replaceEntries([
+        durableEntry('turn/start', 1, 1000, { turn: 1 }),
+        transientEntry('att-1', 1050 + i, chunk(`data chunk ${i}`)),
+      ], 3 + i)
+    }
+
+    assert.equal(scheduler.timerCount, 0, 'zero presentation timers while hidden')
+    assert.equal(s.getRenderCount(), rendersBefore, 'zero render calls during hidden storm')
+  } finally {
+    s.dispose()
+  }
+})

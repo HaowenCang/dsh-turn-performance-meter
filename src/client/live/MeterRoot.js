@@ -145,6 +145,7 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
     sessionIdRef.current = sessionId
     const viewRef = useRef(view)
     viewRef.current = view
+    const foregroundDirtyRef = useRef(true)
     const lastRecoverRef = useRef(0)
 
     const refreshView = () => {
@@ -174,19 +175,24 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
     })
 
     /**
-     * Authoritative foreground recovery (Phase 10.1R Section 11):
+     * Authoritative foreground recovery (Phase 10.1R Section 11, Phase 10.1R.1 Section 2):
      *
-     * 1. controller.resync(current session)
-     * 2. authoritative projection from the recovered controller state
-     * 3. setView immediately (recovery render edge outside 10 Hz cadence)
-     * 4. if resulting view is live: resume/start scheduler; else leave stopped.
+     * Every transition hidden -> visible permits EXACTLY ONE authoritative recovery
+     * regardless of how recently a previous foreground recovery occurred.
+     * Duplicate lifecycle events (visibilitychange, focus, pageshow) belonging to the
+     * same foreground edge are coalesced without a second destructive recovery.
+     *
+     * 1. consume dirty foreground generation
+     * 2. controller.resync(current session)
+     * 3. authoritative projection from the recovered controller state
+     * 4. setView immediately (recovery render edge outside 10 Hz cadence)
+     * 5. if resulting view is live: resume/start scheduler; else leave stopped.
      */
     const recoverForeground = (reason) => {
       if (!isDocumentVisible(doc)) return
+      if (!foregroundDirtyRef.current) return
+      foregroundDirtyRef.current = false
       const now = Date.now()
-      // Coalescing guard: avoid redundant duplicate re-renders if multiple lifecycle events
-      // (e.g. visibilitychange + focus) fire in the same foreground transition edge (< 50ms)
-      if (now - lastRecoverRef.current < 50) return
       lastRecoverRef.current = now
 
       const id = sessionIdRef.current
@@ -196,7 +202,7 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
       meterDiagnostics().refreshCalls += 1
       const recoveredView = id === null
         ? { kind: 'hidden', state: 'inactive', turn: null }
-        : controller.project(id, Date.now())
+        : controller.project(id, now)
       viewRef.current = recoveredView
       setView(recoveredView)
       scheduler.resume()
@@ -244,6 +250,7 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
 
       const onVisibilityChange = () => {
         if (!isDocumentVisible(doc)) {
+          foregroundDirtyRef.current = true
           scheduler.suspend()
         } else {
           recoverForeground('visibilitychange')
@@ -271,6 +278,7 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
       }
 
       if (!isDocumentVisible(doc)) {
+        foregroundDirtyRef.current = true
         scheduler.suspend()
       }
 
