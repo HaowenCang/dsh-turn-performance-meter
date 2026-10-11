@@ -36,6 +36,30 @@ import { LiveUiState, initialLiveUi, reduceLiveUi } from './live-state.js'
 
 const HIDDEN_STATES = new Set([LiveUiState.INACTIVE, LiveUiState.SETTLED])
 
+/**
+ * How long the first-response stopwatch may keep running before the presenter
+ * stops calling it a first response.
+ *
+ * The stopwatch is the honest view while a first token can still be pending, but
+ * it is only *bounded* evidence. The meter freezes `ttftMs` exclusively from the
+ * transient `assistant/live-chunk` plane (`acceptSample` /
+ * `observeTokenBoundary`, reached only through that route), so a turn whose
+ * rows never arrive leaves it `null` with no fallback that could notice the
+ * model answered. In that state the `ttft` view's `counterMs` is
+ * `turnElapsedMs` — the *turn* clock, not a first-token interval — and the pill
+ * therefore counted up a "first response" over a live stream (a reported
+ * screenshot read `首响应计时 1189.7 s`), asserting a wait that no longer
+ * described anything.
+ *
+ * The bound is a guard against that rendering, not a diagnosis of it: why a
+ * given turn had no rows is not established here, and this guard holds whatever
+ * the reason. Past the bound the neutral transition stage carries the same turn
+ * clock without claiming the model is still being waited on. The TTFT value
+ * itself is never invented: a meter that does have a frozen `ttftMs` reports
+ * the real number on the completed card regardless of this guard.
+ */
+const FIRST_RESPONSE_HONEST_MS = 120_000
+
 export class LivePresenter {
   /** @param {object} [machine] initial machine state (per session instance) */
   constructor(machine = initialLiveUi()) {
@@ -122,6 +146,15 @@ export class LivePresenter {
     switch (machine.state) {
       case LiveUiState.PENDING_FIRST_TOKEN: {
         if (snapshot.ttftMs === null) {
+          /**
+           * No token has reached the meter. That is a genuine first-response wait
+           * only while it is still plausible; past the bound the transient plane
+           * has published nothing for this turn and the stopwatch would keep
+           * counting over a stream the meter simply cannot see.
+           */
+          if (Number.isFinite(elapsedMs) && elapsedMs > FIRST_RESPONSE_HONEST_MS) {
+            return { kind: 'transition', state: LiveUiState.TRANSITION, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+          }
           return { kind: 'ttft', state: machine.state, turn, counterMs: elapsedMs, elapsedMs }
         }
         /**

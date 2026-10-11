@@ -9,7 +9,7 @@ Distribution status: published to the public npm registry as `dsh-turn-performan
 
 ## Unreleased
 
-Live presentation fixes for the reported "the pill stops following the model" defects. All four are
+Live presentation fixes for the reported "the pill stops following the model" defects. All five are
 *presentation-only*: no TPS, TTFT, token-accounting, tool-timing or settled-curve semantics change.
 
 - **A leftover tool stage no longer outranks live streaming.** The meter's `tool` phase is sticky — it is left only when
@@ -29,6 +29,13 @@ Live presentation fixes for the reported "the pill stops following the model" de
   `recoverForeground` therefore skipped `resume()`, and `notify()`/`start()` are both no-ops while suspended, so the
   pill froze on its last frame while ingestion continued. Recovery now always restores the ticker, and every suspend site
   marks the foreground generation dirty.
+- **The first-response stopwatch stops claiming a first response once it is no longer plausible.** The `ttft` view's
+  `counterMs` is `turnElapsedMs`, so while a turn's `ttftMs` is `null` the pill renders the *turn* clock under a
+  "first response" label and it climbs for the whole turn (a reported screenshot read `首响应计时 1189.7 s`). Past
+  `FIRST_RESPONSE_HONEST_MS` (120 s) the neutral transition stage carries the same turn clock without asserting a wait
+  that no evidence supports. This is a guard on the rendering, not a diagnosis: why that turn had a `null` `ttftMs` is
+  **not established** here, and the guard holds whatever the reason. The TTFT value itself is never invented — a meter
+  holding a frozen `ttftMs` still reports the real number on the completed card.
 
 ## 0.1.5 — 2026-10-07
 

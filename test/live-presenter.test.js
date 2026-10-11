@@ -292,6 +292,39 @@ test('waiting-model yields to live meter streaming evidence', () => {
   assert.equal('counterMs' in view, false)
 })
 
+test('a first-response stopwatch stops claiming a first response once it is no longer plausible', () => {
+  /**
+   * The meter learns about tokens only from the transient `assistant/live-chunk`
+   * plane. When that plane publishes nothing for a turn, `ttftMs` stays `null`
+   * forever and nothing can notice the model answered — the pill then counted up
+   * a "first response" over a live stream (a reported screenshot read
+   * `首响应计时 1189.7 s`).
+   */
+  const presenter = startedPresenter()
+  const pending = { turn: 4, phase: 'pending', ttftMs: null, tps: null }
+
+  // Still plausible: the stopwatch is the honest view.
+  const early = presenter.project({ ...pending, turnElapsedMs: 3_000 }, 3_000)
+  assert.equal(early.kind, 'ttft', 'a young turn may genuinely be waiting for its first token')
+  assert.equal(early.counterMs, 3_000)
+  assert.equal(early.state, LiveUiState.PENDING_FIRST_TOKEN)
+
+  // Past the bound: stop asserting a first response that no evidence supports.
+  const late = presenter.project({ ...pending, turnElapsedMs: 1_189_700 }, 1_189_700)
+  assert.equal(late.kind, 'transition', 'a 20-minute "first response" is not a first response')
+  assert.notEqual(late.kind, 'ttft')
+  assert.equal(late.state, LiveUiState.TRANSITION)
+  assert.equal(late.elapsedMs, 1_189_700, 'the turn clock is still reported')
+  assert.equal('counterMs' in late, false, 'no stopwatch is carried on the neutral stage')
+
+  // The bound is a floor on honesty, not a claim about the real TTFT: a meter
+  // that does hold a frozen ttftMs still projects the frozen branch, whatever
+  // the turn's elapsed time is.
+  const frozen = presenter.project({ ...pending, ttftMs: 500, turnElapsedMs: 1_189_700 }, 1_189_700)
+  assert.equal(frozen.kind, 'transition')
+  assert.equal(frozen.state, LiveUiState.TRANSITION)
+})
+
 test('pending-first-token with a frozen TTFT degrades to transition, never a waiting stopwatch', () => {
   const presenter = startedPresenter()
   /**
