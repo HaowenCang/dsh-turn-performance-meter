@@ -244,3 +244,64 @@ test('two presenters (two sessions) never share machine state', () => {
   assert.equal(a.project(streamingSnapshot(), 1000).kind, 'streaming')
   assert.equal(a.machine.turn, 4)
 })
+
+test('a sticky meter tool phase never masks a machine that already streams', () => {
+  const presenter = startedPresenter([
+    { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'output', timeMs: 100 },
+    { type: LIVE_UI_EVENT.TOOL_START, turn: 4, timeMs: 300, name: 'run_code' },
+    // The model resumes while the meter's tool episode is still open.
+    { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'output', timeMs: 500 },
+  ])
+  /**
+   * The meter's `tool` phase is *sticky*: it is left only when the last running
+   * call settles, and a `tool/result` this client could not pair never settles
+   * one. Rendering that leftover episode is the reported defect — a frozen
+   * `run_code · 1m37s` timer over a live stream.
+   */
+  const view = presenter.project({
+    turn: 4,
+    phase: 'tool',
+    tps: null,
+    runningToolCount: 1,
+    runningToolNames: ['run_code'],
+    toolElapsedMs: 102_000,
+    turnElapsedMs: 1_200_000,
+  }, 1_200_000)
+  assert.equal(view.kind, 'transition', 'a leftover tool episode must not outrank live streaming')
+  assert.equal('toolElapsedMs' in view, false, 'the frozen tool timer is not presented as current')
+  assert.equal('tps' in view, false, 'and no rate is invented for it either')
+})
+
+test('waiting-model yields to live meter streaming evidence', () => {
+  const presenter = startedPresenter([
+    { type: LIVE_UI_EVENT.DELTA, turn: 4, phase: 'output', timeMs: 500 },
+    { type: LIVE_UI_EVENT.TOOL_START, turn: 4, timeMs: 600, name: 'pwsh' },
+    { type: LIVE_UI_EVENT.TOOL_END, turn: 4, timeMs: 2600 },
+    { type: LIVE_UI_EVENT.STEP_START, turn: 4, step: 2, timeMs: 2610 },
+  ])
+  /**
+   * The machine leaves `waiting-model` only on a DELTA. A delta this client
+   * never received leaves it waiting forever, and the old unconditional branch
+   * kept a "waiting for model" stopwatch counting up over a live stream. The
+   * meter's `streaming` phase is live evidence that tokens are arriving now.
+   */
+  const view = presenter.project(streamingSnapshot(), 3470)
+  assert.equal(view.kind, 'transition', 'tokens are arriving; the model is not waiting')
+  assert.equal(view.state, LiveUiState.TRANSITION)
+  assert.equal(view.waitMs, 3470 - 2610, 'the neutral stage keeps the machine stopwatch')
+  assert.equal('counterMs' in view, false)
+})
+
+test('pending-first-token with a frozen TTFT degrades to transition, never a waiting stopwatch', () => {
+  const presenter = startedPresenter()
+  /**
+   * `ttftMs` is frozen by the turn's first token and by nothing else, so it is
+   * proof the model has already answered. Claiming the model is still being
+   * waited on contradicts the meter; the first-response stopwatch stays a thing
+   * only a meter with no frozen TTFT can report.
+   */
+  const view = presenter.project({ turn: 4, phase: 'pending', ttftMs: 500, tps: null, turnElapsedMs: 3470 }, 3470)
+  assert.equal(view.kind, 'transition')
+  assert.notEqual(view.kind, 'waiting')
+  assert.equal('counterMs' in view, false)
+})

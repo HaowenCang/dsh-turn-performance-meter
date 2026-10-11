@@ -1011,3 +1011,42 @@ test('16E. hidden notification storm: zero presentation timers and zero renders'
     s.dispose()
   }
 })
+
+test('16F. an unpaired suspend cannot freeze the ticker: a same-generation focus after the visibility edge resumes it', async () => {
+  const s = await mountMeterSlot({
+    sessionId: 's-16f',
+    initialEntries: [
+      durableEntry('turn/start', 1, 1000, { turn: 1 }),
+      transientEntry('att-1', 1050, chunk('live data')),
+    ],
+  })
+  try {
+    const scheduler = s.getScheduler()
+    assert.equal(scheduler.suspended, false, 'scheduler starts unsuspended')
+
+    // A same-generation focus consumes the dirty flag without resyncing again.
+    s.win.fire('focus')
+    assert.equal(s.controller.diagnostics('s-16f').foregroundResyncs, 1)
+    assert.equal(scheduler.suspended, false)
+
+    /**
+     * Background and return: the suspend is issued from the visibility handler
+     * and the return edge consumes the flag. What must hold afterwards is the
+     * pairing invariant the recovery path relies on — a resumed, ticking
+     * scheduler for a live turn — rather than a suspended one that would make
+     * every subsequent notify() and start() a no-op.
+     */
+    s.doc.setVisibility('hidden')
+    assert.equal(scheduler.suspended, true, 'backgrounding suspends the ticker')
+    s.doc.setVisibility('visible')
+
+    assert.equal(
+      scheduler.suspended,
+      false,
+      'a recovered foreground generation must never leave the ticker suspended',
+    )
+    assert.equal(scheduler.ticking, true, 'and the 10 Hz ticker runs again for a live turn')
+  } finally {
+    s.dispose()
+  }
+})

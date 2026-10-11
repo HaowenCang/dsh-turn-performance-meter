@@ -9813,9 +9813,15 @@ function reduceLiveUi(machine, event) {
  *     the previous TPS)
  *   - streaming state whose episode has not reached its warm-up sample count
  *     -> warming (the elapsed counter, never a one-sample rate)
- *   - pending state with an already-frozen TTFT        -> waiting
+ *   - pending state with an already-frozen TTFT        -> transition
+ *     (a frozen TTFT is itself proof that a token arrived; "waiting for the
+ *     model" would contradict the meter)
+ *   - waiting-model while the meter is streaming       -> transition
+ *     (the meter's `streaming` phase is live evidence, and the machine leaves
+ *     its wait only on a delta this client may never have received)
  *   - tool stage resolved from the machine OR the meter -> tool view, values
- *     strictly from the meter snapshot
+ *     strictly from the meter snapshot, and only while the machine has not
+ *     already streamed past it
  *
  * Every view carries `approximate` derived from metric quality: live TPS is
  * `estimated`, so it always renders with `≈`.
@@ -9875,11 +9881,23 @@ class LivePresenter {
      */
     const elapsedMs = Number.isFinite(snapshot.turnElapsedMs) ? snapshot.turnElapsedMs : null
 
+    /**
+     * Whether the machine has already seen model output. The meter's `tool`
+     * phase is *sticky*: it is left only when the last running call settles
+     * (`LiveMeter.toolSettled`), so a tool result this client could not pair
+     * leaves the phase on `tool` while the model keeps streaming. The machine's
+     * streaming state is driven by the deltas themselves and is the newer
+     * evidence there — a leftover tool timer must never be rendered as if it
+     * still tracked the turn.
+     */
+    const streaming = machine.state === LiveUiState.STREAMING_REASONING
+      || machine.state === LiveUiState.STREAMING_OUTPUT
+
     // Tool stage: both the machine's activity counter and the meter's phase
     // are accepted as evidence, so a missed event cannot show a stale TPS.
     const tooling = machine.state === LiveUiState.TOOL_RUNNING || snapshot.phase === 'tool'
     if (tooling) {
-      if (snapshot.phase === 'tool') {
+      if (snapshot.phase === 'tool' && !streaming) {
         return {
           kind: 'tool',
           state: LiveUiState.TOOL_RUNNING,
@@ -9890,8 +9908,11 @@ class LivePresenter {
           elapsedMs,
         }
       }
-      // The machine believes tools run but the meter does not: inconsistent
-      // evidence. The neutral transition view is the only honest rendering.
+      // Inconsistent evidence in either direction: the machine believes tools
+      // run while the meter does not, or the meter still reports a tool episode
+      // the machine has already streamed past. The neutral transition view is
+      // the only honest rendering — it carries the turn clock and never claims a
+      // stage the other layer contradicts.
       return { kind: 'transition', state: LiveUiState.TRANSITION, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
     }
 
@@ -9900,8 +9921,16 @@ class LivePresenter {
         if (snapshot.ttftMs === null) {
           return { kind: 'ttft', state: machine.state, turn, counterMs: elapsedMs, elapsedMs }
         }
-        // The meter already froze the turn TTFT; the machine lagged a delta.
-        return { kind: 'waiting', state: LiveUiState.WAITING_MODEL, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+        /**
+         * The meter froze the turn TTFT, which is only ever set by the turn's
+         * first token: the model has already answered and the machine merely
+         * lagged the delta that says so. `waiting-model` would contradict the
+         * meter and keep a "waiting for model" stopwatch running over a live
+         * stream, so the neutral transition view carries the turn clock instead.
+         * The first-response stopwatch stays a thing only the meter can still
+         * report (`ttftMs === null`).
+         */
+        return { kind: 'transition', state: LiveUiState.TRANSITION, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
       }
 
       case LiveUiState.STREAMING_REASONING:
@@ -9957,8 +9986,22 @@ class LivePresenter {
         return { kind: 'transition', state: LiveUiState.TRANSITION, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
       }
 
-      case LiveUiState.WAITING_MODEL:
+      case LiveUiState.WAITING_MODEL: {
+        /**
+         * The machine leaves this state only on a DELTA (`live-state.js`), and a
+         * delta this client never received leaves it waiting forever — the
+         * reported defect: "waiting for model" with the stopwatch still counting
+         * up while the model streams. The meter's `streaming` phase is live
+         * evidence that tokens are arriving right now, so the wait is over and the
+         * neutral transition view is the honest rendering. A meter that is merely
+         * `pending` is the genuine wait the specification describes and keeps
+         * its own stopwatch.
+         */
+        if (snapshot.phase === 'streaming') {
+          return { kind: 'transition', state: LiveUiState.TRANSITION, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+        }
         return { kind: 'waiting', state: machine.state, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
+      }
 
       case LiveUiState.TRANSITION:
         return { kind: 'transition', state: machine.state, turn, elapsedMs, waitMs: stageWait(machine, nowMs) }
@@ -13820,15 +13863,36 @@ function makeMeterSlot({ controller, t, debug = false, documentTarget, windowTar
      * Duplicate lifecycle events (visibilitychange, focus, pageshow) belonging to the
      * same foreground edge are coalesced without a second destructive recovery.
      *
-     * 1. consume dirty foreground generation
+     * 1. consume dirty foreground generation (resync + projection, exactly once
+     *    per hidden -> visible edge)
      * 2. controller.resync(current session)
      * 3. authoritative projection from the recovered controller state
      * 4. setView immediately (recovery render edge outside 10 Hz cadence)
-     * 5. if resulting view is live: resume/start scheduler; else leave stopped.
+     * 5. ALWAYS resume the scheduler; start it only for a live view.
+     *
+     * Step 5 is unconditional on purpose. The dirty flag gates the *destructive*
+     * part of recovery — one resync per hidden -> visible generation — and
+     * nothing else. `suspend()` is reached from two places (the visibility
+     * handler and the render effect) while the flag is consumed by whichever
+     * recovery event arrives first, so a later recovery for the same generation
+     * (`focus` or `pageshow` after the `visibilitychange`) must still
+     * restore the ticker. `resume()` is idempotent and cannot resync twice; the
+     * two properties are independent and the old shared early return coupled
+     * them, which left `suspended` true whenever the recovery that consumed the
+     * flag was not the one that had suspended.
      */
     const recoverForeground = (reason) => {
       if (!isDocumentVisible(doc)) return
-      if (!foregroundDirtyRef.current) return
+      if (!foregroundDirtyRef.current) {
+        // Same foreground generation: no second resync, but the ticker must not
+        // be left suspended by a `suspend()` that this recovery did not issue.
+        scheduler.resume()
+        const settledView = viewRef.current
+        const stillLive = settledView.kind !== 'hidden' && !isStatic(settledView)
+        if (stillLive) scheduler.start()
+        else scheduler.stop()
+        return
+      }
       foregroundDirtyRef.current = false
       const now = Date.now()
       lastRecoverRef.current = now
@@ -13938,6 +14002,15 @@ function makeMeterSlot({ controller, t, debug = false, documentTarget, windowTar
     const live = visible && !isStatic(view)
     useEffect(() => {
       if (!isDocumentVisible(doc)) {
+        /**
+         * Pair the suspend with the dirty flag. The visibility handler sets it
+         * too, but this effect is a second suspend site (a backgrounded mount, or
+         * any re-render while hidden), and `recoverForeground` treats the flag
+         * as the licence to resume. Keeping the invariant "suspended implies
+         * dirty" at every suspend site is what makes the recovery path above
+         * total.
+         */
+        foregroundDirtyRef.current = true
         scheduler.suspend()
         return undefined
       }

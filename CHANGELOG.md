@@ -7,6 +7,29 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## Unreleased
+
+Live presentation fixes for the reported "the pill stops following the model" defects. All four are
+*presentation-only*: no TPS, TTFT, token-accounting, tool-timing or settled-curve semantics change.
+
+- **A leftover tool stage no longer outranks live streaming.** The meter's `tool` phase is sticky — it is left only when
+  the last running call settles (`LiveMeter.toolSettled`), and a `tool/result` this client could not pair with its
+  `tool/call` never settles one — so the phase can stay on `tool` while the model keeps streaming. The presenter now
+  prefers the machine's own streaming state over that leftover episode and renders the neutral `transition` stage with
+  the turn clock instead of a frozen tool timer (`run_code · 1m37s` over a live stream).
+- **A frozen TTFT is no longer rendered as "waiting for model".** `ttftMs` is frozen by the turn's first token and by
+  nothing else, so `pending-first-token` with a frozen TTFT means the model has already answered. That branch now
+  renders `transition` rather than a waiting stopwatch (`等待模型 887.8s` over a live stream). The first-response
+  stopwatch remains available to the only stage that can honestly report it: a meter with no frozen TTFT.
+- **`waiting-model` yields to live meter streaming evidence.** The machine leaves `waiting-model` only on a DELTA, so a
+  delta this client never received leaves it waiting forever. When the meter's phase is `streaming` — tokens are
+  arriving right now — the pill renders `transition` instead of counting up a wait that is already over.
+- **A suspended presentation ticker can no longer stay suspended.** `suspend()` is reached from two sites while the
+  foreground dirty flag is consumed by whichever recovery event arrives first; the old shared early return in
+  `recoverForeground` therefore skipped `resume()`, and `notify()`/`start()` are both no-ops while suspended, so the
+  pill froze on its last frame while ingestion continued. Recovery now always restores the ticker, and every suspend site
+  marks the foreground generation dirty.
+
 ## 0.1.5 — 2026-10-07
 
 Supported and tested against DSH `0.2.0-rc.2` only. **No support claim is made beyond DSH `0.2.0-rc.2`**, and the

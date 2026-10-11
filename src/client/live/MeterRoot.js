@@ -182,15 +182,36 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
      * Duplicate lifecycle events (visibilitychange, focus, pageshow) belonging to the
      * same foreground edge are coalesced without a second destructive recovery.
      *
-     * 1. consume dirty foreground generation
+     * 1. consume dirty foreground generation (resync + projection, exactly once
+     *    per hidden -> visible edge)
      * 2. controller.resync(current session)
      * 3. authoritative projection from the recovered controller state
      * 4. setView immediately (recovery render edge outside 10 Hz cadence)
-     * 5. if resulting view is live: resume/start scheduler; else leave stopped.
+     * 5. ALWAYS resume the scheduler; start it only for a live view.
+     *
+     * Step 5 is unconditional on purpose. The dirty flag gates the *destructive*
+     * part of recovery — one resync per hidden -> visible generation — and
+     * nothing else. `suspend()` is reached from two places (the visibility
+     * handler and the render effect) while the flag is consumed by whichever
+     * recovery event arrives first, so a later recovery for the same generation
+     * (`focus` or `pageshow` after the `visibilitychange`) must still
+     * restore the ticker. `resume()` is idempotent and cannot resync twice; the
+     * two properties are independent and the old shared early return coupled
+     * them, which left `suspended` true whenever the recovery that consumed the
+     * flag was not the one that had suspended.
      */
     const recoverForeground = (reason) => {
       if (!isDocumentVisible(doc)) return
-      if (!foregroundDirtyRef.current) return
+      if (!foregroundDirtyRef.current) {
+        // Same foreground generation: no second resync, but the ticker must not
+        // be left suspended by a `suspend()` that this recovery did not issue.
+        scheduler.resume()
+        const settledView = viewRef.current
+        const stillLive = settledView.kind !== 'hidden' && !isStatic(settledView)
+        if (stillLive) scheduler.start()
+        else scheduler.stop()
+        return
+      }
       foregroundDirtyRef.current = false
       const now = Date.now()
       lastRecoverRef.current = now
@@ -300,6 +321,15 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
     const live = visible && !isStatic(view)
     useEffect(() => {
       if (!isDocumentVisible(doc)) {
+        /**
+         * Pair the suspend with the dirty flag. The visibility handler sets it
+         * too, but this effect is a second suspend site (a backgrounded mount, or
+         * any re-render while hidden), and `recoverForeground` treats the flag
+         * as the licence to resume. Keeping the invariant "suspended implies
+         * dirty" at every suspend site is what makes the recovery path above
+         * total.
+         */
+        foregroundDirtyRef.current = true
         scheduler.suspend()
         return undefined
       }
