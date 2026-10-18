@@ -140,9 +140,10 @@ test('the historical 0.2.0-rc.2 peer pairing is retained as evidence, and the wo
   }
   assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
 
-  // Phase 11.0 is an unreleased source phase: the peer moves, the version does
-  // not, and no published artifact is created by the migration round.
-  assert.equal(manifest.version, '0.1.5', 'the unreleased source phase keeps the 0.1.5 package version')
+  // Phase 11.0/11.0R moved the peer to the accepted 0.2.1-rc.2 target, and
+  // v0.1.6 is the release round that ships it: the version and the peer move
+  // together, so the published artifact names the runtime it was verified on.
+  assert.equal(manifest.version, '0.1.6', 'the release round carries the version paired with the 0.2.1-rc.2 peer')
 })
 
 // ---------------------------------------------------------------------------

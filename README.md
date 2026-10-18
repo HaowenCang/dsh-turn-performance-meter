@@ -8,23 +8,23 @@ provides two UI modes: a compact live meter during execution and a completed tur
 重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计
 卡片。完成态卡片按整个 turn 聚合。
 
-> **Released as `v0.1.5` on npm and GitHub, for DSH `0.2.0-rc.2`.** Version `0.1.5`, published to the public npm
+> **Released as `v0.1.6` on npm and GitHub, for DSH `0.2.1-rc.2`.** Version `0.1.6`, published to the public npm
 > registry. The primary distribution is the npm package `dsh-turn-performance-meter`; the GitHub Release asset
-> `dsh-turn-performance-meter-0.1.5.tgz` is an offline fallback, and the local checkout is for development. §2.1 holds
+> `dsh-turn-performance-meter-0.1.6.tgz` is an offline fallback, and the local checkout is for development. §2.1 holds
 > the release/runtime matrix.
 >
-> **The unreleased development checkout targets DSH `0.2.1-rc.2`** — Phase 11.0 migrated the source and Phase 11.0R
-> closed the runtime acceptance, so **compatibility with `0.2.1-rc.2` is ACCEPTED** (unreleased source; no release has
-> occurred). The published `v0.1.5` artifact remains bound to `0.2.0-rc.2` and is not restamped; no new npm
-> publication, tag or GitHub Release exists for the `0.2.1-rc.2` target yet.
+> **`v0.1.5` remains published for DSH `0.2.0-rc.2`** and is not restamped. Phase 11.0 migrated the source to
+> `0.2.1-rc.2` and Phase 11.0R closed the runtime acceptance, so **compatibility with `0.2.1-rc.2` is ACCEPTED**, and
+> `v0.1.6` is the first release for that runtime. It changes no TPS, TTFT, estimator, curve, rendering or lifecycle
+> algorithm.
 >
-> **已发布 npm 与 GitHub `v0.1.5`，面向 DSH `0.2.0-rc.2`。** 版本 `0.1.5`，已发布到公开 npm registry。主要分发方式为
-> npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.5.tgz` 作为离线回退，本地检出
+> **已发布 npm 与 GitHub `v0.1.6`，面向 DSH `0.2.1-rc.2`。** 版本 `0.1.6`，已发布到公开 npm registry。主要分发方式为
+> npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.6.tgz` 作为离线回退，本地检出
 > 目录用于开发。发布与运行时对应关系见 §2.1。
 >
-> **未发布的开发检出目录面向 DSH `0.2.1-rc.2`**——Phase 11.0 完成了源码迁移，Phase 11.0R 完成了运行时验收，因此
-> **`0.2.1-rc.2` 兼容性为 ACCEPTED（已接受）**（未发布源码，尚未发生任何发布）。已发布的 `v0.1.5` 产物仍绑定
-> `0.2.0-rc.2`，不做改写；该 `0.2.1-rc.2` 目标目前尚无新发布、tag 或 GitHub Release。
+> **`v0.1.5` 继续面向 DSH `0.2.0-rc.2` 发布**，不做改写。Phase 11.0 完成了源码迁移，Phase 11.0R 完成了运行时验收，
+> 因此 **`0.2.1-rc.2` 兼容性为 ACCEPTED（已接受）**，`v0.1.6` 是该运行时的首个发布。本次发布不改变任何 TPS、TTFT、
+> 估计器、曲线、渲染或生命周期算法。
 
 ## 1. What it does / 功能
 
@@ -53,10 +53,11 @@ React layer never re-derives a metric.
 ## 2. Support status / 支持状态
 
 ```text
-Version (working tree): 0.1.5
-Development target:     DSH 0.2.1-rc.2 only (unreleased source, Phase 11.0/11.0R)
+Version (working tree): 0.1.6
+Development target:     DSH 0.2.1-rc.2 only (Phase 11.0/11.0R, compatibility ACCEPTED)
 Compatibility status:   ACCEPTED — DSH 0.2.1-rc.2 (Phase 11.0R R5 real-run acceptance)
-Released:               v0.1.5 -> DSH 0.2.0-rc.2
+Released:               v0.1.6 -> DSH 0.2.1-rc.2
+                        v0.1.5 -> DSH 0.2.0-rc.2
                         v0.1.4 -> DSH 0.2.0-rc.2
                         v0.1.3 -> DSH 0.2.0-rc.2
                         v0.1.2 -> DSH 0.2.0-rc.2
@@ -75,11 +76,10 @@ plugin v0.1.2  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe
 plugin v0.1.3  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.4  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.5  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
-working tree   ->  DSH 0.2.1-rc.2   reference commit 687f282e8625c6b8d11ff58211a90524be2e4317
-                   (unreleased: version 0.1.5 source, compatibility ACCEPTED, no publication yet)
+plugin v0.1.6  ->  DSH 0.2.1-rc.2   reference commit 687f282e8625c6b8d11ff58211a90524be2e4317
 ```
 
-**`0.2.1-rc.2` is the normative runtime for the current working tree.** Phase 11.0 moved the development target to it
+**`0.2.1-rc.2` is the normative runtime for `v0.1.6`.** Phase 11.0 moved the development target to it
 and re-audited every DSH declaration this plugin reads — the session event envelope, the session-controller event window
 and settlement contracts, the transient `agent/assistant-stream` / `assistant/live-chunk` plane,
 `sessions.binding(sessionId)`, the `conversation.input.dock` slot contract, the compact `AssistantStreamRecord` decoder
@@ -134,11 +134,11 @@ Phase 11.0R 用一次专门构造的真实 turn 重新测试 R5，观察到了�
 `v0.1.2` is the release in which the `0.2.0-rc.2` target became the shipped one, and `v0.1.3`, `v0.1.4` and `v0.1.5`
 carry it forward unchanged. Those published artifacts are immutable — `v0.1.5`, `v0.1.4`, `v0.1.3` and `v0.1.2`
 declare `0.2.0-rc.2` and `v0.1.1` still declares `0.1.7-rc.2` — so the releases are **separately bounded** rather than
-expressed as one range. The working tree is a separate, **unreleased** state: version `0.1.5` source with the
-`0.2.1-rc.2` peer, no npm publication, no tag and no GitHub Release. Phase 11.0/11.0R is a source compatibility
-migration and its runtime acceptance, not a release round.
+expressed as one range. `v0.1.6` is the first release on the `0.2.1-rc.2` line: Phase 11.0 migrated the source and
+Phase 11.0R accepted the runtime, and the release round itself adds no TPS, TTFT, estimator, curve, rendering or
+lifecycle algorithm change.
 
-**`0.2.1-rc.2` 是当前工作树的规范运行时。** Phase 11.0 将开发目标迁移到该版本，并对照隔离安装的 `0.2.1-rc.2` 与上述公开
+**`0.2.1-rc.2` 是 `v0.1.6` 的规范运行时。** Phase 11.0 将开发目标迁移到该版本，并对照隔离安装的 `0.2.1-rc.2` 与上述公开
 参考 commit，重新审计了本插件读取的全部 DSH 声明——会话事件信封、session-controller 的事件窗口与结算契约、瞬态
 `agent/assistant-stream` / `assistant/live-chunk` 平面、`sessions.binding(sessionId)`、`conversation.input.dock` 插槽
 契约、紧凑 `AssistantStreamRecord` 解码及其 usage 字段与工具计时事件、Web 客户端 bundle 加载与 React 插槽生命周期，
@@ -156,8 +156,8 @@ subagent/安装管线）。adapter 代码未移动，指标语义未移动，也
 
 `v0.1.2` 是 `0.2.0-rc.2` 目标转为正式发布的版本，`v0.1.3`、`v0.1.4` 与 `v0.1.5` 原样延续该目标。这些已发布产物不可
 变更——`v0.1.5`、`v0.1.4`、`v0.1.3` 与 `v0.1.2` 声明 `0.2.0-rc.2`，`v0.1.1` 仍声明 `0.1.7-rc.2`——因此各发布版本是
-**各自限定**的，而不是写成一个范围。工作树是另一个**未发布**状态：版本为 `0.1.5` 源码、peer 为 `0.2.1-rc.2`，
-没有 npm 发布、tag 或 GitHub Release。Phase 11.0/11.0R 是源码兼容性迁移及其运行时验收，不是发布轮次。
+**各自限定**的，而不是写成一个范围。`v0.1.6` 是 `0.2.1-rc.2` 线上的首个发布：Phase 11.0 完成了源码迁移，Phase 11.0R
+完成了运行时验收，发布轮次本身不引入任何 TPS、TTFT、估计器、曲线、渲染或生命周期算法变化。
 
 Phase 7D migrated the adapter, the client feed and the completion path to that version: tool results are identified
 through the first-class tool-role message (`message.toolCallId`, `message.isError`), the bare `settleAssistant(attemptId)`
@@ -204,19 +204,20 @@ runtime, so the prerequisite follows §2.1: **install the runtime that matches t
 
 | Installing | Required DSH |
 |---|---|
-| `@0.1.5` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.6` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.2.1-rc.2` |
+| `@0.1.5` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.4` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.3` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.1.7-rc.2` |
-| the development checkout (§3.4), unreleased `0.2.1-rc.2` target | `@deepseek-ai/dsh@0.2.1-rc.2` |
+| the development checkout (§3.4) | `@deepseek-ai/dsh@0.2.1-rc.2` |
 
 ```powershell
-# released v0.1.5 artifacts (npm / GitHub Release), and every historical release above
-npm install -g @deepseek-ai/dsh@0.2.0-rc.2
-
-# the unreleased development checkout after Phase 11.0R
+# released v0.1.6 artifacts (npm / GitHub Release)
 npm install -g @deepseek-ai/dsh@0.2.1-rc.2
+
+# released v0.1.5 and every historical release above
+npm install -g @deepseek-ai/dsh@0.2.0-rc.2
 
 # historical v0.1.1 only
 npm install -g @deepseek-ai/dsh@0.1.7-rc.2
@@ -230,12 +231,13 @@ compatibility only, and no DSH release other than the three named above has been
 
 | 安装对象 | 所需 DSH |
 |---|---|
-| `@0.1.5`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| `@0.1.6`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.2.1-rc.2` |
+| `@0.1.5`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.4`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.3`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.1.7-rc.2` |
-| 开发检出目录（§3.4），未发布的 `0.2.1-rc.2` 目标 | `@deepseek-ai/dsh@0.2.1-rc.2` |
+| 开发检出目录（§3.4） | `@deepseek-ai/dsh@0.2.1-rc.2` |
 
 不要安装任意“最新”DSH 并假定插件可在其上运行：本插件只声明精确的运行时兼容性，且除上述三个版本之外本项目未验证任何
 DSH 版本。
@@ -251,24 +253,24 @@ Pin the version for a reproducible install:
 固定版本以获得可复现的安装：
 
 ```powershell
-dsh plugin --profile web add dsh-turn-performance-meter@0.1.5
+dsh plugin --profile web add dsh-turn-performance-meter@0.1.6
 ```
 
-The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.5` exactly. Both install a frozen
+The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.6` exactly. Both install a frozen
 copy of the published artifact.
 
-无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.5`。两者安装的都是已发布产物的冻结副本。
+无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.6`。两者安装的都是已发布产物的冻结副本。
 
 ### 3.3 GitHub Release tarball (offline fallback) / GitHub Release tarball（离线回退）
 
-Download `dsh-turn-performance-meter-0.1.5.tgz` from the
-[v0.1.5 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.5), then install it:
+Download `dsh-turn-performance-meter-0.1.6.tgz` from the
+[v0.1.6 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.6), then install it:
 
-从 [v0.1.5 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.5) 下载
-`dsh-turn-performance-meter-0.1.5.tgz` 后安装：
+从 [v0.1.6 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.6) 下载
+`dsh-turn-performance-meter-0.1.6.tgz` 后安装：
 
 ```powershell
-dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.5.tgz"
+dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.6.tgz"
 ```
 
 This is the offline and immutable fallback, and the asset is the same tarball the npm registry serves. `file:` on a
@@ -284,8 +286,8 @@ Verify the download before installing:
 安装前校验下载内容：
 
 ```powershell
-Get-FileHash .\dsh-turn-performance-meter-0.1.5.tgz -Algorithm SHA256
-Get-Content .\dsh-turn-performance-meter-0.1.5.tgz.sha256
+Get-FileHash .\dsh-turn-performance-meter-0.1.6.tgz -Algorithm SHA256
+Get-Content .\dsh-turn-performance-meter-0.1.6.tgz.sha256
 ```
 
 ### 3.4 Development checkout / 开发检出
@@ -518,9 +520,9 @@ this repository is a local test result, not CI. The implementation log keeps the
 ```text
 dsh-turn-performance-meter/
 ├─ README.md
-├─ CHANGELOG.md                      Release history (0.1.5)
+├─ CHANGELOG.md                      Release history (0.1.6)
 ├─ LICENSE                           MIT
-├─ package.json                      version 0.1.5, published to npm, scripts: test / build:client / verify
+├─ package.json                      version 0.1.6, published to npm, scripts: test / build:client / verify
 ├─ cordis.patch.yml                  Bundle row insertion; the only DSH composition this plugin adds
 ├─ index.js                          host entry (no-op by design; telemetry is client-side)
 ├─ client.js                         GENERATED browser bundle (npm run build:client)

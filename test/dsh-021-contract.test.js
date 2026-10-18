@@ -112,7 +112,7 @@ function settlementEntry(type, seq, time, options) {
 // Compatibility metadata
 // ---------------------------------------------------------------------------
 
-test('the DSH peer is pinned exactly to the 0.2.1-rc.2 target, with the 0.1.5 source version still unreleased', async () => {
+test('the DSH peer is pinned exactly to the 0.2.1-rc.2 target, with the 0.1.6 release version paired to it', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   /**
@@ -131,9 +131,9 @@ test('the DSH peer is pinned exactly to the 0.2.1-rc.2 target, with the 0.1.5 so
   }
   assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
 
-  // Phase 11.0 is an unreleased source phase: the peer moves, the version does
-  // not. No npm publication, tag or release is created by this migration.
-  assert.equal(manifest.version, '0.1.5', 'the unreleased source phase keeps the 0.1.5 package version')
+  // v0.1.6 is the release round for the accepted 0.2.1-rc.2 target: the peer
+  // and the version move together, and v0.1.5 stays bound to 0.2.0-rc.2.
+  assert.equal(manifest.version, '0.1.6', 'the release version is paired with the 0.2.1-rc.2 peer')
 })
 
 test('the 0.2.0-rc.2 contract file is retained as historical evidence rather than restamped', async () => {

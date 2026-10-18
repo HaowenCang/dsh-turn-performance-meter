@@ -7,11 +7,17 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
-## Unreleased — DSH 0.2.1-rc.2 compatibility (Phase 11.0 / 11.0R)
+## 0.1.6 — 2026-10-17
 
-Development target moved from DSH `0.2.0-rc.2` to `0.2.1-rc.2` (public reference commit
-`687f282e8625c6b8d11ff58211a90524be2e4317`). **This section is not a release:** the package version stays `0.1.5`, and no
-npm publication, Git tag or GitHub Release exists for this target yet.
+Supported and tested against DSH `0.2.1-rc.2` only. **No support claim is made beyond DSH `0.2.1-rc.2`**, and the
+`v0.1.5` claim stays bounded to `0.2.0-rc.2` while the `v0.1.1` claim stays bounded to `0.1.7-rc.2`; the releases are
+separate claims, not one range.
+
+First release for DSH `0.2.1-rc.2`. The development target moved from `0.2.0-rc.2` to `0.2.1-rc.2` (public reference
+commit `687f282e8625c6b8d11ff58211a90524be2e4317`) in Phase 11.0, and Phase 11.0R closed the runtime acceptance, so the
+exact `0.2.1-rc.2` peer is now shipped. **No TPS, TTFT, estimator, curve, rendering or lifecycle algorithm changed** —
+this is a runtime-target and metadata release, and the frozen metric semantics and the 100 ms presentation cadence are
+unchanged. `v0.1.5` remains published for `0.2.0-rc.2` and is not restamped.
 
 - Exact peer is now `"@deepseek-ai/dsh": "0.2.1-rc.2"`; `0.2.0-rc.2` is no longer the declared runtime peer. DSH
   evaluates the declared peer before installing or loading a plugin, so the declaration moved with the target. No
@@ -40,9 +46,13 @@ npm publication, Git tag or GitHub Release exists for this target yet.
   pre-existing `SetNamedSecurityInfoW / Win32 5` ACL error — so no checkpoint output is claimed; the genuine
   call/result cycles are what produced the boundaries. Limits: reasoning effort Off (no reasoning-phase boundary), one
   turn/session/provider route, and the runtime evidence is locally captured (`dev/phase11R/`, not pushed) while the
-  independent GitHub remote-source audit passed separately. No release has occurred: the version is still `0.1.5`, and
-  the published `v0.1.5` npm package, tag and GitHub Release remain bound to DSH `0.2.0-rc.2`. See
+  independent GitHub remote-source audit passed separately. `v0.1.6` ships that accepted compatibility; the published
+  `v0.1.5` npm package, tag and GitHub Release remain bound to DSH `0.2.0-rc.2`. See
   `docs/IMPLEMENTATION_LOG.md` Phase 11.0R.
+
+Distribution is unchanged: public npm registry as the primary form, GitHub Release `.tgz` as the offline fallback, and
+a runtime-only file allowlist. The standard install command resolves this version through the `latest` dist-tag;
+`…@0.1.6` pins it.
 
 ## 0.1.5 — 2026-10-07
 
