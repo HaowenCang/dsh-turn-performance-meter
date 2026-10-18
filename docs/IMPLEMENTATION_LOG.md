@@ -6110,3 +6110,200 @@ Release exist, and the released `v0.1.5` npm package, Git tag and GitHub Release
 interface incompatibility, exact peer accepted, install/boot/dock and seven of the eight functional items observed), but
 one required real-runtime item — R5's eligible continuity-connector occurrence on a real turn — was not observed, so
 compatibility is not declared accepted in this round.
+
+*Historical record: this BLOCKED verdict stands as the state at the end of Phase 11.0. The subsequent Phase 11.0R round
+observed the missing R5 occurrence on a real turn and closed the phase; see below.*
+
+## Phase 11.0R — DSH 0.2.1-rc.2 R5 acceptance closure (2026-10-17)
+
+### 1. Scope, frozen state, and what this round is not
+
+Phase 11.0 ended **BLOCKED — RUNTIME ACCEPTANCE** on a single item: R5's eligible continuity-connector occurrence was not
+observed on a real turn, so the migration was preserved locally and not pushed. This round re-tests exactly that item on
+the same frozen source and then closes the phase. Its **source delta is documentation-only**: `package.json`, `src/`,
+`index.js`, `client.js`, `lib/client.js`, `cordis.patch.yml` and `test/` are untouched, `"version"` stays `0.1.5`, the
+peer stays exactly `"@deepseek-ai/dsh": "0.2.1-rc.2"`, and no production source line changed. No runtime or generated
+bundle rebuild was necessary; the committed bundle remains **629,459 bytes**, `client.js` and `lib/client.js`
+byte-identical, SHA-256 `BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1`.
+
+Preconditions were verified read-only and all three identities held: local migration commit
+`6963eae24ad797a508f26e0293af3cf2b8fa5553`; remote review branch `compat/dsh-021-rc2-review` = the same commit;
+`origin/main` = `06ffa9855beb1fb64155203281e873a7ba63efdd` (the `v0.1.5` release source). Local `main` was one commit
+ahead of `origin/main`, the tracked tree was clean, and the only untracked files were the preserved root `v0.1.5` release
+artifacts (`dsh-turn-performance-meter-0.1.5.tgz` + `.sha256`). Tags `v0.1.0`–`v0.1.5` and the published npm/GitHub
+versions were untouched. No reset, rebase, amend or force push was performed.
+
+### 2. Prior-corpus diagnosis — the complete boundary matrix
+
+Before the new run, every previously captured settled curve was re-read read-only (4 curve-bearing captures → 5 distinct
+settled snapshots → 10 attempt records → 5 boundaries) and replayed through the **unchanged** production
+`curveViewModel`. The inputs are **REAL DSH OBSERVATION**; the replay is **LOCAL TEST RESULT**. Narrative:
+`dev/phase11R/audit/R5-boundary-matrix.md`; machine data: `dev/phase11R/audit/boundary-matrix.json`.
+
+| # | Outgoing → incoming attempt | Phase | Compressed end→start | Finite publishable TPS A / B | Cut crossing? | Decision | Production connector |
+|---|---|---|---|---|---|---|---|
+| B1 | `durable:19 → durable:25` | output→output | 64 → 64 ms | 0/2 → 9/10 | no | **INELIGIBLE_PUBLICATION_GATE** | 0 (correct) |
+| B2 | `session-cf1284…:1 → :2` | output→output | 121 → 121 ms | 2/3 → 6/7 | no | **ELIGIBLE** | 1 — `M17.98 22.11 L32.84 41.51` |
+| B3 | `session-d730…:1 → :2` (R5 turn 1) | output→output | 84 → 84 ms | 0/2 → 11/12 | no | **INELIGIBLE_PUBLICATION_GATE** | 0 (correct) |
+| B4 | `session-4f85…:1 → :2` (R5 turn 2) | output→output | 30 → 30 ms | 0/2 → 10/12 | no | **INELIGIBLE_PUBLICATION_GATE** | 0 (correct) |
+| B5 | `durable:19 → durable:27` (same turn as B2) | output→output | 121 → 121 ms | 2/3 → 6/7 | no | **ELIGIBLE** | 1 — identical path to B2 |
+
+Three of the five boundaries are **genuinely ineligible**: the outgoing attempt is too short to publish any rate under
+the frozen shared gate (`MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, `src/core/rate-publication.js:59,62`), so
+`connectorCount = 0` is the correct production output there, not a missing connector. Two boundaries are eligible and
+each produces exactly one connector — but that r3 turn never opened its curve panel, so this is prior **view-model**
+evidence with **no DOM capture**; it is corroborating, not DOM-rendering, evidence.
+
+The Phase 11.0 sentence "no eligible same-phase adjacent attempt boundary occurred naturally on this real turn" remains
+accurate for the two R5 turns it described (B3/B4, both blocked by the publication gate). The broader prior corpus did
+contain one eligible boundary (B2/B5), which this closure records rather than leaves implicit. Negative-case correctness
+holds across the corpus: no ineligible boundary produced a connector and no eligible boundary lacked one. The
+`PHASE_MISMATCH`, `PHASE_CUT`, `RENDER_BUDGET` and `NONADJACENT` negative paths are not present in the prior corpus;
+they stay covered by the deterministic suite and the fixture-replay inventory.
+
+No rule, threshold, event window, telemetry path or geometry was changed. `hasPhaseCutBetween` only rejects cuts that
+cross the boundary runs; the two cuts in the new turn that declare the same phase already in force are inert under
+`buildPhaseEpisodes`.
+
+### 3. Targeted real DSH 0.2.1-rc.2 R5 run — the missing occurrence observed
+
+| Fact | Value |
+|---|---|
+| Runtime | installed `@deepseek-ai/dsh` **0.2.1-rc.2**, served boot release `0.2.1-rc.2` |
+| Profile / host | isolated disposable `tpm-phase11-iso`; `127.0.0.1:50111`, dedicated cwd workspace |
+| Provider | shipped `DeepSeek Account → DeepSeek-V4.1-Flash` route, reasoning effort Off; no stream or event injection |
+| Browser | dedicated headless Chrome 155 over CDP port 9333, throwaway user-data-dir |
+| Plugin | `dsh-turn-performance-meter` 0.1.5, served bundle rev `a5b665752098`; served prefix SHA-256 = repo `client.js` = `lib/client.js` = installed profile copy |
+| Protected resources | operator GUI on 1911 never contacted or signalled; protected `web`/`desktop` profiles only metadata-read |
+
+One genuine model turn was driven (session `session-c5b079f4-2e4d-4127-b360-2020799a78fb`, turn 1) with a genuine,
+non-injected request that asked for two `pwsh` checkpoint calls, each preceded by visible prose. It produced:
+
+| Attempt | Phase | Compressed window | Durable `outputTokens` | Output deltas | Cuts |
+|---|---|---|---|---|---|
+| `…:1` | output | 0 – 2494 ms | 454 | 419 | localMs 2358, output (inert) |
+| `…:2` | output | 2494 – 4951 ms | 508 | 473 | localMs 2320, output (inert) |
+| `…:3` | output | 4951 – 6772 ms | 304 | 304 | — |
+
+- **3 attempts**; **2 tool call → result cycles** (`pwsh` ×2); footer `tools 2 · 0.0s`; generated tokens
+  `454 + 508 + 304 = 1,266`; TTFT 1,018 ms; turn elapsed 9,849 ms; `turn/end` reason `completed`.
+- **The checkpoint commands did not succeed.** Both `pwsh` results are errors —
+  `Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\Projects\DSHarness\dsh-turn-performance-meter)` — the
+  host sandbox refused before executing the command, so `R5-CHECKPOINT-1`/`R5-CHECKPOINT-2` were never printed and no
+  file was touched. The call → result cycles are genuine, and the model continuing after each error result is what
+  produced attempts 2 and 3. The identical failure is present in the Phase 11.0 R3 tool turn, so it is pre-existing
+  host/environment behaviour, not a Phase 11.0R regression and not a connector or plugin defect. No checkpoint command
+  success is claimed anywhere in this record.
+
+Both naturally occurring boundaries are ELIGIBLE under the unchanged rules:
+
+| # | Outgoing → incoming | Phase | Compressed end→start | Finite publishable TPS A / B | Cut crossing? | Degraded | Decision | Connector |
+|---|---|---|---|---|---|---|---|---|
+| B6 | `…:1 → …:2` | output→output | 2494 → 2494 ms (Δ0) | 24/26 → 25/26 | no | false/false | **ELIGIBLE** | 1 — `M36.83 14.42 L38.3 38.11` |
+| B7 | `…:2 → …:3` | output→output | 4951 → 4951 ms (Δ0) | 25/26 → 19/20 | no | false/false | **ELIGIBLE** | 1 — `M73.11 10.22 L74.59 19.3` |
+
+Curve facts: `durationMs 6772`, `peakTps 226`, 3 runs (all output phase), `renderBudget`
+`{total:512, allocated:72, runs:3, degradedRuns:0, lineVertices:68, markers:0, elementPoints:68, peakRun:1,
+peakRetained:true}`. The authoritative settled snapshot is
+`dev/phase11R/runtime/out/r5r-continuity/r5r.turn1.final-checks.json`; an independent second pass recomputed the same
+numbers from the captured snapshot, the real DOM and the durable session log with **64/64 machine checks, 0 failed**
+(`dev/phase11R/audit/new-turn-independent-verification.md`).
+
+### 4. Real DOM connectors and exact metric preservation
+
+The curve panel was opened through the real expand → hover interaction in the actual DSH page and read from the live
+DOM; a second fresh expand/hover reproduced the identical result.
+
+| DOM fact | Observed | Expected from unchanged `curveViewModel` |
+|---|---|---|
+| `data-points` | 68 | `drawnPoints` 68 ✅ |
+| `data-markers` | 0 | `markers.length` 0 ✅ |
+| **`data-connectors`** | **2** | `connectorCount` 2 ✅ |
+| connector elements | 2 × `path.dsh-tpm-series.dsh-tpm-connector` | 2 ✅ |
+| connector 1 | `data-series="output"`, `data-from-attempt="…:1"`, `data-to-attempt="…:2"`, `d="M36.83 14.42 L38.3 38.11"` | same ✅ |
+| connector 2 | `data-series="output"`, `data-from-attempt="…:2"`, `data-to-attempt="…:3"`, `d="M73.11 10.22 L74.59 19.3"` | same ✅ |
+| measured run paths | 3 `path.dsh-tpm-series` `d` strings | character-identical to the local view model ✅ |
+| peak / axis | `≈226 tokens/s` / axis `250` | `peak 226`, `axis 250` ✅ |
+
+**Exact metric preservation** — the connectors changed geometry only, no measured statistic: settled projection columns
+equal the expanded card cells (reasoningTps `—`; outputTps `≈187 tokens/s`, secondary `6.8s · ≈1,266`; generatedTokens
+`1,266 tokens`, secondary `elapsed 9.8s`; TTFT `1.02 s`, secondary `completed`) — 4/4 equal; generated tokens `1,266` =
+durable `454 + 508 + 304`; peak `226` = view model = DOM; `data-points` 68 is not inflated by the two connectors;
+markers `0`; the settle projection and the after-hover projection are identical; **0 plugin-origin console errors**.
+
+Screenshots (real browser, local-only evidence): `turn1-curve.png` (full viewport, panel open),
+`turn1-curve-connectors-zoom.png` (4× panel), `turn1-plot-zoom.png` (4× plot),
+`turn1-connector-1-zoom.png` / `turn1-connector-2-zoom.png` (8× per connector, both strokes visibly rendered between the
+measured subpaths), plus collapsed/expanded/full and recheck captures under `dev/phase11R/runtime/out/r5r-continuity/`.
+
+### 5. Evidence classes, stated limits, and the historical record
+
+Two evidence classes are kept apart in this record:
+
+- **Reported real-runtime evidence.** The attempt, DOM and preservation observations above were produced by this
+  phase's own run on the local workstation and are stored under `dev/phase11R/`, which is excluded from git through
+  `.git/info/exclude` and is not pushed. They are reproducible only by re-running the host; they are reported
+  observations, not independently replayed ones.
+- **Independently verified remote source evidence.** The compatibility commit `6963eae…` on
+  `compat/dsh-021-rc2-review`, the public `0.2.1-rc.2` reference commit
+  `687f282e8625c6b8d11ff58211a90524be2e4317`, and the `origin/main` release source `06ffa98…` were audited
+  independently against their GitHub-hosted sources; the **independent GitHub source audit passed**. A source audit
+  establishes source identity and interface compatibility; it does not observe browser rendering, so it does not
+  substitute for the runtime evidence above.
+
+Limits of the acceptance, recorded rather than smoothed:
+
+1. The two `pwsh` checkpoints did not execute (host sandbox `SetNamedSecurityInfoW / Win32 5` ACL failure). The
+   call → result cycles are genuine and produced the two boundaries; no checkpoint output exists.
+2. Reasoning effort was Off, so no reasoning-phase boundary was observed (`NOT OBSERVED` by design); both observed
+   boundaries are `output → output`, the shape the R5 contract targets.
+3. One real turn / one session / one provider route. That capture contains no ineligible boundary; negative-case
+   fidelity comes from the prior real corpus (§2) and the deterministic suite.
+4. `DSH_HOME` must be shared for the credential service, so the run appended sessions to the shared store (disclosed):
+   the genuine `session-c5b079f4…` and a blank `session-b40410de…` created by the GUI on first page load. No protected
+   profile was written.
+5. No controlled replay was performed or needed; the fixture-replay fallback was only inventoried, so no
+   `CONTROLLED INTEGRATION OBSERVATION` is claimed.
+
+The Phase 11.0 failure record above is preserved unedited as history. It was accurate for the two turns it described;
+Phase 11.0R supplies the occurrence those turns lacked.
+
+### 6. Deterministic gates on the frozen tree
+
+```text
+npm run verify                          PASS — structure OK (14 required files, 16 core modules, 76 test files,
+                                        client bundle fresh, lib/client.js mirrored);
+                                        tests 915 · pass 915 · fail 0 · cancelled 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs    PASS — 22 forbidden terms absent, 9 fixtures structurally preserved,
+                                        redaction fixed-point verified
+git diff --check                        clean
+client.js == lib/client.js              629,459 bytes, SHA-256 BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1
+frozen constants                        MIN_RATE_SAMPLES = 3 (`src/core/rate-publication.js:59`),
+                                        MIN_RATE_ELAPSED_MS = 100 (`:62`),
+                                        DEFAULT_PRESENTATION_REFRESH_MS = 100 (`src/client/live/cadence.js:37`)
+```
+
+`git diff 06ffa98..HEAD -- src/core src/client` is empty, so the migration commit did not touch the metric engine or
+the client renderer; its 17-file delta is the documented migration set only. No test was skipped, todo'd, deleted or
+tolerance-widened, and no new deterministic test was added in this round because no source or contract changed.
+
+### 7. Git, branch, and release discipline
+
+The documentation closure is an ordinary commit (no `--amend`, no rebase of pushed history, no `--force`,
+no `--force-with-lease`). The remote review branch `compat/dsh-021-rc2-review` was advanced to it by a **normal
+fast-forward** from `6963eae…`; `origin/main` was then confirmed still `06ffa98…` and the review branch confirmed to
+descend linearly from it before `main` was fast-forwarded to the same closure commit. Final state:
+`HEAD == origin/main ==` the closure commit, divergence `0 0`.
+
+Nothing was published, versioned, tagged or released: the package version stays `0.1.5`, no `v0.1.6` tag exists, no
+npm publication and no GitHub Release were created, and the published `v0.1.5` artifacts (npm package, Git tag, GitHub
+Release asset) remain untouched and bound to DSH `0.2.0-rc.2`. The working tree declares the exact peer
+`0.2.1-rc.2`; no compatibility exemption is used.
+
+### 8. Verdict
+
+**PASS — PHASE 11.0R CLOSED; DSH 0.2.1-rc.2 COMPATIBILITY ACCEPTED.** The single item that blocked Phase 11.0 was
+observed on a real DSH `0.2.1-rc.2` turn: **3 attempts, 2 tool call → result cycles, 2 naturally eligible same-phase
+boundaries, and 2 continuity connectors rendered in the real DOM**, with the measured statistics preserved exactly. The
+earlier BLOCKED record remains in place as history; compatibility is now declared accepted for the unreleased `0.1.5`
+source tree. No release has occurred; this is the base for a future v0.1.6 release preparation, not a release.

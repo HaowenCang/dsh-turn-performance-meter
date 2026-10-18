@@ -13,15 +13,17 @@ provides two UI modes: a compact live meter during execution and a completed tur
 > `dsh-turn-performance-meter-0.1.5.tgz` is an offline fallback, and the local checkout is for development. §2.1 holds
 > the release/runtime matrix.
 >
-> **The unreleased development checkout now targets DSH `0.2.1-rc.2`** (Phase 11.0, source only). The published
-> `v0.1.5` artifact remains bound to `0.2.0-rc.2` and is not restamped; no new npm publication, tag or GitHub Release
-> exists for the `0.2.1-rc.2` target yet.
+> **The unreleased development checkout targets DSH `0.2.1-rc.2`** — Phase 11.0 migrated the source and Phase 11.0R
+> closed the runtime acceptance, so **compatibility with `0.2.1-rc.2` is ACCEPTED** (unreleased source; no release has
+> occurred). The published `v0.1.5` artifact remains bound to `0.2.0-rc.2` and is not restamped; no new npm
+> publication, tag or GitHub Release exists for the `0.2.1-rc.2` target yet.
 >
 > **已发布 npm 与 GitHub `v0.1.5`，面向 DSH `0.2.0-rc.2`。** 版本 `0.1.5`，已发布到公开 npm registry。主要分发方式为
 > npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.5.tgz` 作为离线回退，本地检出
 > 目录用于开发。发布与运行时对应关系见 §2.1。
 >
-> **未发布的开发检出目录现已面向 DSH `0.2.1-rc.2`**（Phase 11.0，仅源码阶段）。已发布的 `v0.1.5` 产物仍绑定
+> **未发布的开发检出目录面向 DSH `0.2.1-rc.2`**——Phase 11.0 完成了源码迁移，Phase 11.0R 完成了运行时验收，因此
+> **`0.2.1-rc.2` 兼容性为 ACCEPTED（已接受）**（未发布源码，尚未发生任何发布）。已发布的 `v0.1.5` 产物仍绑定
 > `0.2.0-rc.2`，不做改写；该 `0.2.1-rc.2` 目标目前尚无新发布、tag 或 GitHub Release。
 
 ## 1. What it does / 功能
@@ -52,9 +54,8 @@ React layer never re-derives a metric.
 
 ```text
 Version (working tree): 0.1.5
-Development target:     DSH 0.2.1-rc.2 only (unreleased source, Phase 11.0)
-Runtime acceptance:     PARTIAL — R5 connector occurrence NOT OBSERVED; no
-                        compatibility-accepted claim, not pushed (see IMPLEMENTATION_LOG §11.0)
+Development target:     DSH 0.2.1-rc.2 only (unreleased source, Phase 11.0/11.0R)
+Compatibility status:   ACCEPTED — DSH 0.2.1-rc.2 (Phase 11.0R R5 real-run acceptance)
 Released:               v0.1.5 -> DSH 0.2.0-rc.2
                         v0.1.4 -> DSH 0.2.0-rc.2
                         v0.1.3 -> DSH 0.2.0-rc.2
@@ -75,7 +76,7 @@ plugin v0.1.3  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe
 plugin v0.1.4  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.5  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 working tree   ->  DSH 0.2.1-rc.2   reference commit 687f282e8625c6b8d11ff58211a90524be2e4317
-                   (unreleased: version 0.1.5 source, no publication yet)
+                   (unreleased: version 0.1.5 source, compatibility ACCEPTED, no publication yet)
 ```
 
 **`0.2.1-rc.2` is the normative runtime for the current working tree.** Phase 11.0 moved the development target to it
@@ -97,26 +98,45 @@ The claim is bounded on purpose: it is not `0.2.1+`, not `0.2.x` and not "the la
 been exercised. Local evidence for the claim is the isolated `0.2.1-rc.2` installation, the CLI version output, the
 composed profile tree and the real-browser acceptance matrix, all recorded in `docs/IMPLEMENTATION_LOG.md`.
 
-**Runtime acceptance is partial, and this migration is not yet declared compatibility-accepted.** On the isolated
-`0.2.1-rc.2` host the plugin installed with the exact peer, booted into the served module graph, and passed boot/dock
-acceptance plus R1–R4, R7 and R8 with real model output; R6's backgrounding behaviour was observed across two real runs.
-R5's eligible continuity-connector occurrence was **not observed** on a real turn — the natural tool turns produced no
-eligible same-phase adjacent attempt boundary — so the phase verdict is **BLOCKED — RUNTIME ACCEPTANCE**. The tested
-source is preserved in a local commit that is not pushed to `main` until that item is observed. See
-`docs/IMPLEMENTATION_LOG.md` Phase 11.0 §6 and §8.
+**Runtime acceptance: Phase 11.0 ended BLOCKED at R5; Phase 11.0R closed it, and compatibility with `0.2.1-rc.2` is now
+ACCEPTED.** On the isolated `0.2.1-rc.2` host the plugin installed with the exact peer, booted into the served module
+graph, and passed boot/dock acceptance plus R1–R4, R7 and R8 with real model output; R6's backgrounding behaviour was
+observed across two real runs. Phase 11.0's single unresolved item was R5: no eligible continuity-connector boundary
+occurred on the two natural tool turns it captured, so it recorded **BLOCKED — RUNTIME ACCEPTANCE** and deliberately did
+not push the migration. That record stands as the historical state at the end of Phase 11.0.
 
-**运行时验收是部分的，本次迁移尚未被宣布为兼容性通过。** 在隔离的 `0.2.1-rc.2` 主机上，插件以精确 peer 成功安装、进入
-服务端模块图，并通过 boot/dock 验收以及 R1–R4、R7、R8（真实模型输出）；R6 的后台恢复行为已在两次真实运行中观察到。
-R5 的“可拼接连续性连接线”在真实 turn 上**未被观察到**（自然工具 turn 未产生同相位相邻的合格边界），因此本阶段结论为
-**BLOCKED — RUNTIME ACCEPTANCE**：已验证源码保留在本地提交中，在该项被观察到之前不会推送到 `main`。详见
-`docs/IMPLEMENTATION_LOG.md` Phase 11.0 §6 与 §8。
+Phase 11.0R re-tested R5 on a purpose-built genuine turn and observed the missing occurrence: **3 attempts, 2 tool
+call/result cycles, 2 naturally eligible same-phase boundaries**, and **2 continuity connectors rendered in the real
+DOM**, with the measured statistics preserved exactly (output TPS, peak, tokens, TTFT and the completed-card totals
+unchanged). A read-only audit of the earlier R5 corpus also showed those two turns were correctly ineligible under the
+frozen publication gate, not a connector defect. The two `pwsh` checkpoint commands in the real turn did **not** execute
+— the host sandbox returned a pre-existing `SetNamedSecurityInfoW / Win32 5` ACL error — so no checkpoint output is
+claimed; the genuine call/result cycles are what produced the two boundaries. The runtime observations are locally
+reported evidence under `dev/phase11R/` (git-excluded, not pushed); the independent GitHub remote-source audit of the
+compatibility commit is a separate, source-level verification and does not substitute for runtime rendering. Full
+record: `docs/IMPLEMENTATION_LOG.md` Phase 11.0R. Verdict: **PASS — DSH 0.2.1-rc.2 COMPATIBILITY ACCEPTED.**
+
+**运行时验收：Phase 11.0 在 R5 处以 BLOCKED 结束；Phase 11.0R 完成了后续验收，`0.2.1-rc.2` 兼容性现已 ACCEPTED。**
+在隔离的 `0.2.1-rc.2` 主机上，插件以精确 peer 成功安装、进入服务端模块图，并通过 boot/dock 验收以及 R1–R4、R7、R8
+（真实模型输出）；R6 的后台恢复行为已在两次真实运行中观察到。Phase 11.0 唯一未完成项是 R5：它捕获的两个自然工具
+turn 未产生同相位相邻的合格边界，因此记录为 **BLOCKED — RUNTIME ACCEPTANCE**，并有意识地未推送该迁移；该记录作为
+Phase 11.0 结束时的历史状态保留。
+
+Phase 11.0R 用一次专门构造的真实 turn 重新测试 R5，观察到了缺失的那一项：**3 次 attempt、2 次工具调用/结果循环、
+2 个自然出现的同相位合格边界**，以及**真实 DOM 中渲染出的 2 条连续性连接线**，且测量统计精确保持不变（输出 TPS、
+峰值、token、TTFT 与完成态卡片总计均未变化）。对早期 R5 语料的只读审计还表明，那两个 turn 在冻结的发布门槛下确实
+不合格，并非连接线缺陷。真实 turn 中的两个 `pwsh` checkpoint 命令**并未执行**——宿主沙箱返回了既有的
+`SetNamedSecurityInfoW / Win32 5` ACL 错误——因此不声称任何 checkpoint 输出；真正产生两个边界的是真实的调用/结果
+循环。运行时观察属于本地报告的 `dev/phase11R/` 证据（被 git 排除、未推送）；独立的 GitHub 远端源码审计属于另一层
+源码级验证，不能替代运行时渲染。完整记录见 `docs/IMPLEMENTATION_LOG.md` Phase 11.0R。结论：
+**PASS — DSH 0.2.1-rc.2 COMPATIBILITY ACCEPTED。**
 
 `v0.1.2` is the release in which the `0.2.0-rc.2` target became the shipped one, and `v0.1.3`, `v0.1.4` and `v0.1.5`
 carry it forward unchanged. Those published artifacts are immutable — `v0.1.5`, `v0.1.4`, `v0.1.3` and `v0.1.2`
 declare `0.2.0-rc.2` and `v0.1.1` still declares `0.1.7-rc.2` — so the releases are **separately bounded** rather than
 expressed as one range. The working tree is a separate, **unreleased** state: version `0.1.5` source with the
-`0.2.1-rc.2` peer, no npm publication, no tag and no GitHub Release. Phase 11.0 is a source compatibility migration,
-not a release round.
+`0.2.1-rc.2` peer, no npm publication, no tag and no GitHub Release. Phase 11.0/11.0R is a source compatibility
+migration and its runtime acceptance, not a release round.
 
 **`0.2.1-rc.2` 是当前工作树的规范运行时。** Phase 11.0 将开发目标迁移到该版本，并对照隔离安装的 `0.2.1-rc.2` 与上述公开
 参考 commit，重新审计了本插件读取的全部 DSH 声明——会话事件信封、session-controller 的事件窗口与结算契约、瞬态
@@ -137,7 +157,7 @@ subagent/安装管线）。adapter 代码未移动，指标语义未移动，也
 `v0.1.2` 是 `0.2.0-rc.2` 目标转为正式发布的版本，`v0.1.3`、`v0.1.4` 与 `v0.1.5` 原样延续该目标。这些已发布产物不可
 变更——`v0.1.5`、`v0.1.4`、`v0.1.3` 与 `v0.1.2` 声明 `0.2.0-rc.2`，`v0.1.1` 仍声明 `0.1.7-rc.2`——因此各发布版本是
 **各自限定**的，而不是写成一个范围。工作树是另一个**未发布**状态：版本为 `0.1.5` 源码、peer 为 `0.2.1-rc.2`，
-没有 npm 发布、tag 或 GitHub Release。Phase 11.0 是源码兼容性迁移，不是发布轮次。
+没有 npm 发布、tag 或 GitHub Release。Phase 11.0/11.0R 是源码兼容性迁移及其运行时验收，不是发布轮次。
 
 Phase 7D migrated the adapter, the client feed and the completion path to that version: tool results are identified
 through the first-class tool-role message (`message.toolCallId`, `message.isError`), the bare `settleAssistant(attemptId)`
@@ -195,7 +215,7 @@ runtime, so the prerequisite follows §2.1: **install the runtime that matches t
 # released v0.1.5 artifacts (npm / GitHub Release), and every historical release above
 npm install -g @deepseek-ai/dsh@0.2.0-rc.2
 
-# the unreleased development checkout after Phase 11.0
+# the unreleased development checkout after Phase 11.0R
 npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 
 # historical v0.1.1 only

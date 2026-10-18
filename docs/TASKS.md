@@ -1783,3 +1783,62 @@ release-readiness claim is made in this phase.**
 
 **Status: source migration complete and preserved; source compatibility CONFIRMED; runtime acceptance
 BLOCKED — RUNTIME ACCEPTANCE on the single unobserved R5 connector occurrence. Not pushed.**
+
+*Historical record: this is the state at the end of Phase 11.0. Phase 11.0R (below) observed the missing R5 occurrence
+and closed the phase.*
+
+## Phase 11.0R — DSH 0.2.1-rc.2 R5 acceptance closure (2026-10-17)
+
+- [x] **Preconditions verified read-only.** Local migration commit `6963eae24ad797a508f26e0293af3cf2b8fa5553`; remote
+      review branch `compat/dsh-021-rc2-review` = `6963eae…`; remote `main` = `06ffa9855beb1fb64155203281e873a7ba63efdd`.
+      Local `main` exactly one commit ahead of `origin/main` and zero behind; tracked tree clean except the preserved
+      untracked root `v0.1.5`
+      release artifacts; tags `v0.1.0`–`v0.1.5` and published npm/GitHub versions untouched; `package.json` version
+      `0.1.5`, peer exactly `0.2.1-rc.2`. Any unexpected divergence would have stopped the round.
+- [x] **Frozen implementation re-read, not changed.** Production connector rules and the rate publication gate are
+      unchanged (`src/client/completed/curve-view-model.js` `buildContinuityConnectors()` / `hasPhaseCutBetween()`;
+      `MIN_RATE_SAMPLES = 3` at `src/core/rate-publication.js:59`, `MIN_RATE_ELAPSED_MS = 100` at `:62`). No
+      threshold, event window, telemetry path or geometry moved.
+- [x] **Prior R5 corpus diagnosed instead of re-labelled.** Read-only matrix over 4 curve-bearing captures → 5 settled
+      snapshots → 10 attempts → 5 boundaries replayed through the unchanged view model: three boundaries are
+      `INELIGIBLE_PUBLICATION_GATE` (outgoing attempt too short to publish a rate) with 0 connectors — correct — and
+      two are eligible with exactly 1 connector each, but with no DOM capture (that turn never opened the curve panel).
+      Negative-case correctness holds: no eligible-without-connector and no ineligible-with-connector case.
+- [x] **Targeted real R5 run on DSH `0.2.1-rc.2`.** One genuine model turn on the isolated `0.2.1-rc.2` host
+      (disposable profile, real installed runtime, shipped `DeepSeek Account → DeepSeek-V4.1-Flash` route, dedicated
+      throwaway Chrome/CDP) produced **3 attempts** and **2 tool call → result cycles**, hence **2 naturally eligible
+      same-phase (`output→output`) attempt boundaries**.
+- [x] **Real DOM connector evidence.** The actual completed curve rendered `data-points 68` = view-model
+      `drawnPoints`, `data-markers 0`, **`data-connectors 2`** = `connectorCount 2`, with 2
+      `dsh-tpm-connector` paths carrying the expected `data-from-attempt`/`data-to-attempt` and `d` geometry; the 3
+      measured run paths are character-identical to the local view model. A second fresh expand/hover reproduced the
+      identical DOM.
+- [x] **Exact metric preservation.** Settled projection = expanded card = live DOM: reasoningTps `—`; outputTps
+      `≈187 tokens/s` (`6.8 s · ≈1,266`); generatedTokens `1,266 tokens`; TTFT `1.02 s` — 4/4 equal. Tokens `1,266` =
+      durable `454 + 508 + 304`; peak `226` = view model = DOM; points not inflated by connectors; markers `0`; 0
+      plugin-origin console errors.
+- [x] **Checkpoints not claimed.** The two `pwsh` checkpoint commands did **not** execute: the host sandbox returned
+      the pre-existing `SetNamedSecurityInfoW / Win32 5` ACL error, so `R5-CHECKPOINT-1`/`-2` were never printed. The
+      genuine call → result cycles are what produced attempts 2 and 3; no checkpoint success is claimed.
+- [x] **Limits recorded.** Reasoning effort Off, so no reasoning-phase boundary is claimed (both boundaries are
+      `output→output`); one turn / one session / one provider route; that capture has no ineligible boundary, so
+      negative fidelity rests on the prior real corpus and the deterministic suite; no controlled replay was used.
+- [x] **Evidence classes separated.** Runtime/DOM observations are locally reported evidence under `dev/phase11R/`
+      (git-excluded via `.git/info/exclude`, not pushed). The independent GitHub remote-source audit of the
+      compatibility commit passed; that audit verifies source identity and interfaces, not browser rendering.
+- [x] **Deterministic gates on the frozen tree.** `npm run verify` PASS — structure OK (14 required files, 16 core
+      modules, 76 test files, bundle fresh, mirror byte-identical) and **915 tests / 915 pass / 0 fail / 0 cancelled /
+      0 skipped / 0 todo**; `node scripts/verify-sanitization.mjs` PASS; `git diff --check` clean; `client.js` ==
+      `lib/client.js`, 629,459 bytes, SHA-256
+      `BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1`; frozen constants unchanged;
+      `git diff 06ffa98..HEAD -- src/core src/client` empty.
+- [x] **Source freeze held.** Documentation-only closure: no change to `package.json`, `src/`, `index.js`, `client.js`,
+      `lib/client.js`, `cordis.patch.yml` or `test/`; no rebuild; version stays `0.1.5`; peer exactly `0.2.1-rc.2`.
+- [x] **Integration by fast-forward only.** Closure commit pushed to the review branch by normal fast-forward; then
+      `main` fast-forwarded from `06ffa98…` through `6963eae…` to the same closure commit; `HEAD == origin/main`,
+      divergence `0 0`. No rebase, amend or force push.
+- [x] **No release.** No version bump, no `v0.1.6` tag, no npm publish, no GitHub Release, no historical release
+      modified; the published `v0.1.5` still targets DSH `0.2.0-rc.2`.
+
+**Status: PASS — PHASE 11.0R CLOSED; DSH 0.2.1-rc.2 COMPATIBILITY ACCEPTED. No release has occurred; ready for
+v0.1.6 release prep.**

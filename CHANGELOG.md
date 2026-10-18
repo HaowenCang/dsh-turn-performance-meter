@@ -7,7 +7,7 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
-## Unreleased — DSH 0.2.1-rc.2 source migration (Phase 11.0)
+## Unreleased — DSH 0.2.1-rc.2 compatibility (Phase 11.0 / 11.0R)
 
 Development target moved from DSH `0.2.0-rc.2` to `0.2.1-rc.2` (public reference commit
 `687f282e8625c6b8d11ff58211a90524be2e4317`). **This section is not a release:** the package version stays `0.1.5`, and no
@@ -27,12 +27,22 @@ npm publication, Git tag or GitHub Release exists for this target yet.
   generation-safe foreground recovery.
 - The published `v0.1.5` npm package, Git tag and GitHub Release remain bound to DSH `0.2.0-rc.2` and are preserved
   unchanged.
-- **Runtime acceptance is partial, so compatibility is not declared accepted.** On an isolated `0.2.1-rc.2` host the
-  plugin installed with the exact peer, booted into the served module graph, and passed boot/dock acceptance plus R1–R4,
-  R7 and R8 with real model output; R6's backgrounding behaviour was observed across two real runs. R5's eligible
-  continuity-connector occurrence was **not observed** on a real turn (natural tool turns produced no eligible
-  same-phase adjacent attempt boundary), so the phase verdict is **BLOCKED — RUNTIME ACCEPTANCE** and the preserved
-  source is not pushed to `main` until that item is observed. See `docs/IMPLEMENTATION_LOG.md` Phase 11.0.
+- **Phase 11.0 runtime acceptance ended BLOCKED at R5.** On an isolated `0.2.1-rc.2` host the plugin installed with the
+  exact peer, booted into the served module graph, and passed boot/dock acceptance plus R1–R4, R7 and R8 with real model
+  output; R6's backgrounding behaviour was observed across two real runs. R5's eligible continuity-connector occurrence
+  was **not observed** on a real turn (the natural tool turns produced no eligible same-phase adjacent attempt
+  boundary), so Phase 11.0 recorded **BLOCKED — RUNTIME ACCEPTANCE** and deliberately did not push the migration. That
+  record is preserved as the state at the end of Phase 11.0.
+- **Phase 11.0R closed R5; compatibility with DSH `0.2.1-rc.2` is now ACCEPTED.** A genuine `0.2.1-rc.2` turn produced
+  **3 attempts, 2 tool call/result cycles, 2 naturally eligible same-phase boundaries and 2 continuity connectors in the
+  real DOM**, with the measured statistics unchanged (output TPS, peak, tokens, TTFT and the completed-card totals
+  identical). The two `pwsh` checkpoint commands in that turn did **not** execute — the host sandbox returned the
+  pre-existing `SetNamedSecurityInfoW / Win32 5` ACL error — so no checkpoint output is claimed; the genuine
+  call/result cycles are what produced the boundaries. Limits: reasoning effort Off (no reasoning-phase boundary), one
+  turn/session/provider route, and the runtime evidence is locally captured (`dev/phase11R/`, not pushed) while the
+  independent GitHub remote-source audit passed separately. No release has occurred: the version is still `0.1.5`, and
+  the published `v0.1.5` npm package, tag and GitHub Release remain bound to DSH `0.2.0-rc.2`. See
+  `docs/IMPLEMENTATION_LOG.md` Phase 11.0R.
 
 ## 0.1.5 — 2026-10-07
 

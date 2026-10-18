@@ -1249,3 +1249,95 @@ placement/duplicate-registration checks, and the real-browser matrix R1–R8 (li
 output transition, tool execution, completed statistics, multi-attempt curve continuity, natural background recovery,
 reload/session switching, error/retry). Those observations are recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 11.0).
 A test cannot assert a browser's presentation cadence against a real host, so no test pretends to.
+
+## 18. Phase 11.0R — R5 real-run acceptance closure
+
+Phase 11.0R closes the one R5 item Phase 11.0 left unobserved. No production code, test file or contract changed in this
+round, so there are **no new deterministic tests**: the automated layer stays at **915 tests** on the same frozen tree.
+This section records how the previously missing real-runtime observation was obtained and what it does and does not
+prove.
+
+### 18.1 The testing question
+
+R5 asks whether a naturally occurring **eligible** same-phase multi-attempt boundary produces the continuity connector
+in the real completed curve, with the measured statistics unchanged. Phase 11.0 answered "not observed" for the two
+natural tool turns it captured. Phase 11.0R had to produce the occurrence without changing any rule, threshold or
+production line.
+
+### 18.2 Prior-corpus boundary matrix (LOCAL TEST RESULT over REAL DSH OBSERVATION)
+
+The previously captured settled curves were re-read read-only and replayed through the **unchanged** production
+`curveViewModel`: 4 curve-bearing captures → 5 settled snapshots → 10 attempt records → 5 boundaries.
+
+| # | Boundary | Classification | Connector |
+|---|---|---|---|
+| B1 | `durable:19 → durable:25` | INELIGIBLE_PUBLICATION_GATE (outgoing too short) | 0 — correct |
+| B2 | `session-cf1284…:1 → :2` | ELIGIBLE | 1 |
+| B3 | R5 turn 1 (`session-d730…`) | INELIGIBLE_PUBLICATION_GATE | 0 — correct |
+| B4 | R5 turn 2 (`session-4f85…`) | INELIGIBLE_PUBLICATION_GATE | 0 — correct |
+| B5 | same turn as B2, durable plane | ELIGIBLE | 1 (identical path) |
+
+The ineligible boundaries are correct: the outgoing attempt cannot publish a rate under the frozen
+`MIN_RATE_SAMPLES = 3` / `MIN_RATE_ELAPSED_MS = 100` gate (`src/core/rate-publication.js:59,62`), so `connectorCount = 0`
+is the production contract, not a missing connector. The eligible B2/B5 turn never opened its curve panel, so it is
+view-model evidence only, not DOM-rendering evidence. The Phase 11.0 prose remains accurate for the two turns it
+described; the broader corpus's eligible boundary is recorded here.
+
+### 18.3 Targeted real run (REAL DSH OBSERVATION, reported)
+
+Environment: installed `@deepseek-ai/dsh` **0.2.1-rc.2** (served boot release `0.2.1-rc.2`), isolated disposable profile
+`tpm-phase11-iso`, host `127.0.0.1:50111`, dedicated throwaway headless Chrome over CDP, shipped
+`DeepSeek Account → DeepSeek-V4.1-Flash` route with reasoning effort Off, plugin `0.1.5` served at bundle rev
+`a5b665752098` with prefix SHA-256 equal to the repo `client.js` and `lib/client.js`. One genuine model turn
+(`session-c5b079f4…`, turn 1) was driven:
+
+- **3 attempts**, all `output` phase, compressed windows `0–2494`, `2494–4951`, `4951–6772` ms;
+- durable `outputTokens` `454 / 508 / 304` (total `1,266`); TTFT 1,018 ms; turn elapsed 9,849 ms; `turn/end`
+  `completed`;
+- **2 tool call → result cycles** (`pwsh` ×2), footer `tools 2 · 0.0s`. Both `pwsh` results are **errors**
+  (`SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\Projects\DSHarness\dsh-turn-performance-meter)`); the host
+  sandbox refused before execution, so the checkpoint strings were never printed. The call → result cycles are genuine
+  and are what produced attempts 2 and 3. **No checkpoint command success is claimed.**
+- **2 naturally eligible boundaries**: B6 `…:1 → …:2` and B7 `…:2 → …:3`, both `output→output`, compressed end = start
+  (Δ0), finite publishable TPS on both sides, no crossing cut, no degraded run.
+
+### 18.4 Real DOM and metric preservation (REAL DSH OBSERVATION, reported)
+
+The curve panel was opened through the real expand → hover interaction and read from the live DOM; a second fresh
+expand/hover reproduced it.
+
+| DOM fact | Observed | View model |
+|---|---|---|
+| `data-points` | 68 | `drawnPoints` 68 |
+| `data-markers` | 0 | `markers.length` 0 |
+| `data-connectors` | **2** | `connectorCount` 2 |
+| connector elements | 2 × `path.dsh-tpm-series.dsh-tpm-connector` | 2 |
+| connector 1 | `data-from-attempt="…:1"` → `…:2`, `d="M36.83 14.42 L38.3 38.11"` | same |
+| connector 2 | `data-from-attempt="…:2"` → `…:3`, `d="M73.11 10.22 L74.59 19.3"` | same |
+| measured run paths | 3 `path.dsh-tpm-series` `d` strings | character-identical |
+
+**Exact metric preservation:** settled projection = expanded card = DOM — reasoningTps `—`; outputTps `≈187 tokens/s`
+(`6.8s · ≈1,266`); generatedTokens `1,266 tokens`; TTFT `1.02 s` (4/4 equal). Generated tokens `1,266` = durable
+`454 + 508 + 304`; peak `226` = view model = DOM; data-points `68` not inflated by the 2 connectors; markers `0`;
+0 plugin-origin console errors. An independent second pass over the captured snapshot, real DOM and durable session log
+recomputed the same numbers with 64/64 checks and 0 failures.
+
+### 18.5 Limits and evidence classes
+
+- Reasoning effort Off, so no reasoning-phase boundary is observed by design; both boundaries are `output→output`, the
+  shape R5 targets.
+- One real turn / one session / one provider route; the capture contains no ineligible boundary. Negative-case fidelity
+  comes from the prior real corpus (§18.2) and the deterministic suite, not from this turn.
+- The runtime/DOM observations are locally reported evidence stored under `dev/phase11R/` (git-excluded, not pushed).
+  They are reproducible only by re-running the host.
+- The independent GitHub remote-source audit of the compatibility commit (`6963eae…`) **passed**; it verifies source
+  identity and interface compatibility, not browser rendering, and does not substitute for the runtime observations.
+- No controlled replay was performed or needed, so no `CONTROLLED INTEGRATION OBSERVATION` is claimed.
+
+### 18.6 Totals
+
+**915 tests, 915 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo** — unchanged from Phase 11.0, because no code, contract or
+test changed in this round. `npm run verify` (structure + full runner) is green; `node scripts/verify-sanitization.mjs`
+passes; `git diff --check` is clean; `client.js` is byte-identical to `lib/client.js` at 629,459 bytes, SHA-256
+`BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1`; the frozen constants are unchanged. Test totals
+therefore carry over exactly: this phase proves the runtime acceptance item, not a new deterministic surface.
