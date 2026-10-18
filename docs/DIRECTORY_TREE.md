@@ -159,6 +159,9 @@ dsh-turn-performance-meter/
 │   ├── dsh-020-contract.test.js       Phase 9.3: the 0.2.0-rc.2 compatibility layer — envelope, boundaries,
 │   │                                  settlements, tool plane, compact-stream timing, the five stream chunks,
 │   │                                  settle-assistant semantics, the four window-change kinds, the exact peer pin
+│   ├── dsh-021-contract.test.js       Phase 11.0: the 0.2.1-rc.2 compatibility layer — the same wire-contract matrix
+│   │                                  re-pinned against the new reference commit, the retained 0.2.0 evidence, the
+│   │                                  client injection/dock declaration, frozen cadence and rate gates
 │   ├── background-settlement.test.js  Phase 9.3.1: a settlement ingested with no projection in between must project
 │   │                                  the newest settled turn first; completed identity and memo behaviour
 │   ├── rate-publication.test.js       Phase 9.4: the shared rate-publication policy as a pure function
@@ -214,7 +217,9 @@ test/          — landed in Phase 5 as curve-view-model.test.js and completed-i
                  Phase 9.4.4 added settlement-reconciliation; Phase 9.4.5 added
                  temporal-evidence-authority and extended curve-quality/curve-calibration/
                  dsh-equivalence/dsh-017-terminal-tail-recovery/runtime-robustness/settlement-reconciliation
-                 and the shared helpers/equivalence harness in place
+                 and the shared helpers/equivalence harness in place; Phase 11.0 added
+                 dsh-021-contract (the 0.2.1-rc.2 layer) and kept dsh-020-contract as the
+                 0.2.0 historical record
 browser/e2e    — no in-tree harness; Phase 5 evidence is dev/screenshots/phase5/ plus the raw
                  JSON captured by an out-of-tree CDP driver (see IMPLEMENTATION_LOG.md §10).
                  Phase 6 verified the *served* client bundle in the live page instead of taking

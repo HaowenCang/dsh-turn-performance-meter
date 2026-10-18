@@ -7,6 +7,33 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## Unreleased — DSH 0.2.1-rc.2 source migration (Phase 11.0)
+
+Development target moved from DSH `0.2.0-rc.2` to `0.2.1-rc.2` (public reference commit
+`687f282e8625c6b8d11ff58211a90524be2e4317`). **This section is not a release:** the package version stays `0.1.5`, and no
+npm publication, Git tag or GitHub Release exists for this target yet.
+
+- Exact peer is now `"@deepseek-ai/dsh": "0.2.1-rc.2"`; `0.2.0-rc.2` is no longer the declared runtime peer. DSH
+  evaluates the declared peer before installing or loading a plugin, so the declaration moved with the target. No
+  compatibility exemption is used or required.
+- No consumed interface changed in meaning. Eight of the fourteen audited DSH declaration files are byte-identical
+  between the two reference commits; the six that changed add provider-configuration metadata, experimental plugin
+  records and client slots, or touch subagent/install plumbing this plugin does not read. No adapter code moved and no
+  metric semantics moved.
+- Wire-shape contract re-pinned by `test/dsh-021-contract.test.js` against the new reference commit. The 0.2.0-rc.2
+  contract evidence remains in `test/dsh-020-contract.test.js`, which is not restamped.
+- Frozen invariants unchanged: 100 ms presentation cadence, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`, TTFT
+  semantics, attempt-local TPS reset, durable reconciliation, peak publication rules, compressed curve geometry and
+  generation-safe foreground recovery.
+- The published `v0.1.5` npm package, Git tag and GitHub Release remain bound to DSH `0.2.0-rc.2` and are preserved
+  unchanged.
+- **Runtime acceptance is partial, so compatibility is not declared accepted.** On an isolated `0.2.1-rc.2` host the
+  plugin installed with the exact peer, booted into the served module graph, and passed boot/dock acceptance plus R1–R4,
+  R7 and R8 with real model output; R6's backgrounding behaviour was observed across two real runs. R5's eligible
+  continuity-connector occurrence was **not observed** on a real turn (natural tool turns produced no eligible
+  same-phase adjacent attempt boundary), so the phase verdict is **BLOCKED — RUNTIME ACCEPTANCE** and the preserved
+  source is not pushed to `main` until that item is observed. See `docs/IMPLEMENTATION_LOG.md` Phase 11.0.
+
 ## 0.1.5 — 2026-10-07
 
 Supported and tested against DSH `0.2.0-rc.2` only. **No support claim is made beyond DSH `0.2.0-rc.2`**, and the

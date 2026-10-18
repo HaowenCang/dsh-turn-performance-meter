@@ -110,30 +110,39 @@ function settlementEntry(type, seq, time, options) {
 // Compatibility metadata
 // ---------------------------------------------------------------------------
 
-test('the DSH peer is pinned exactly to 0.2.0-rc.2, and the package version is the release that carries it', async () => {
+test('the historical 0.2.0-rc.2 peer pairing is retained as evidence, and the working tree peer moved to the 0.2.1 line', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   /**
-   * §8 of the phase contract: exact version only. `^0.2.0-rc.2`,
-   * `>=0.2.0-rc.2`, `0.2.x`, `*` and the dual `0.1.7-rc.2 || 0.2.0-rc.2` range
-   * are all rejected here. Each of them would admit a runtime this project has
-   * never exercised, and the dual range in particular would blur the
-   * `v0.1.1 -> 0.1.7-rc.2` / `v0.1.2 -> 0.2.0-rc.2` release boundary.
+   * Phase 11.0 moved the working-tree peer to `0.2.1-rc.2`. This file remains
+   * the 0.2.0-rc.2 contract record — every shape assertion below was established
+   * against the reference commit named here — and it must not silently
+   * re-authorise the runtime it was written for. The exact pin for the current
+   * target and its own reference commit live in `test/dsh-021-contract.test.js`;
+   * this assertion is the cross-file guard that the historical record and the
+   * current manifest cannot drift apart.
    */
+  assert.equal(REFERENCE_020, '639ed015397290b3745d163aafe02ffee4aa3f84', 'the 0.2.0-rc.2 evidence commit is retained')
+
   const range = manifest.peerDependencies['@deepseek-ai/dsh']
-  assert.equal(range, '0.2.0-rc.2')
+  assert.equal(range, '0.2.1-rc.2', 'the working tree declares the Phase 11.0 target runtime')
+  assert.equal(range === '0.2.0-rc.2', false, 'the historical runtime is no longer the declared peer')
   assert.deepEqual(Object.keys(manifest.peerDependencies), ['@deepseek-ai/dsh'], 'the DSH peer is the only peer')
 
+  /**
+   * Exact version only. `^0.2.1-rc.2`, `>=0.2.1-rc.2`, `0.2.x`, `*` and the
+   * dual `0.2.0-rc.2 || 0.2.1-rc.2` range are all rejected here. Each of them
+   * would admit a runtime this project has never exercised, and the dual range
+   * in particular would blur the evidence boundary between the two references.
+   */
   for (const operator of ['^', '~', '>', '<', '*', '||', 'x', 'X', ' - ']) {
     assert.equal(range.includes(operator), false, `the peer must not contain the range syntax ${JSON.stringify(operator)}`)
   }
   assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
 
-  // §10: the peer migration itself never moved the version; the version bump
-  // belongs to the release round that ships this peer, and the two must stay
-  // paired so the published artifact cannot claim a runtime its version does
-  // not name.
-  assert.equal(manifest.version, '0.1.5', 'the release round carries the version paired with the 0.2.0-rc.2 peer')
+  // Phase 11.0 is an unreleased source phase: the peer moves, the version does
+  // not, and no published artifact is created by the migration round.
+  assert.equal(manifest.version, '0.1.5', 'the unreleased source phase keeps the 0.1.5 package version')
 })
 
 // ---------------------------------------------------------------------------

@@ -1207,3 +1207,45 @@ in `test/temporal-evidence-authority.test.js`. No test was skipped, todo'd or de
 `git diff --check` is clean; `client.js` is byte-identical to `lib/client.js`. No runtime acceptance was performed: no
 DSH profile was started, stopped, attached to, installed into, modified or deleted, and the retained isolated profile
 was not touched.
+
+## 17. Phase 11.0 — DSH 0.2.1-rc.2 compatibility
+
+The normative runtime moved to `0.2.1-rc.2`. The testing question is the same narrow one Phase 9.3 asked — does the wire
+evidence the plugin consumes still have the shape the adapter expects? — but the answer is not the same sentence:
+between the two references 8,431 files changed, eight of the fourteen audited declaration files are byte-identical, and
+six changed. The audit that classifies each of the six against the consumed surface is in `docs/DSH_API_NOTES.md` §15.
+This section records the automated layer only.
+
+- `test/dsh-021-contract.test.js` (19 tests, one file) is the new normative layer. It re-pins the same contract surface
+  against the `687f282e8625c6b8d11ff58211a90524be2e4317` reference commit and adds the migration-specific claims:
+  - **the compatibility pin** — `peerDependencies['@deepseek-ai/dsh']` is exactly `0.2.1-rc.2`, it is the only peer, and
+    it contains no range syntax, so no unsupported runtime is admitted. `version` is asserted to still be `0.1.5`,
+    because this phase moves the peer and not the version. All three reference commits (0.2.1, 0.2.0, 0.1.7) are
+    asserted as literals so a future edit that changes one without re-running the comparison fails.
+  - **the historical record** — `test/dsh-020-contract.test.js` is asserted to still name its Phase 9.3 identity and its
+    0.2.0 reference commit, and to carry the current-peer guard. The 0.2.0 evidence is retained, not restamped.
+  - **the client declaration** — `dsh.bundle.patch` and `dsh.client {platform, immediately, inject}` are pinned to the
+    exact declaration the browser acceptance exercised, and the built bundle is asserted to be a
+    `__ModuleLoader__` factory that registers `conversation.input.dock` with the plugin slot id.
+  - **the envelope, boundaries, settlements, tool plane, transient row, compact-stream timing, stream chunks,
+    in-stream usage, window changes, settle-assistant ambiguity and one end-to-end turn** — the same eight contract
+    groups Phase 9.3 pinned, re-verified against the 0.2.1 reference. No metric assertion was added, removed or relaxed
+    by the migration.
+  - **the frozen invariants** — `DEFAULT_PRESENTATION_REFRESH_MS = 100`, the measured cadence candidates
+    `[200, 100, 50, 10]`, `MIN_RATE_SAMPLES = 3` and `MIN_RATE_ELAPSED_MS = 100` are asserted unchanged, because the
+    runtime moved and the Phase 9.2–10.1R.1 presentation and publication contracts did not.
+- `test/dsh-020-contract.test.js` keeps its shape assertions; only its compatibility-metadata claim changed, from
+  "the peer is pinned to 0.2.0-rc.2" to the cross-file guard "the historical 0.2.0 evidence is retained and the working
+  tree declares 0.2.1-rc.2". `test/ttft-boundary.test.js` names the current installed target in one comment only.
+
+Totals for this phase: **915 tests, 915 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo** (896 before the phase) —
+**19 new deterministic tests** in `test/dsh-021-contract.test.js`. `npm run verify` (structure + full runner) is green;
+`node scripts/verify-sanitization.mjs` passes; `git diff --check` is clean; `client.js` is byte-identical to
+`lib/client.js` (SHA-256 `BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1`, 629,459 bytes).
+
+The runtime half of the phase is **not** covered by this file and is not claimed to be. It was established on an isolated
+DSH `0.2.1-rc.2` host with a disposable profile: exact-peer installation, boot and bundle-load acceptance, the dock
+placement/duplicate-registration checks, and the real-browser matrix R1–R8 (live TTFT/TPS and 100 ms cadence, reasoning/
+output transition, tool execution, completed statistics, multi-attempt curve continuity, natural background recovery,
+reload/session switching, error/retry). Those observations are recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 11.0).
+A test cannot assert a browser's presentation cadence against a real host, so no test pretends to.

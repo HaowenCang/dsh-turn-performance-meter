@@ -13,9 +13,16 @@ provides two UI modes: a compact live meter during execution and a completed tur
 > `dsh-turn-performance-meter-0.1.5.tgz` is an offline fallback, and the local checkout is for development. §2.1 holds
 > the release/runtime matrix.
 >
+> **The unreleased development checkout now targets DSH `0.2.1-rc.2`** (Phase 11.0, source only). The published
+> `v0.1.5` artifact remains bound to `0.2.0-rc.2` and is not restamped; no new npm publication, tag or GitHub Release
+> exists for the `0.2.1-rc.2` target yet.
+>
 > **已发布 npm 与 GitHub `v0.1.5`，面向 DSH `0.2.0-rc.2`。** 版本 `0.1.5`，已发布到公开 npm registry。主要分发方式为
 > npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.5.tgz` 作为离线回退，本地检出
 > 目录用于开发。发布与运行时对应关系见 §2.1。
+>
+> **未发布的开发检出目录现已面向 DSH `0.2.1-rc.2`**（Phase 11.0，仅源码阶段）。已发布的 `v0.1.5` 产物仍绑定
+> `0.2.0-rc.2`，不做改写；该 `0.2.1-rc.2` 目标目前尚无新发布、tag 或 GitHub Release。
 
 ## 1. What it does / 功能
 
@@ -45,7 +52,9 @@ React layer never re-derives a metric.
 
 ```text
 Version (working tree): 0.1.5
-Development target:     DSH 0.2.0-rc.2 only
+Development target:     DSH 0.2.1-rc.2 only (unreleased source, Phase 11.0)
+Runtime acceptance:     PARTIAL — R5 connector occurrence NOT OBSERVED; no
+                        compatibility-accepted claim, not pushed (see IMPLEMENTATION_LOG §11.0)
 Released:               v0.1.5 -> DSH 0.2.0-rc.2
                         v0.1.4 -> DSH 0.2.0-rc.2
                         v0.1.3 -> DSH 0.2.0-rc.2
@@ -65,43 +74,70 @@ plugin v0.1.2  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe
 plugin v0.1.3  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.4  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.5  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
+working tree   ->  DSH 0.2.1-rc.2   reference commit 687f282e8625c6b8d11ff58211a90524be2e4317
+                   (unreleased: version 0.1.5 source, no publication yet)
 ```
 
-**`0.2.0-rc.2` is the normative runtime for the current working tree.** Phase 9.3 moved the development target to it and
-re-audited every DSH declaration this plugin reads — the session event envelope, the LLM stream and compact
-`AssistantStreamRecord` shapes, the session-controller event-window and settlement contracts, the
-`conversation.input.dock` slot contract, the plugin-compatibility gate, and the TodoPanel visual contract the completed
-card is drawn from. All fourteen declarations are **byte-identical** between the two reference commits, so the
-telemetry, stream, session and slot contracts consumed by the plugin did not change: no adapter code moved, no metric
-semantics moved, and no compatibility exemption is involved. The comparison is recorded in `docs/DSH_API_NOTES.md` §14.
+**`0.2.1-rc.2` is the normative runtime for the current working tree.** Phase 11.0 moved the development target to it
+and re-audited every DSH declaration this plugin reads — the session event envelope, the session-controller event window
+and settlement contracts, the transient `agent/assistant-stream` / `assistant/live-chunk` plane,
+`sessions.binding(sessionId)`, the `conversation.input.dock` slot contract, the compact `AssistantStreamRecord` decoder
+with its usage fields and tool timing events, the Web client bundle loader and React slot lifecycle, and the
+plugin-compatibility gate. The declarations the plugin consumes did not change in meaning: eight of the fourteen audited
+declaration files are **byte-identical** between the two reference commits, and the six that changed are additive or
+outside the consumed surface (provider-configuration metadata, experimental plugin records, new client slots, and
+subagent/install plumbing this plugin does not read). No adapter code moved, no metric semantics moved, and no
+compatibility exemption is involved. The comparison is recorded in `docs/DSH_API_NOTES.md` §15, and
+`test/dsh-021-contract.test.js` re-pins the wire shapes against the 0.2.1 reference.
 
-The claim is bounded on purpose: it is not `0.2.0+`, not `0.2.x` and not "the latest DSH", because no other version has
-been exercised. Local evidence for the claim is the CLI (`dsh --version`), the installed package
-(`npm list -g @deepseek-ai/dsh`) and the composed profile tree, all recorded in `docs/IMPLEMENTATION_LOG.md`.
+The one deployment-level change is the peer declaration itself: DSH 0.2.1-rc.2 refuses to install or load a plugin whose
+declared `@deepseek-ai/dsh` peer does not satisfy the running runtime, so `package.json` now pins `0.2.1-rc.2` exactly.
 
-`v0.1.2` is the release in which that target became the shipped one, and `v0.1.3`, `v0.1.4` and `v0.1.5` carry it forward unchanged: the
-working tree carries `version: 0.1.5` with the same `0.2.0-rc.2` peer, while the published `v0.1.4`, `v0.1.3`, `v0.1.2` and `v0.1.1`
-artifacts are immutable — `v0.1.5`, `v0.1.4`, `v0.1.3` and `v0.1.2` declare `0.2.0-rc.2` and `v0.1.1` still declares `0.1.7-rc.2`. The releases are
-**separately bounded** rather than expressed as one range — each declares exactly one runtime, and the plugin does not
-claim to run on both. Multi-runtime packaging would require explicit two-runtime verification and is not part of this
-release. `v0.1.5` is a visual continuity and lifecycle recovery release on the `0.2.0-rc.2` line: it moves no runtime target, and no earlier release
-is restamped.
+The claim is bounded on purpose: it is not `0.2.1+`, not `0.2.x` and not "the latest DSH", because no other version has
+been exercised. Local evidence for the claim is the isolated `0.2.1-rc.2` installation, the CLI version output, the
+composed profile tree and the real-browser acceptance matrix, all recorded in `docs/IMPLEMENTATION_LOG.md`.
 
-**`0.2.0-rc.2` 是当前工作树的规范运行时。** Phase 9.3 将开发目标迁移到该版本，并对照本机 `0.2.0-rc.2` 安装与上述公开
-参考 commit，重新审计了本插件读取的全部 DSH 声明——会话事件信封、LLM 流与紧凑 `AssistantStreamRecord` 形状、
-session-controller 的事件窗口与结算契约、`conversation.input.dock` 插槽契约、插件兼容门控，以及完成态卡片所依据的
-TodoPanel 视觉契约。全部十四项声明在两个参考 commit 之间**逐字节相同**，因此插件消费的遥测、流、会话与插槽契约均未
-变化：adapter 代码未移动，指标语义未移动，也不涉及任何兼容性豁免。对比记录见 `docs/DSH_API_NOTES.md` §14。
+**Runtime acceptance is partial, and this migration is not yet declared compatibility-accepted.** On the isolated
+`0.2.1-rc.2` host the plugin installed with the exact peer, booted into the served module graph, and passed boot/dock
+acceptance plus R1–R4, R7 and R8 with real model output; R6's backgrounding behaviour was observed across two real runs.
+R5's eligible continuity-connector occurrence was **not observed** on a real turn — the natural tool turns produced no
+eligible same-phase adjacent attempt boundary — so the phase verdict is **BLOCKED — RUNTIME ACCEPTANCE**. The tested
+source is preserved in a local commit that is not pushed to `main` until that item is observed. See
+`docs/IMPLEMENTATION_LOG.md` Phase 11.0 §6 and §8.
 
-该声明有意限定范围：不写 `0.2.0+`、不写 `0.2.x`、也不写“最新 DSH”，因为其他版本均未被实际验证。本机证据来自 CLI
-（`dsh --version`）、已安装包（`npm list -g @deepseek-ai/dsh`）与组合后的 profile 树，均记录在
+**运行时验收是部分的，本次迁移尚未被宣布为兼容性通过。** 在隔离的 `0.2.1-rc.2` 主机上，插件以精确 peer 成功安装、进入
+服务端模块图，并通过 boot/dock 验收以及 R1–R4、R7、R8（真实模型输出）；R6 的后台恢复行为已在两次真实运行中观察到。
+R5 的“可拼接连续性连接线”在真实 turn 上**未被观察到**（自然工具 turn 未产生同相位相邻的合格边界），因此本阶段结论为
+**BLOCKED — RUNTIME ACCEPTANCE**：已验证源码保留在本地提交中，在该项被观察到之前不会推送到 `main`。详见
+`docs/IMPLEMENTATION_LOG.md` Phase 11.0 §6 与 §8。
+
+`v0.1.2` is the release in which the `0.2.0-rc.2` target became the shipped one, and `v0.1.3`, `v0.1.4` and `v0.1.5`
+carry it forward unchanged. Those published artifacts are immutable — `v0.1.5`, `v0.1.4`, `v0.1.3` and `v0.1.2`
+declare `0.2.0-rc.2` and `v0.1.1` still declares `0.1.7-rc.2` — so the releases are **separately bounded** rather than
+expressed as one range. The working tree is a separate, **unreleased** state: version `0.1.5` source with the
+`0.2.1-rc.2` peer, no npm publication, no tag and no GitHub Release. Phase 11.0 is a source compatibility migration,
+not a release round.
+
+**`0.2.1-rc.2` 是当前工作树的规范运行时。** Phase 11.0 将开发目标迁移到该版本，并对照隔离安装的 `0.2.1-rc.2` 与上述公开
+参考 commit，重新审计了本插件读取的全部 DSH 声明——会话事件信封、session-controller 的事件窗口与结算契约、瞬态
+`agent/assistant-stream` / `assistant/live-chunk` 平面、`sessions.binding(sessionId)`、`conversation.input.dock` 插槽
+契约、紧凑 `AssistantStreamRecord` 解码及其 usage 字段与工具计时事件、Web 客户端 bundle 加载与 React 插槽生命周期，
+以及插件兼容门控。插件消费的声明语义未变：十四项受审声明文件中八项在两个参考 commit 之间**逐字节相同**，其余六项的
+变化要么是新增内容，要么位于本插件不读取的表面（provider 配置元数据、实验性 plugin record、新的客户端插槽，以及
+subagent/安装管线）。adapter 代码未移动，指标语义未移动，也不涉及任何兼容性豁免。对比记录见
+`docs/DSH_API_NOTES.md` §15，`test/dsh-021-contract.test.js` 针对 0.2.1 参考重新固定了线缆形状。
+
+唯一的部署层面变化是 peer 声明本身：DSH 0.2.1-rc.2 会拒绝安装或加载其 `@deepseek-ai/dsh` peer 与当前运行时不匹配的
+插件，因此 `package.json` 现在精确固定为 `0.2.1-rc.2`。
+
+该声明有意限定范围：不写 `0.2.1+`、不写 `0.2.x`、也不写“最新 DSH”，因为其他版本均未被实际验证。本机证据来自隔离
+安装的 `0.2.1-rc.2`、CLI 版本输出、组合后的 profile 树以及真实浏览器验收矩阵，均记录在
 `docs/IMPLEMENTATION_LOG.md`。
 
-`v0.1.2` 即该目标转为正式发布的那个版本，`v0.1.3`、`v0.1.4` 与 `v0.1.5` 原样延续该目标：工作树携带 `version: 0.1.5` 与同一个 `0.2.0-rc.2`
-peer，而已发布的 `v0.1.4`、`v0.1.3`、`v0.1.2` 与 `v0.1.1` 产物不可变更——`v0.1.5`、`v0.1.4`、`v0.1.3` 与 `v0.1.2` 声明 `0.2.0-rc.2`，`v0.1.1` 仍声明 `0.1.7-rc.2`。各发布
-版本是**各自限定**的，而不是写成一个范围——每个版本只声明一个运行时，插件不声称可同时运行于两者。多运行时打包需要
-显式的双运行时验证，不属于本次发布范围。`v0.1.5` 是 `0.2.0-rc.2` 线上的视觉连续性与生命周期恢复发布：不移动运行时目标，也不改写任何
-既有发布。
+`v0.1.2` 是 `0.2.0-rc.2` 目标转为正式发布的版本，`v0.1.3`、`v0.1.4` 与 `v0.1.5` 原样延续该目标。这些已发布产物不可
+变更——`v0.1.5`、`v0.1.4`、`v0.1.3` 与 `v0.1.2` 声明 `0.2.0-rc.2`，`v0.1.1` 仍声明 `0.1.7-rc.2`——因此各发布版本是
+**各自限定**的，而不是写成一个范围。工作树是另一个**未发布**状态：版本为 `0.1.5` 源码、peer 为 `0.2.1-rc.2`，
+没有 npm 发布、tag 或 GitHub Release。Phase 11.0 是源码兼容性迁移，不是发布轮次。
 
 Phase 7D migrated the adapter, the client feed and the completion path to that version: tool results are identified
 through the first-class tool-role message (`message.toolCallId`, `message.isError`), the bare `settleAssistant(attemptId)`
@@ -117,20 +153,22 @@ The eight captures under `fixtures/dsh-turns/` were recorded against `0.1.5`. Th
 arithmetic, the decoder and historical compatibility, and they are **not** evidence for the tool/result shape, the
 settle-assistant semantics, the turn completion lifecycle or the client event-window behaviour, nor are they a supported
 runtime contract. `package.json` declares an exact compatibility gate,
-`"peerDependencies": { "@deepseek-ai/dsh": "0.2.0-rc.2" }`. DSH evaluates that peer against the running runtime version
+`"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.2" }`. DSH evaluates that peer against the running runtime version
 before a profile starts the plugin, so an unsupported DSH is rejected instead of silently admitted. The exact range is
-deliberate: `^0.2.0-rc.2`, `~0.2.0-rc.2`, `>=0.2.0-rc.2`, `0.2.x` and `*` would all admit runtimes this project has
-never exercised, and the dual `0.1.7-rc.2 || 0.2.0-rc.2` range would erase the evidence boundary between `v0.1.1` and
-`v0.1.2`. The recorded corpora keep the version they were captured on: `fixtures/dsh-turns/` is `0.1.5`,
-`fixtures/dsh-0.1.7/` is `0.1.7-rc.2`, and neither is restamped.
+deliberate: `^0.2.1-rc.2`, `~0.2.1-rc.2`, `>=0.2.1-rc.2`, `0.2.x` and `*` would all admit runtimes this project has
+never exercised, and the dual `0.2.0-rc.2 || 0.2.1-rc.2` range would erase the evidence boundary between the 0.2.0 and
+0.2.1 references. The recorded corpora keep the version they were captured on: `fixtures/dsh-turns/` is `0.1.5`,
+`fixtures/dsh-0.1.7/` is `0.1.7-rc.2`, and neither is restamped; `test/dsh-020-contract.test.js` keeps the 0.2.0-rc.2
+evidence it was written on, and `test/dsh-021-contract.test.js` is the 0.2.1-rc.2 layer.
 
 `fixtures/dsh-turns/` 下的八段录制采集自 `0.1.5`。它们仍是指标算术、解码器与历史兼容性的证据，但**不是** tool/result
 形状、settle-assistant 语义、turn 完成生命周期或客户端事件窗口行为的证据，也不构成受支持的运行时契约。`package.json`
-声明精确兼容门控 `"peerDependencies": { "@deepseek-ai/dsh": "0.2.0-rc.2" }`。DSH 会在 profile 启动插件前用当前运行时
-版本校验该 peer，因此不受支持的 DSH 会被拒绝，而不会被静默接受。使用精确范围是有意的：`^0.2.0-rc.2`、`~0.2.0-rc.2`、
-`>=0.2.0-rc.2`、`0.2.x` 与 `*` 都会放行本项目从未实际验证过的运行时，而 `0.1.7-rc.2 || 0.2.0-rc.2` 这样的双范围会抹掉
-`v0.1.1` 与 `v0.1.2` 之间的证据边界。已录制语料保留其采集时的版本：`fixtures/dsh-turns/` 为 `0.1.5`，
-`fixtures/dsh-0.1.7/` 为 `0.1.7-rc.2`，两者均未改写版本标记。
+声明精确兼容门控 `"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.2" }`。DSH 会在 profile 启动插件前用当前运行时
+版本校验该 peer，因此不受支持的 DSH 会被拒绝，而不会被静默接受。使用精确范围是有意的：`^0.2.1-rc.2`、`~0.2.1-rc.2`、
+`>=0.2.1-rc.2`、`0.2.x` 与 `*` 都会放行本项目从未实际验证过的运行时，而 `0.2.0-rc.2 || 0.2.1-rc.2` 这样的双范围会抹掉
+0.2.0 与 0.2.1 两个参考之间的证据边界。已录制语料保留其采集时的版本：`fixtures/dsh-turns/` 为 `0.1.5`，
+`fixtures/dsh-0.1.7/` 为 `0.1.7-rc.2`，两者均未改写版本标记；`test/dsh-020-contract.test.js` 保留其编写时的
+0.2.0-rc.2 证据，`test/dsh-021-contract.test.js` 是 0.2.1-rc.2 层。
 
 ## 3. Install / 安装
 
@@ -151,18 +189,21 @@ runtime, so the prerequisite follows §2.1: **install the runtime that matches t
 | `@0.1.3` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.1.7-rc.2` |
-| the development checkout (§3.4) | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| the development checkout (§3.4), unreleased `0.2.1-rc.2` target | `@deepseek-ai/dsh@0.2.1-rc.2` |
 
 ```powershell
-# released v0.1.5, and the development checkout
+# released v0.1.5 artifacts (npm / GitHub Release), and every historical release above
 npm install -g @deepseek-ai/dsh@0.2.0-rc.2
+
+# the unreleased development checkout after Phase 11.0
+npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 
 # historical v0.1.1 only
 npm install -g @deepseek-ai/dsh@0.1.7-rc.2
 ```
 
 Do not install an arbitrary latest DSH and assume the plugin runs on it: the plugin declares exact runtime
-compatibility only, and no DSH release other than the two named above has been exercised by this project.
+compatibility only, and no DSH release other than the three named above has been exercised by this project.
 
 插件声明精确的运行时 peer，而 DSH 会拒绝启动 DSH peer 与当前运行时不匹配的插件，因此前置条件遵循 §2.1：**安装与所要
 安装的插件版本相匹配的运行时。**
@@ -174,9 +215,9 @@ compatibility only, and no DSH release other than the two named above has been e
 | `@0.1.3`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.1.7-rc.2` |
-| 开发检出目录（§3.4） | `@deepseek-ai/dsh@0.2.0-rc.2` |
+| 开发检出目录（§3.4），未发布的 `0.2.1-rc.2` 目标 | `@deepseek-ai/dsh@0.2.1-rc.2` |
 
-不要安装任意“最新”DSH 并假定插件可在其上运行：本插件只声明精确的运行时兼容性，且除上述两个版本之外本项目未验证任何
+不要安装任意“最新”DSH 并假定插件可在其上运行：本插件只声明精确的运行时兼容性，且除上述三个版本之外本项目未验证任何
 DSH 版本。
 
 ### 3.2 npm, the default installation / npm 默认安装

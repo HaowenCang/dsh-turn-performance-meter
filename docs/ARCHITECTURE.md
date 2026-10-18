@@ -719,6 +719,33 @@ groups rather than a re-test of the metric semantics, which are covered by the e
 §13 of the API notes, the structure is: the 0.1.7 corpus and its tests are the historical record, §14 and the 0.2.0
 contract test are the current baseline, and the two are kept apart rather than merged into one restamped set.
 
+### Phase 11.0 — DSH 0.2.1-rc.2 compatibility
+
+The normative runtime moved again, from `0.2.0-rc.2` to `0.2.1-rc.2` (public reference commit
+`687f282e8625c6b8d11ff58211a90524be2e4317`). The audit was re-run rather than inherited, because 8,431 files changed
+between the two reference commits and "the last migration was clean" is not evidence about the next runtime.
+
+The result is the same shape but not the same sentence: this time eight of the fourteen audited declaration files are
+byte-identical, and six changed. Each of the six was classified against the consumed surface before the peer moved. The
+session event map entries the adapter reads (`turn/start`, `turn/end`, `assistant/message`, `assistant/attempt`,
+`tool/call`, `tool/result`) are untouched inside `core/session/src/types.ts`, whose changes are documentation plus
+additive experimental plugin-record types; the session-controller event-window file is byte-identical, so revision and
+change semantics — including the `revision + 1` producer assumption behind gap recovery — did not move; the LLM stream
+file that declares `AssistantStreamRecord` and `isTokenDelta` is byte-identical, and the `llm` types file's changes are
+provider-configuration metadata only; `sessions.binding()` is unchanged; `conversation.input.dock` is unchanged and the
+slot registry that orders and renders it has zero diff; the plugin-compatibility gate keeps the same
+`semver.satisfies(..., { includePrerelease: true })` decision for peer-only manifests and adds an `engines.dsh` path
+this plugin does not use; the install-spec change is an additive helper. **The Phase 2 boundary held again**: no code
+in `src/dsh/**`, and nothing above it, moved.
+
+What changed is again the declaration, and this time it is a real deployment break on the new runtime: `package.json`
+pins `"@deepseek-ai/dsh": "0.2.1-rc.2"` exactly. On `0.2.1-rc.2` the old `0.2.0-rc.2` peer is refused at install
+(`incompatible-version`) and its bundle is skipped at profile load, so the bump is required evidence rather than
+bookkeeping; no `allow-version` exemption is used or needed once the peer matches. The evidence layer is
+`test/dsh-021-contract.test.js`, with `test/dsh-020-contract.test.js` retained and not restamped — the same "historical
+record vs current baseline" split Phase 9.3 introduced, now one reference deeper. The full table and the
+installed-runtime confirmation are in `docs/DSH_API_NOTES.md` §15.
+
 ## 12. Non-goals
 
 This project is not:

@@ -499,3 +499,173 @@ package recorded in §14. The `v0.1.1` release remains bounded to `0.1.7-rc.2` a
 project does **not** claim `0.2.0+`, `0.2.x` or dual-runtime support. The recorded corpora keep the version they were
 captured on — `fixtures/dsh-turns/` is `0.1.5`, `fixtures/dsh-0.1.7/` is `0.1.7-rc.2` — and
 `test/dsh-020-contract.test.js` is the narrow layer that asserts the wire shapes above against the current runtime.
+
+---
+
+**Superseded in Phase 11.0.** §14 remains the record of the `0.2.0-rc.2` baseline and of the audit that established it;
+it is a statement about what was verified *on 0.2.0*, and none of it is retracted. The supported runtime for the
+current working tree is now `0.2.1-rc.2` — see §15, which is the normative baseline from Phase 11.0 onward.
+
+## 15. DSH 0.2.1-rc.2 compatibility baseline
+
+| Item | Value |
+|---|---|
+| Local installed version | `0.2.1-rc.2` |
+| Public reference commit | `687f282e8625c6b8d11ff58211a90524be2e4317` |
+| Superseded reference commit | `639ed015397290b3745d163aafe02ffee4aa3f84` (`0.2.0-rc.2`) |
+| Older reference commit | `477b4f420553e8a52c2fbccc464d7561b239c443` (`0.1.7-rc.2`) |
+| Verified local package path | `E:\Projects\DSHarness\_phase11-runtime\dsh-0.2.1-rc.2\node_modules\@deepseek-ai\dsh` — an isolated prefix install (`npm install --prefix ... @deepseek-ai/dsh@0.2.1-rc.2`) whose composed packages resolve as siblings under `...\node_modules\@deepseek-ai\*`, the root the installed paths below are relative to |
+| Verified date | 2026-10-17 |
+| Version exemption required | no |
+
+### 15.1 Method
+
+Three independent checks, run because the normative runtime changed rather than because a defect was suspected.
+
+1. **Content-addressed comparison of the upstream declarations.** Every consumed declaration file was resolved at
+   both commits with `git rev-parse <sha>:<path>` in a local checkout of `deepseek-ai/deepseek-harness` and the
+   resulting blob hashes were compared. The comparison is scoped to the consumed packages because the tree is not
+   small: **8,431 files** changed between the two reference commits.
+2. **Read of the installed `0.2.1-rc.2` runtime.** The published packages ship compiled JavaScript plus `.d.ts`
+   declarations, not `src/`, so each source finding was re-checked against the installed `lib/types/**` and `lib/*.js`
+   of the isolated install, and compared with the installed `0.2.0-rc.2` tree. The consumed packages are version
+   `0.2.1-rc.2` in that tree (11 of the 12 audited package names; see §15.5 for the twelfth, `dsh-client-ui-slots`,
+   whose declarations are a build-time artifact).
+3. **Execution where a static read is not decisive.** The installed `evaluatePluginCompatibility` evaluators from both
+   runtimes were executed against the real manifest and runtime strings, and the isolated host's own boot manifest was
+   read back from the served page (§15.4, §15.6).
+
+### 15.2 Upstream comparison — 14 files, 8 identical, 6 changed and classified
+
+| Upstream path | 0.2.0 / 0.2.1 blob | Verdict |
+|---|---|---|
+| `packages/llm/llm/src/assistant-stream.ts` | `7fca34c5` | identical |
+| `packages/api/session-controller/src/client/contract/events.ts` | `bc825f08` | identical |
+| `packages/api/session-controller/src/client/session-wire-event.ts` | `59d6ef5b` | identical |
+| `packages/api/session-controller/src/client/sessions/assistant-stream.ts` | `973fd108` | identical |
+| `packages/api/session-controller/src/client/contract/session.ts` | `2c8f16c4` | identical |
+| `packages/api/session-controller/src/client/contract/snapshot.ts` | `161cd858` | identical |
+| `packages/client/ui-conversation/src/client/skeleton/TodoPanel.tsx` | `bf59a54a` | identical |
+| `packages/client/ui-conversation/src/client/skeleton/TodoPanel.module.css` | `04b537da` | identical |
+| `packages/core/session/src/types.ts` | changed | documentation plus additive experimental plugin-record types; the `SessionEventMap` entries and the `SessionEvent` envelope the adapter reads are unchanged |
+| `packages/llm/llm/src/types.ts` | changed | additive provider-configuration metadata (`defaultBaseURL`, `baseURLEnv`, `nativeAuth`) and doc comments; `TokenUsage`, `StreamChunk` and `reasoningTokens` semantics untouched |
+| `packages/api/session-controller/src/client/sessions/session.ts` | changed | subagent `prompt` accepts a caller `requestId` — a code path this plugin does not call |
+| `packages/client/ui-conversation/src/client/contract/slots.ts` | changed | additive slots and owner props (hero options, user-text nodes, message-image labels); `conversation.input.dock` and `InputZone` unchanged |
+| `packages/boot/app-boot/src/plugin-compatibility.ts` | changed | `engines.dsh` now takes precedence *when a manifest declares it*; the peer-only decision remains `semver.satisfies(runtime, range, { includePrerelease: true })`; result field renamed `peers` → `requirements` (diagnostic only) |
+| `packages/boot/plugin-manager/src/install-spec.ts` | changed | additive exported `dependencySpec()` for reinstall/repair; `parseInstallSpec` — the path `plugin add file:` uses — is unchanged |
+
+One further contract file, not in the §14 list, was added to this audit:
+
+| Upstream path | Verdict |
+|---|---|
+| `packages/api/session-controller/src/client/contract/sessions.ts` | changed — `create()` gained an optional `agentPreset`, `fork()` gained an optional `allowMigration`; `binding(id: SessionId): SessionBinding \| undefined` is unchanged text and `SessionBinding` keeps its four readonly fields |
+
+The consumed event-window file being byte-identical is the load-bearing result: the four `SessionEventChange` arms, the
+`SessionEventWindow` fields and the `MutableSessionEventSource.publish` `revision + 1` producer behind the Phase 10.1R
+gap-rebaseline rule are the same bytes in both runtimes. The llm-stream file being byte-identical is the other: the
+compact `AssistantStreamRecord`/`dt` decoder and `isTokenDelta` were not redefined.
+
+### 15.3 Installed-runtime confirmation
+
+| Contract | 0.2.1 installed evidence | What the plugin reads | Verdict |
+|---|---|---|---|
+| `SessionEvent` envelope | `dsh-session/lib/types/types.d.ts` — `type`, `seq` (“Monotonic sequence number within the session”), `time` (“Unix epoch milliseconds”), `data` | `{type, seq, time, data}`; envelope bytes text-identical to the 0.2.0 install | unchanged |
+| `SessionEventMap` entries | `dsh-session/lib/types/types.d.ts` — `turn/start`, `turn/end`, `assistant/message`, `assistant/attempt`, `tool/call`, `tool/result` all present with the same keys | turn boundaries, settlements, tool plane | unchanged |
+| `SessionEventWindow` / `SessionEventChange` / `SessionEventSource` | `dsh-api-session-controller/lib/types/client/contract/events.d.ts` — **byte-identical** to the 0.2.0 installed file (4,233 bytes, same SHA-256) | revision, the four change kinds, snapshot/subscribe | unchanged |
+| `AssistantStreamRecord` / `isTokenDelta` | `dsh-llm/lib/types/assistant-stream.d.ts` — **byte-identical** (8,338 bytes) | compact `time0`/`dt[]`/`texts`/`args` reconstruction and first-token predicate | unchanged |
+| `TokenUsage` | `dsh-llm/lib/types/types.d.ts` — fields `inputTokens`, `outputTokens`, `totalTokens?`, `cacheReadTokens?`, `cacheWriteTokens?`, `reasoningTokens?`; declaration identical in 0.2.0 and 0.2.1 | authoritative usage; `reasoningTokens` remains contained in `outputTokens` | unchanged |
+| `SessionBinding` / `sessions.binding()` | `dsh-api-session-controller/lib/types/client/sessions/service.d.ts` — `{ sessionId, session, eventSource, ctx }`, all four `readonly`, identical to 0.2.0; `contract/sessions.d.ts` declares `binding(id): SessionBinding \| undefined` | `binding(sessionId).eventSource` identity, snapshot and subscribe; rebind on generation change | unchanged |
+| `conversation.input.dock` / `InputZone` | `dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts` — declaration still `{ kind: 'list'; scope: 'session'; owner: InputZone }`; `InputZone { readonly session: SessionSnapshot; readonly input: InputState }` identical | slot registration at `order: -10`, `props.sessionId` | unchanged |
+| `locale` service | `dsh-client-locale/lib/types/client/index.d.ts` — **byte-identical** to 0.2.0 | `ctx.locale.register(ns, dicts)` and `ctx.locale.bind(ns)` | unchanged |
+| `slots` service + slot lifecycle | `dsh-client-ui-renderer/lib/client.js` — the registry ships with `inject(...)`, `runInject`, `cachedSlotInject`/`cachedSessionInject`; the file changed only additively (inline anchors, keyed-hook member, style-claim fix) | `ctx.slots.inject(name, () => register(...))`, idempotency across reload/session switch | unchanged semantics |
+| Web bundle loading | `dsh-client-modules/lib/index.js` — `rev: shortHash(JSON.stringify({...}))`; `dsh-client-modules/lib/client.js` — new `ReleaseChangeGate` (pauses plugin updates when the page's boot release differs from the Host release; inert on a same-release page) | `__ModuleLoader__` factory, served bundle `rev`, `platform`/`immediately`/`inject` | unchanged for a same-release runtime |
+| Plugin-compatibility gate | `dsh-app-boot/lib/index.js` — `evaluatePluginCompatibility`, `unmetRequirements`, `engines.dsh` branch, `semver.satisfies(..., { includePrerelease: true })`; result field `requirements` | the manifest's `peerDependencies['@deepseek-ai/dsh']` | decision unchanged for peer-only manifests |
+| Install spec | `dsh-plugin-manager/lib/index.js` — `parseInstallSpec` present; additive `dependencySpec` | `plugin add file:<tgz>` | unchanged |
+
+The installed evidence therefore agrees with the source comparison: the declarations on the plugin's evidence path did
+not move. The six changed files implement features above or beside that path (provider metadata, experimental records,
+extra client slots, subagent/install plumbing), not underneath it.
+
+### 15.4 The plugin-compatibility gate
+
+`dsh-app-boot` evaluates a plugin's DSH requirement before install and at profile load. For a manifest that declares
+`peerDependencies` and no `engines.dsh` — this plugin's shape — the decision is unchanged between the two runtimes:
+
+```js
+semver.satisfies(runtimeVersion, requirement, { includePrerelease: true })
+```
+
+`includePrerelease: true` is again the detail that matters: a prerelease runtime participates in ranges, so an exact
+prerelease pin is decided by exact version equality. Executed against the installed evaluators (LOCAL TEST RESULT;
+saved under `dev/phase11/lead/peer-evaluator-matrix.txt`), with six cells and both evaluators:
+
+| Evaluator | Manifest peer | Runtime | Result |
+|---|---|---|---|
+| 0.2.1 installed | `0.2.1-rc.2` (migrated) | `0.2.1-rc.2` | compatible (`undefined`) |
+| 0.2.1 installed | `0.2.0-rc.2` (old) | `0.2.1-rc.2` | incompatible — `{"@deepseek-ai/dsh":"0.2.0-rc.2"}` |
+| 0.2.0 installed | `0.2.0-rc.2` (old) | `0.2.1-rc.2` | incompatible — same decision (negative control) |
+| 0.2.0 installed | `0.2.1-rc.2` (migrated) | `0.2.1-rc.2` | compatible |
+| 0.2.1 installed | `0.2.1-rc.2` (migrated) | `0.2.0-rc.2` | incompatible — opposite direction |
+| 0.2.0 installed | `0.2.0-rc.2` (old) | `0.2.0-rc.2` | compatible |
+
+The old peer is therefore **not** merely stale documentation on `0.2.1-rc.2`: it is refused at install
+(`incompatible-version`) and the bundle is skipped at profile load. That is why the peer had to move for this migration,
+and it is why the migration's install-time acceptance is evidence rather than bookkeeping.
+
+`0.2.1-rc.2` still ships exact-version compatibility *exemptions* (`allow-version`, `revoke-version`,
+`version-exemptions`). **No exemption is used or required by this plugin**, and `allow-version --accept-risk` is not
+part of this migration: an exemption accepts a declared incompatibility, and the migrated plugin declares a compatible
+peer, so the gate passes on its own terms. The isolated profile's `version-exemptions` store reads `{}` and the plugin
+still boots.
+
+### 15.5 Differences between the three references assessed as irrelevant
+
+- `engines.dsh` precedence in the compatibility gate (§15.4): new, and unused by this plugin because it declares no
+  `engines`.
+- `ReleaseChangeGate` in the client module loader: pauses plugin-update application when the page outlives a Host
+  release change. The isolated acceptance page and host are the same release, so the gate is inert; a page reload
+  adopts the new release by construction.
+- Additive experimental plugin records (`plugin:` namespace) in the session log: the plugin reads concrete event types
+  and ignores unknown ones through the existing envelope handling.
+- Provider metadata on `LlmConfigurableProvider` and the `GenerateOptions.purpose` doc rewrite: configuration surface,
+  not the usage/stream evidence the plugin reads.
+- Additive client slots and owner props (`conversation.hero.options`, user-text nodes, message-image labels): new seats
+  beside the dock, not a change to it.
+- Subagent/`create` options (`requestId`, `agentPreset`, `allowMigration`) and the install-spec `dependencySpec` helper:
+  code paths the plugin never calls.
+- `@deepseek-ai/dsh-client-ui-slots` is present in the 0.2.0 install tree but absent from the 0.2.1 install tree; its
+  declarations are a build-time artifact of the client packages, the `slots` service itself ships in
+  `dsh-client-ui-renderer`, and this plugin neither imports the package nor names it in `dsh.client.inject`.
+
+### 15.6 Real-runtime acceptance — observed, with one unobserved item
+
+On the isolated `0.2.1-rc.2` host the plugin was installed from the migrated tarball (exact peer accepted, no
+compatibility exemption, `version-exemptions {}`), booted into the served module graph (`rev a5b665752098`, no
+`skippedBundles` entry) and the served bundle was byte-identical to the built `client.js` plus the 83-byte source-map
+trailer. The real-browser matrix on that host then observed: boot/dock acceptance **PASS** (18/18), R1 **PASS** (9/9),
+R2 **PASS** (7/0/1 — the provider returned no `reasoningTokens`, so the per-phase token split against the provider was
+not observable), R3 **PASS** (7/0/2 — the real tool call returned in ~10 ms, shorter than the 100 ms presentation
+cadence, so the tool-timer-advance frame was not observable), R4 **PASS** (14/14), R7 **PASS** (11/11), R8 **PASS**
+(7/7). R6's required behaviour was observed across two real runs — real OS window minimize plus opaque cover, hidden
+intervals with rAF gaps of 11,320 ms and 18,254 ms, `foregroundResyncs 1 → 2`, settlement while hidden and card tokens
+equal to durable tokens (2,106 / 2,106 and 346 / 346) — while its final consolidated clean-browser rerun was
+environment-limited and recorded NOT OBSERVED for that attempt. R5 is **NOT OBSERVED for connector occurrence**: the
+natural tool turns produced no eligible same-phase adjacent attempt boundary (the outgoing run was a 5 ms tool-argument
+singleton and/or carried a tail phase cut), so no real-turn continuity connector is claimed; connector geometry remains
+covered by the deterministic curve-continuity tests. The per-check raw evidence is under
+`dev/phase11/runtime/out/` with the merged report at `dev/phase11/runtime/matrix-results.md`.
+
+Because one required real-runtime item is not observed, this phase does **not** declare compatibility accepted; the
+verdict recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 11.0 §8) is **BLOCKED — RUNTIME ACCEPTANCE**, with source
+compatibility confirmed.
+
+### 15.7 Supported version
+
+The only supported and tested DSH for the current working tree is `0.2.1-rc.2`, verified against the isolated installed
+package recorded in §15 and the real-browser acceptance matrix recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 11.0).
+The published `v0.1.5` release remains bounded to `0.2.0-rc.2` and is not retroactively re-scoped; the working tree is
+unreleased and keeps version `0.1.5`. This project does **not** claim `0.2.1+`, `0.2.x` or dual-runtime support. The
+recorded corpora keep the version they were captured on — `fixtures/dsh-turns/` is `0.1.5`, `fixtures/dsh-0.1.7/` is
+`0.1.7-rc.2` — and neither is restamped. `test/dsh-021-contract.test.js` is the narrow layer that asserts the wire
+shapes above against the current runtime; `test/dsh-020-contract.test.js` is retained as the 0.2.0-rc.2 historical
+record.

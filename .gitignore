@@ -7,6 +7,9 @@ verify-out.txt
 dev/verify-*.txt
 dev/screenshots/
 dev/scratch/
+# Phase 11.0 local runtime-acceptance evidence (browser captures, isolated-host
+# logs, audit working notes). Dev-only, never shipped; the report references it.
+dev/phase11/
 
 # Pre-sanitization fixture originals: the provenance record of what public-release
 # redaction removed. Kept locally, never published — see fixtures/README.md.

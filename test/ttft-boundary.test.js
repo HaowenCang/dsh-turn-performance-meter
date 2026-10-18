@@ -3,7 +3,8 @@
  *
  * ## The defect this file freezes
  *
- * `isTokenDelta` (`dsh-llm/lib/types/assistant-stream.js`, 0.2.0-rc.2) answers
+ * `isTokenDelta` (`dsh-llm/lib/types/assistant-stream.js`, 0.2.1-rc.2; byte-identical
+ * to the 0.2.0-rc.2 reference) answers
  * `true` for a **name-bearing** `tool-call-delta` even when `argumentsDelta` is
  * empty — the model has begun emitting a call and its name is the evidence:
  *

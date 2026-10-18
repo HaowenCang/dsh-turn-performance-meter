@@ -397,7 +397,8 @@ export class SessionEventFeed {
     const currentRevision = this.revision
 
     // Normative revision-gap rule (Phase 10.1R):
-    // In DSH 0.2.0-rc.2, MutableSessionEventSource publishes revision + 1 for every mutation.
+    // In DSH 0.2.0-rc.2 and 0.2.1-rc.2, MutableSessionEventSource publishes revision + 1
+    // for every mutation (`contract/events.ts` is byte-identical in both references).
     // If incomingRevision > currentRevision + 1, one or more intermediate deltas were missed.
     // The latest window.change is NOT sufficient recovery evidence; the contiguous window.entries
     // is authoritative. Perform a full generation rebaseline over window.entries.

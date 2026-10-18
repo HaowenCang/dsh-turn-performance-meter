@@ -1724,3 +1724,62 @@ to `lib/client.js`; and no version, tag or publication change.
 
 **Status: source-level closure complete; runtime acceptance remains blocked until independent GitHub audit. No
 release-readiness claim is made in this phase.**
+
+## Phase 11.0 — DSH 0.2.1-rc.2 compatibility migration (2026-10-17)
+
+- [x] **Baselines recorded.** Plugin HEAD `06ffa9855beb1fb64155203281e873a7ba63efdd` = `origin/main` (divergence
+      `0 0`); tracked tree clean (two untracked `v0.1.5` release artifacts preserved); tags `v0.1.0`–`v0.1.5` present;
+      npm `latest` = `0.1.5`; GitHub Release `v0.1.5` present with its `.tgz` asset. DSH references: old
+      `639ed015397290b3745d163aafe02ffee4aa3f84` (`0.2.0-rc.2`), target
+      `687f282e8625c6b8d11ff58211a90524be2e4317` (`0.2.1-rc.2`).
+- [x] **Upstream interface audit, independent of the earlier GitHub audit.** 8,431 files changed between the two
+      references; the audit is scoped to every consumed declaration. 8 of 14 declaration files byte-identical
+      (`events.ts`, `session-wire-event.ts`, `sessions/assistant-stream.ts`, `contract/session.ts`,
+      `contract/snapshot.ts`, `assistant-stream.ts`, both TodoPanel files); 6 changed and each classified against the
+      consumed surface (docs + additive plugin records, provider metadata, subagent `requestId`, additive slots with
+      `conversation.input.dock` unchanged, `engines.dsh` precedence with the peer path unchanged, additive install
+      helper). No BREAKING code-contract change. Recorded in `docs/DSH_API_NOTES.md` §15.
+- [x] **Installed-runtime audit.** Isolated `0.2.1-rc.2` toolchain installed (`npm install --prefix …`, exact version
+      verified by `lib/bin.js --version`); installed declarations compared with the installed `0.2.0-rc.2` tree:
+      event-window, assistant-stream, locale and renderer registry declarations byte-identical; every differing shipped
+      file has its consumed block proven identical (session event map and envelope, `TokenUsage`/`StreamChunk`,
+      `SessionBinding`, dock slot + `InputZone`, slots registry bodies, `rev`/`chunkUrl`/`parseDshClient`). The
+      `dsh-client-ui-slots` package absence is a dependency-closure artifact of retired experimental bundles and is not
+      on this plugin's consumed surface.
+- [x] **Peer resolved by execution, not assumption.** Installed evaluators from both runtimes were run against the real
+      manifest: `0.2.1-rc.2` peer on the `0.2.1-rc.2` runtime compatible; the old `0.2.0-rc.2` peer refused at install
+      and at profile load; no exemption used. Matrix saved under `dev/phase11/lead/peer-evaluator-matrix.txt`.
+- [x] **Source migration.** `package.json` peer → `0.2.1-rc.2` (version stays `0.1.5`); new
+      `test/dsh-021-contract.test.js` (19 tests) pins the new normative contract and reference commit;
+      `test/dsh-020-contract.test.js` retained as the 0.2.0 historical record with its peer assertion updated;
+      `src/dsh/**` docblocks name the new target; `client.js`/`lib/client.js` rebuilt byte-identically
+      (SHA-256 `BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1`).
+- [x] **Isolated runtime, disposable profile, no protected-profile mutation.** Fresh profile `tpm-phase11-iso` created
+      from a shipped template on the shared `DSH_HOME`; host on a unique free port; plugin installed from the migrated
+      tarball; protected `web`/`desktop` hash manifests unchanged before/after; shared global state (workspace registry,
+      usage ledger, and the session bucket of the GUI-selected workspace) disclosed rather than hidden.
+- [x] **Install and boot acceptance.** `plugin add` exited 0 with the exact peer (no `incompatible-version`), no
+      `allow-version`/`--accept-risk`, `version-exemptions {}`; profile bundles include the plugin; the served page
+      module manifest lists the plugin entry; no `skippedBundles` entry for it; the served bundle is byte-identical to
+      the built `client.js` plus the 83-byte source-map trailer (`rev=a5b665752098`).
+- [x] **Real-browser functional matrix R1–R8 and dock acceptance** on the isolated `0.2.1-rc.2` host, with real model
+      output through the shipped `DeepSeek Account → DeepSeek-V4.1-Flash` route. Boot/dock **PASS** 18/18; R1 **PASS**
+      9/9 (TTFT freeze, publication gate, 100.4 ms p50 cadence); R2 **PASS** 7/0/1 (provider emitted no
+      `reasoningTokens`); R3 **PASS** 7/0/2 (real tool call returned in ~10 ms, shorter than the 100 ms presentation
+      cadence, and the isolated tool sandbox refused the requested Sleep); R4 **PASS** 14/14; R7 **PASS** 11/11; R8
+      **PASS** 7/7; R6 required behaviour observed across two real runs (real OS minimize + cover, hidden rAF gaps
+      11,320/18,254 ms, foregroundResyncs 1→2, settlement while hidden, tokens equal durable), with the final
+      consolidated rerun environment-limited. **R5 NOT OBSERVED for connector occurrence**: natural tool turns produced
+      no eligible same-phase adjacent boundary (outgoing run was a 5 ms tool-argument singleton / tail phase cut), so
+      no real-turn continuity connector is claimed; connector geometry remains deterministically tested.
+- [x] **Regression gates.** `npm run build:client` (628,146 chars / 629,459 bytes mirrored); `npm run verify` structure
+      OK (14 required files, 16 core modules, **76 test files**) and **915 tests / 915 pass / 0 fail / 0 cancelled / 0
+      skipped / 0 todo** (896 baseline + 19 new); `node scripts/verify-sanitization.mjs` PASS; `git diff --check`
+      clean; `client.js`/`lib/client.js` byte-identical sha256 `BA6F8862…E6EC1`.
+- [x] **Git discipline (partial by contract).** Ordinary local commit created to preserve the tested source; **not
+      pushed**, because §9 permits publishing to `main` only when every real-runtime gate passes and R5's
+      connector-occurrence gate is not observed. No version bump, no npm publish, no `v0.1.6` tag or GitHub Release; the
+      released `v0.1.5` tag/npm/GitHub Release remain untouched.
+
+**Status: source migration complete and preserved; source compatibility CONFIRMED; runtime acceptance
+BLOCKED — RUNTIME ACCEPTANCE on the single unobserved R5 connector occurrence. Not pushed.**

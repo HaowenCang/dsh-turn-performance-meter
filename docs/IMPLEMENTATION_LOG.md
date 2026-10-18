@@ -5912,3 +5912,201 @@ The reconciliation assertions around it are unchanged and are now pinned alongsi
 Ordinary commits only: no `--amend`, no rebase of pushed `main`, no `--force`, no `--force-with-lease`. Nothing was
 published, versioned, tagged or released, and no real-machine run happened. Runtime acceptance remains blocked until
 independent GitHub audit of this phase.
+
+## Phase 11.0 — DSH 0.2.1-rc.2 compatibility migration (2026-10-17)
+
+### 1. Scope, and what this round is not
+
+This phase moves the development target from DSH `0.2.0-rc.2` to `0.2.1-rc.2`, then puts the migrated source through
+installation, boot and real-browser acceptance on the new runtime. It is a **source migration round, not a release
+round**: `package.json` keeps `"version": "0.1.5"`, nothing is published to npm, no `v0.1.6` tag or GitHub Release is
+created, and the released `v0.1.5` artifact (npm package, Git tag `36fb7f6c…`, GitHub Release with its `.tgz` asset)
+remains bound to `0.2.0-rc.2` and is not restamped.
+
+**Starting state, measured.** Plugin `HEAD == origin/main == 06ffa9855beb1fb64155203281e873a7ba63efdd`, divergence
+`0 0`, tracked tree clean; the only untracked files were the retained `v0.1.5` release artifacts
+(`dsh-turn-performance-meter-0.1.5.tgz` + `.sha256`), preserved. Tags `v0.1.0`–`v0.1.5` present; npm `latest` = `0.1.5`;
+GitHub Release `v0.1.5` present (published 2026-10-07). DSH references: superseded
+`639ed015397290b3745d163aafe02ffee4aa3f84` (`0.2.0-rc.2`), target
+`687f282e8625c6b8d11ff58211a90524be2e4317` (`0.2.1-rc.2`).
+
+### 2. Independent upstream audit
+
+The audit was **re-run from the runtime and the source**, not inherited from the earlier static GitHub review. The
+consumed surface was enumerated first (11 interfaces, each mapped to plugin `file:line` and to an upstream declaration),
+then compared four ways: upstream blob hashes at both commits, installed declarations in both runtimes, installed
+compiled `lib/*.js` blocks, and execution of the installed compatibility evaluator. 8,431 files changed between the two
+reference commits, so the comparison is scoped to the packages the plugin touches.
+
+Result: **no BREAKING code-contract change.** Eight of the fourteen declaration files are byte-identical
+(`contract/events.ts`, `session-wire-event.ts`, `sessions/assistant-stream.ts`, `contract/session.ts`,
+`contract/snapshot.ts`, `assistant-stream.ts`, both `TodoPanel` files); the six that changed were each classified against
+the consumed surface and are additive or outside it (documentation plus experimental plugin records; provider
+configuration metadata; a subagent `requestId` fallback; additive client slots with `conversation.input.dock` unchanged;
+`engines.dsh` precedence with the peer-only path unchanged; an additive install-spec helper). The installed-runtime pass
+agrees: the window/change declaration file, the assistant-stream declaration file, the locale declarations and the slot
+registry declarations are byte-identical, and every differing shipped file has its consumed block proven identical
+(`SessionEvent` envelope and all consumed event payloads, `TokenUsage`/`StreamChunk`, `SessionBinding`, the dock slot and
+`InputZone`, the slots registry bodies, `rev`/`chunkUrl`/`parseDshClient`). The full interface table, blob evidence,
+installed-runtime section and residual-risk register are in `docs/DSH_API_NOTES.md` §15 and the raw audit under
+`dev/phase11/audit/`.
+
+The one **deployment-level** change is the peer declaration: on `0.2.1-rc.2` the old `0.2.0-rc.2` peer is refused at
+install (`incompatible-version`) and its bundle is skipped at profile load. This was proven by executing the installed
+evaluators from both runtimes against the real manifest in a six-cell matrix (migrated peer compatible; old peer refused;
+0.2.0 evaluator agrees; opposite-direction controls) — `dev/phase11/lead/peer-evaluator-matrix.txt`.
+
+### 3. Peer migration and the contract test
+
+`package.json`: `"@deepseek-ai/dsh": "0.2.0-rc.2"` → `"@deepseek-ai/dsh": "0.2.1-rc.2"` (exact, the only peer; version
+stays `0.1.5`). No range, no dual range, no `allow-version --accept-risk`, no compatibility exemption.
+
+`test/dsh-021-contract.test.js` (new, 19 tests) is the 0.2.1 normative layer: the exact peer pin plus the new reference
+commit, the retained-0.2.0-evidence cross-file guard, the client bundle/injection/dock declaration, the same eight wire
+contract groups the 0.2.0 layer pinned (envelope, boundaries, settlements, tool plane, transient row, compact-stream
+timing, stream chunks and usage, window changes and `settle-assistant` ambiguity, one end-to-end turn), and the frozen
+presentation/publication invariants. `test/dsh-020-contract.test.js` keeps its Phase 9.3 shape assertions and is **not**
+restamped; its compatibility-metadata claim was updated to the cross-file guard "the historical 0.2.0 evidence is
+retained and the working tree declares `0.2.1-rc.2`". `test/ttft-boundary.test.js` names the new installed target in one
+comment.
+
+### 4. Source changes and the rebuilt bundle
+
+| File | Change |
+|---|---|
+| `package.json` | DSH peer → `0.2.1-rc.2`; version unchanged at `0.1.5` |
+| `test/dsh-021-contract.test.js` | new 0.2.1-rc.2 normative contract layer (19 tests) |
+| `test/dsh-020-contract.test.js` | metadata claim becomes the historical-evidence/current-peer guard |
+| `test/ttft-boundary.test.js` | comment names the 0.2.1 installed target (no assertion change) |
+| `src/dsh/index.js` | compatibility-baseline docblock moves to `0.2.1-rc.2` and records the changed/identical declaration split |
+| `src/dsh/client-feed.js` | revision-gap comment names both runtimes (the producer file is byte-identical) |
+| `client.js`, `lib/client.js` | rebuilt from source; byte-identical to each other |
+
+No adapter code, no normalization rule, no metric arithmetic and no presentation rule changed. The rebuild is a
+consequence of the two docblock edits inside the client source graph, not of behaviour:
+
+```text
+before  628,898 bytes  sha256 38044CE68E649B831970186AB29AA706DD201A9C7088CE03F25C205E4094F08C
+after   629,459 bytes  sha256 BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1
+client.js == lib/client.js (byte-identical)
+```
+
+Frozen invariants are asserted unchanged by the new contract layer and by the existing suite:
+`DEFAULT_PRESENTATION_REFRESH_MS = 100`, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`; the Phase 9.4–10.1R.1
+fixes (TTFT semantics, attempt-local TPS reset, durable reconciliation, peak publication rules, compressed curve
+geometry, generation-safe foreground recovery) were not reopened. No smoothing, clamp, fake token or inferred
+measurement was introduced.
+
+### 5. Isolated environment, installation and boot acceptance
+
+Environment inventory was read-only and recorded before anything was started: the operator's live GUI on `1911` (owned
+by the desktop host), the `web` profile, and the protected `profiles\web` / `profiles\desktop` directories were treated
+as untouchable; no listener existed on 3080 at inventory time. A fresh disposable profile `tpm-phase11-iso` was created
+from a shipped profile template on the shared `DSH_HOME`; the isolated toolchain was installed at
+`E:\Projects\DSHarness\_phase11-runtime\dsh-0.2.1-rc.2` and verified with `lib/bin.js --version` = `0.2.1-rc.2`; a
+separate `0.2.0-rc.2` prefix was installed only as the audit baseline.
+
+The plugin was built locally (`npm pack` from the working tree, peer `0.2.1-rc.2`) and installed with
+`plugin --profile tpm-phase11-iso add file:…`:
+
+- install exited 0; no `incompatible-version`, no `allow-version`/`--accept-risk`;
+- `version-exemptions` = `{}`; the profile's `dsh.profile.bundles` includes `dsh-turn-performance-meter`;
+- pnpm additionally printed `Issues with peer dependencies found` — its `peers check` explains this precisely as
+  `missing peer @deepseek-ai/dsh Wanted: 0.2.1-rc.2: dsh-turn-performance-meter@0.1.5`, i.e. the **package manager**
+  wants the host-provided runtime peer installed inside the profile. That is the normal plugin-profile layout and is not
+  the DSH compatibility gate; the DSH gate accepted the install and the bundle, and the old-peer negative control is
+  refused (`incompatible-version`).
+- boot: isolated web host on `127.0.0.1:50111`, PID 10696, separate cwd workspace; the served page module manifest lists
+  the plugin entry (`rev = a5b665752098`, `immediately: true`, the three declared injections) with no `skippedBundles`
+  entry for it and no boot/config errors. The served bundle was fetched back from the live host and compared with the
+  built file: **identical prefix + the 83-byte source-map trailer**
+  (`;\n//# sourceMappingURL=??dsh-turn-performance-meter/client.js.map&rev=a5b665752098\n`), so the host is serving
+  exactly the bytes this round commits (`dev/phase11/lead/served-bundle-proof.txt`).
+
+**Containment, stated rather than glossed.** `DSH_HOME` is shared, and parts of its state are not profile-scoped. The
+protected profile directories were hashed before and after: **0 added, 0 removed, 0 changed** in both `profiles\web` and
+`profiles\desktop`. The isolated host nevertheless appended to shared global state: the workspace registry and usage/cost
+ledgers, and — because the GUI selects its workspace from the global registry rather than from the process cwd — one new
+session id was created inside the operator's `--E-Projects-DSHarness-dsh-turn-performance-meter--` session bucket
+(`session-bebf2eeb-…`, 18:27:20). No existing session file was modified and none was deleted; the new session is a
+byproduct of the provider smoke attempt. This is inherent to running an additional instance on the same `DSH_HOME` and
+is recorded here rather than hidden; the isolated profile itself is disposable.
+
+**Provider route.** A real model attempt requires credentials. The isolated profile's own patch layer configures the
+shipped `@deepseek-ai/dsh-llm-pi-ai` adapter with a `command-goat` route that references the shared credentials service
+by `apiKeyEnv` name only (`COMMAND_GOAT_API_KEY`); no secret value was read, printed, exported or written, and no
+credential was copied from a protected profile. The attempt resolved the credential and reached the provider, which
+answered `Request quota exhausted` (`QUOTA`) — so the credential wiring is proven and the route is quota-limited. A
+second shipped route (`DeepSeek Account`, `llm-deepseek-account`, `DeepSeek-V4.1-Flash`) is listed by the same host; the
+functional matrix uses it below.
+
+### 6. Real-browser functional matrix (R1–R8) and dock acceptance
+
+The runtime half of the phase was executed in a real browser against the isolated host: profile `tpm-phase11-iso`,
+`0.2.1-rc.2`, PID 10696, port 50111, served bundle rev `a5b665752098`; dedicated throwaway Chrome instances over CDP
+(headless 9223; a headful 9225 instance for R6) and real model turns on the shipped
+`DeepSeek Account → DeepSeek-V4.1-Flash` route selected per session in the composer model menu (the profile default
+`command-goat` route resolved its credential but answered `QUOTA`; that failed attempt is retained as history, not
+hidden). No scenario used CDP visibility, focus or lifecycle emulation; R6 used a real OS window minimize plus an
+opaque cover window. The full per-check record, console logs, screenshots and raw window-stage JSONL are under
+`dev/phase11/runtime/out/`, with the merged report at `dev/phase11/runtime/matrix-results.md`.
+
+| Item | Verdict | Pass / Fail / NotObserved / Blocked | Key observed evidence |
+|---|---|---|---|
+| boot + dock acceptance | **PASS** | 18 / 0 / 0 / 0 | boot graph 70 entries, plugin entry rev `a5b665752098`, served bundle 200 with this checkout's build markers; `[data-slot="conversation.input.dock"]` outlet has exactly one `.dsh-tpm-root`, meter bottom ≤ composer top, card width shares the composer constraint; native stats stay below the composer with no overlap; reload + session switch leave roots=1/styleTags=1 and schedulerCreated 1→1; no skipped/missing/duplicate registration console rows; exactly one registration per mount |
+| R1 live output | **PASS** | 9 / 0 / 0 / 0 | TTFT froze once at the first generated-token boundary (running counter 0.7 s → `streaming-reasoning`, never re-entered); card TTFT 0.74 s vs durable first-token 737 ms; first published live rate `≈274 tokens/s` at a wall instant ≥ the durable three-sample/100 ms gate, with **0** rate writes before the gate; presentation cadence `refreshMs=100`, scheduler `intervalMs=100`, render ticks n=202, p50 **100.4 ms** (p95 107.9); per-delta ingestion 3671 vs 204 presentation renders; scheduler stopped after settle |
+| R2 reasoning/output transition | **PASS** (1 NOT OBSERVED) | 7 / 0 / 1 / 0 | pending-first-token → streaming-reasoning → streaming-output in one real turn; phase-local clocks reset at the transition; reasoning column `≈148 tokens/s` and output column `≈704 tokens/s` stay separate with separate secondary lines; no TTFT re-freeze. NOT OBSERVED: the provider returned no `reasoningTokens` for this turn, so the per-phase token split could not be checked against the provider — the two statistics themselves are asserted separate from durable evidence |
+| R3 tool execution | **PASS** (2 NOT OBSERVED) | 7 / 0 / 2 / 0 | a real `pwsh` tool call was observed as a live tool stage (`pwsh · 0.0s 1.1s`) with no TPS in the tool window, then waiting-model → streaming-output, durable attempts 1→2, footer `tools 1 · 0.0s`, tokens 66+111 = durable usage 177. NOT OBSERVED: the tool returned in ~10 ms (shorter than the 100 ms presentation cadence) and the isolated host's tool sandbox refused the requested `Start-Sleep 1500` command at spawn (`SetNamedSecurityInfoW failed (Win32 5): grantWrite(repo)`), so the tool-timer-advance and timer-vs-durable sub-checks have no presentation frame to read; recorded rather than inferred |
+| R4 completed statistics | **PASS** | 14 / 0 / 0 / 0 | one completed card, no live pill; expanded non-hovered card carries the four principal columns in order (`reasoningTps, outputTps, generatedTokens, ttft`) exactly equal to the settled projection, secondary lines present, footer `attempts 1` = durable 1; generated tokens 482 = durable outputTokens 482; TTFT 0.94 s vs durable 935 ms; scheduler stopped; card text identical across a 3 s wall gap; hovering the detail reveals the curve and replaces exactly the two TPS cells (documented interaction) |
+| R5 multi-attempt curve continuity | **NOT OBSERVED** (connector occurrence) | 9 / 0 / 3 / 0 | two real tool/model turns were captured. All preservation checks that do not need an eligible boundary pass: rendered run paths equal the local curve view model, connector ids equal the model (both empty), DOM data-points/markers equal the view model, peak 250 = settled projection 250, card rates unchanged in summary and curve modes, tokens 280 = durable outputTokens 280. The connector occurrence itself was **not** observed: the natural turns produced no eligible same-phase adjacent attempt boundary — attempt A's outgoing run was a 5 ms tool-argument singleton and/or carried a tail phase cut, and `buildContinuityConnectors` correctly refuses to bridge a cut (`src/client/completed/curve-view-model.js:365-445`). Connector geometry remains covered by the deterministic curve-continuity tests; **no real-turn connector is claimed** |
+| R6 background recovery | **OBSERVED** (across two real runs; final consolidated rerun environment-limited) | see note | 19:15 run: real OS minimize of Chrome hwnd 1247050 (pid 51000) with `isIconic:true` + opaque cover visible, page `visibilityState=hidden` with an **11,320 ms rAF gap**, `foregroundResyncs` 1→2, `settledWhileHidden=true`, completed card appeared while hidden, card tokens 2,106 = durable 2,106 / attempts 1 = durable 1. 19:21 run: OS minimize + cover again proven from `window-cycle.stage.jsonl` (`showWindowResult:true, isIconic:true, coverVisible:true`), rAF max gap **18,254 ms**, `foregroundResyncs` 1→2, no duplicate samples, tokens 346 = durable 346. The final consolidated clean-browser rerun could not reach a live turn (freshly relaunched headful Chrome reported `visibilityState="hidden"` with an unpainted window), so it is recorded as NOT OBSERVED for that one attempt; the backgrounding mechanism itself is REAL DSH OBSERVATION from the two runs above |
+| R7 reload / session switching | **PASS** | 11 / 0 / 0 / 0 | a real `Page.reload` mid-generation re-attached the same turn without restarting its clock (elapsed 2.0 s = durable turn age 2.02 s, TTFT stage never re-entered), the turn completed and reconstructed a card matching durable attempts/tokens (1,635 = 1,635); post-turn reload reproduced the card byte-identically; real sidebar switching A↔B produced per-session cards with roots=1/styleTags=1, `lastFeedRevision == lastSourceRevision` and no cross-session contamination |
+| R8 error / retry | **PASS** | 7 / 0 / 0 / 0 | genuine user cancellation through the real composer "Stop generating" control; interrupted turn settled with terminal boundary consumed (`rawTurnEndSeen=1`, `turnEndLookupMiss=0`, durable `turn/end` aborted/user); a real retry turn (new turn number) completed with its own tokens 7 = durable 7, attempts 1 = durable 1, no carry-over or duplicate samples |
+
+**What this establishes.** On the target runtime the plugin installs, boots, loads its client bundle, occupies its dock
+seat, and correctly renders live TTFT/TPS with the frozen 100 ms cadence, the reasoning/output transition, real tool
+execution, the completed card with an authoritative token/TTFT match against the durable session log, reload adoption
+and session switching, and cancellation/retry — all with real model output through the shipped account route.
+
+**What it does not establish.** R5's eligible-continuity-connector occurrence on a real turn was not observed (no
+naturally eligible boundary was produced; the connector feature is presentation-only and deterministically tested), and
+R6's final consolidated single-run reproduction was environment-limited after two earlier runs observed the mechanism.
+Those two gaps are stated here and in the final report, and they are the reason the phase verdict is **BLOCKED — RUNTIME
+ACCEPTANCE** rather than an unqualified compatibility acceptance.
+
+### 7. Regression gates
+
+```text
+npm run build:client             client.js rebuilt (628,146 characters / 629,459 bytes, mirrored to lib/client.js)
+npm run verify                   structure OK (14 required files, 16 core modules, 76 test files, client bundle fresh,
+                                 lib/client.js mirrored); tests 915 · pass 915 · fail 0 · cancelled 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, all structural evidence preserved
+git diff --check                 clean
+client.js == lib/client.js       byte-identical (sha256 BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1,
+                                 629,459 bytes)
+```
+
+Test totals rose from the **896** baseline to **915** — **19 new deterministic tests**, all in
+`test/dsh-021-contract.test.js`; no test was skipped, todo'd, deleted or tolerance-widened. The rebuilt bundle differs
+from the released one only in the two documentation blocks inside the client source graph: a line diff of `client.js`
+across this round has **0 non-comment changed lines**
+(`before 628,898 bytes / sha256 38044CE68E649B831970186AB29AA706DD201A9C7088CE03F25C205E4094F08C`,
+`after 629,459 bytes / sha256 BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1`).
+
+### 8. Git and release discipline
+
+The source migration and its documentation were committed with an ordinary commit (no `--amend`, no rebase of pushed
+`main`, no `--force`, no `--force-with-lease`). The commit was **not pushed**: §9 of the phase contract permits
+publishing the migration to `main` only when every source and real-runtime acceptance gate passes, and the R5
+connector-occurrence gate is not observed. `origin/main` therefore stays at the starting commit
+`06ffa9855beb1fb64155203281e873a7ba63efdd`; the tested source is preserved in the local commit so the migration cannot be
+lost while the single unobserved runtime item is resolved.
+
+Nothing was published, versioned, tagged or released: the package version stays `0.1.5`, no `v0.1.6` tag and no GitHub
+Release exist, and the released `v0.1.5` npm package, Git tag and GitHub Release asset remain untouched and bound to
+`0.2.0-rc.2`. The untracked `v0.1.5` release artifacts that were present at the start are preserved.
+
+**Verdict for this phase: BLOCKED — RUNTIME ACCEPTANCE.** Source compatibility with DSH `0.2.1-rc.2` is confirmed (no
+interface incompatibility, exact peer accepted, install/boot/dock and seven of the eight functional items observed), but
+one required real-runtime item — R5's eligible continuity-connector occurrence on a real turn — was not observed, so
+compatibility is not declared accepted in this round.
