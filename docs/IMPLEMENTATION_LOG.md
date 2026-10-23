@@ -6307,3 +6307,223 @@ observed on a real DSH `0.2.1-rc.2` turn: **3 attempts, 2 tool call → result c
 boundaries, and 2 continuity connectors rendered in the real DOM**, with the measured statistics preserved exactly. The
 earlier BLOCKED record remains in place as history; compatibility is now declared accepted for the unreleased `0.1.5`
 source tree. No release has occurred; this is the base for a future v0.1.6 release preparation, not a release.
+
+## Phase 12.0 — Session navigation / binding-generation recovery (2026-10-23)
+
+### 1. Scope, baseline, and constraints
+
+This round fixes the user-reported DSH `0.2.1-rc.2` defect in `dsh-turn-performance-meter` v0.1.6: after navigating
+main agent → subagent session → back to main (or repeatedly between them), a session's live meter could stay frozen on
+a stale phase (tool call / waiting for the model) although the underlying agent had advanced. It is a development round
+on a review branch: **no publish, no tag, no version bump, no GitHub Release**, and the published v0.1.6 artifacts are
+untouched.
+
+Baseline was verified read-only before any edit: `HEAD = origin/main = 568ebaaeab2c9362a2c265f9d5173bac73b264e5`,
+annotated tag `v0.1.6` points at the same commit object, tracked tree clean except the protected untracked canonical
+release artifacts (`dsh-turn-performance-meter-0.1.5.tgz` / `0.1.6.tgz` + sidecars), `package.json` version `0.1.6`,
+peer exactly `"@deepseek-ai/dsh": "0.2.1-rc.2"`. The canonical v0.1.6 `.tgz` SHA-256 was re-hashed after the round and
+is still `6D1196D226ED93605263407E37CE7C44120576FB57AB476CD4D3F88F2CCB7884` (sidecar matches); the v0.1.5 artifact is
+still `9FE55298…1B6C`. No `reset --hard`, `clean`, rebase, amend or force push was used. Work was done on the ordinary
+branch `fix/session-navigation-resync`.
+
+### 2. The reported defect, and the real reproduction (REAL DSH OBSERVATION)
+
+An isolated real DSH `0.2.1-rc.2` host (new profile `tpm-phase12-iso`, own workspace, port 50121, shared `DSH_HOME`
+only for the credential service) was loaded with the **canonical published v0.1.6** artifact (`6d1196…7884`) and a
+dedicated headless Chrome/CDP session. A real turn was executed through the shipped `DeepSeek Account →
+DeepSeek-V4.1-Flash` route spawning a **real subagent**, then the UI navigated main → child → main during the live turn.
+
+Observed (REAL DSH OBSERVATION, `dev/phase12/runtime/out/live/repro-verdict.json` and screenshots):
+
+- before navigation the main meter was live in `pending-first-token` ("first response timer 0.3 s"), source revision 6,
+  feed revision 6;
+- on return, `ctx.sessions.binding(main).eventSource` **object identity had changed** (fresh generation, revision
+  0 → 2667+), while the plugin's `eventSourceRebinds` stayed `0`, `foregroundResyncs` stayed `0`, and
+  `lastFeedRevision` stayed frozen at 7 for the whole 18 s watch (`projectedViewKind = ttft`);
+- the durable session record for the same turn showed the first model delta at +1.40 s, 3,601 output tokens and
+  `turn/end` completed at +26.11 s;
+- after durable completion the live pill still read "first response timer 58.0 s", `pending-first-token`, while the
+  answer text and usage were rendered; a full page reload re-attached correctly (`feed == source revision`).
+
+The freeze is therefore reproduced with real model traffic, and the defect is isolated to session activation (not to
+ingestion, settlement or rendering).
+
+### 3. Root cause (CONFIRMED source chain)
+
+An independent upstream audit (`dev/phase12/upstream/lifecycle-report.md`) pinned the mechanism to the DSH client
+session-scope lifecycle at reference commit `687f282e8625c6b8d11ff58211a90524be2e4317` (installed 0.2.1-rc.2 compiled
+bundles are semantically identical on every audited path; exact build-commit provenance is `NOT OBSERVED` because the
+installed build string `332895e` is not in the shallow study checkout):
+
+1. `UiWorkspaceService.replaceMain` retains the target session with source `mainView` and then releases the previous
+   reference (`ui-workspace/src/client/navigation.ts:506,525-527`). Switching the displayed main conversation releases
+   the only long-lived `mainView` reference of the hidden session.
+2. When the last reference reaches zero, `retireScope` deletes the scope record (and therefore `binding(id)`),
+   unbinds the scope and calls `manager.drop(...)` on the Session
+   (`session-controller/src/client/sessions/service.ts:543-566,586-595`; `manager.ts:191-198`).
+3. Navigating back calls `retainScope` → `materializeScope`: a new scope context is minted, `manager.get(id)` constructs
+   a **new** `Session` because the old one was dropped, and `binding.eventSource = session.eventSource`
+   (`service.ts:598-616`; `manager.ts:243-247`; `session.ts:167`). The event source is a per-Session readonly field, so
+   the new generation has a **different source object whose revision restarts at 0**. A retired source has no end
+   notification (`contract/events.ts:120-205`): its subscription simply stops receiving.
+4. v0.1.6 `attach()` returned `true` immediately for a session already in its map, with **no comparison against
+   `binding.eventSource`** (`HEAD:src/client/live/controller.js:623-631`, early return `:625`). The component remounts on
+   the new generation (the dock is keyed by `sessionGenerationKeyOf(binding)`,
+   `ui-renderer/src/client/scoped-slots.tsx:384-393,1029-1058`), re-runs `attach()`, gets `true`, and keeps the retired
+   source's subscription. The new authoritative window is never read.
+5. `project()` then re-projects the last cached phase, and the only identity-aware recovery path (`resync()`) was wired
+   **only** to document `visibilitychange` / `pageshow` / `focus`. A session switch is not a document foreground event,
+   so the freeze persisted until the operator switched browser tabs.
+
+Discrimination of the candidate mechanisms: **(ii) eventSource generation replacement while the dock was on another
+session is the root cause** (CONFIRMED by source and reproduced in the real run); (i) same-source missed events/revision
+gap is not the mechanism in this flow; (iii) "binding absent at activation and never retried" — the missing retry is
+CONFIRMED (v0.1.6 never subscribes `retainInfo`) but absence at this dock's activation is not provable for a strict
+session-scoped slot, and was not the reproduced cause; (iv) remount + stale projection cache is CONFIRMED as an
+amplifier, not the cause. A concurrently open right-sidebar session panel (`sidebarView`) or subagent chat
+(`sidebarChat`) can keep a hidden scope alive so the generation survives; that alternative same-source path is covered
+by the fix and by test T23.
+
+### 4. Pre-fix deterministic regression matrix (RED)
+
+New deterministic tests were written **before** touching production code: `test/session-navigation-recovery.test.js`
+(25 tests) over the new fake-session lifecycle harness `test/helpers/session-navigation.js`. The harness models the real
+lifecycle: `binding(id)` exists only while a scope is materialized, `retainInfo(id)` is the public reference-count
+snapshot (subscribing does not retain), materialization creates a fresh source, retirement removes the binding, and a
+source can publish an authoritative window without invoking subscribers (a genuinely missed update).
+
+Run against a clean export of HEAD `568ebaa` (v0.1.6 sources) with the current tests: **20 fail / 5 pass**, the five
+passing ones being deliberate regression guards (T06 idempotency, T15 mount/unmount accounting, T16 foreground recovery,
+T17 cadence, T20 cross-session resync isolation). Every A1–A6 matrix entry is RED before the fix, including:
+
+- A1/T01 main generation A1→A2: old source still subscribed, new source not subscribed, view remains `tool-running`;
+- A2/T02 subagent generation B1→B2 and cross-session isolation;
+- A3/T05 binding missing → materialized later is never retried;
+- A4/T07 same source with a missed authoritative window;
+- A5/T03 A→B→A with the page permanently visible;
+- A6/T08/T09/T10 equal-revision replacement, revision rollback to 0, stale-source inertness;
+- C5 pending-binding presentation, C7 first-frame association, T04/T12/T13/T14 repeated navigation and phase advances.
+
+The audit workstream independently reproduced the same freeze against the v0.1.6 controller snapshot with a
+source-derived `ctx.sessions` model (24/24 checks, "LOCAL TEST RESULT"), so the RED evidence is not a single artifact.
+
+### 5. Minimal fix (C1–C7)
+
+**C1 — identity-aware activation (`src/client/live/controller.js`).** `attach`, `resync` and `MeterRoot` now share one
+`ensureCurrentBinding(sessionId, reason)` entry point. For an already-known session it resolves the **current** binding
+and branches: no binding → pending (C5); different eventSource → atomic rebind (C4); same eventSource → idempotent
+authoritative window resync (which also detects revision gaps through the unchanged Phase 10.1R feed rule). A first
+attachment initializes one subscription; every later path replaces or reuses that one subscription one-for-one, so
+repeated activations cannot double-subscribe or duplicate metric work. `attach(id) === true` now means "subscribed to
+the current binding", never "known session".
+
+**C4 — atomic rebind.** `rebindSource` releases the retired generation's listener first, adopts the new source,
+subscribes it, resets the feed generation, replays the complete authoritative `entries` snapshot into the real
+`SessionEventFeed`+store, clears the presentation cache and invalidates the projection. A superseded generation has no
+listener by the time the new source is current. One DSH ordering detail is handled explicitly: a new scope's
+`SessionEventSource` publishes revision 0 with an **empty** window before `session.open()` history lands; that empty
+pre-history window is not adopted as evidence (`generationAwaiting`). The previous settled card stays readable, stale
+live claims stay suppressed, and the generation is adopted with a full rebaseline when the first real publication
+arrives — otherwise every navigation back would wipe and briefly hide the settled card.
+
+**C5 — pending binding is not live evidence.** When the binding disappears, `markBindingPending` releases the retired
+subscription (when a binding-ready signal is available), records the pending episode, and `project()` suppresses live
+phases while keeping telemetry and settled history intact. No timers or time-based inference are used to "decide" that
+a tool finished or a model started.
+
+**C3 — event-driven binding-ready.** For each attached session the controller subscribes to the public
+`ctx.sessions.retainInfo(id)` `ObservableSnapshot` and, on emission, reads `binding(id)` synchronously and runs
+`ensureCurrentBinding(..., 'binding-ready')`. This is the 0→1 materialization / 1→0 retirement edge; subscribing to
+`retainInfo` does **not** retain, create a scope, or open history, so DSH's reference counts and keep-alive semantics
+are untouched. There is no polling and no extra `SessionReference`.
+
+**C2/C6/C7 — component lifecycle (`src/client/live/MeterRoot.js`).** Every activation (first mount and every
+`sessionId` change) calls `ensureCurrentBinding(..., 'session-activation')` from a layout effect (`useLayoutEffect`,
+with a guarded `useEffect` fallback for stubs/minimal hosts) and re-projects the recovered view, so the post-switch
+frame is authoritative before paint. A render-path association (`viewSessionRef`) guarantees a view state belonging to
+the previous sessionId is never painted as the new session's current state, and the session-switch dimension is fully
+separated from document visibility: the Phase 10.1R `visibilitychange`/`pageshow`/`focus` recovery is unchanged and a
+session switch needs no foreground event. The presentation scheduler remains one timer per live view, stopped on
+completion and unmount (not `dispose()`d on unmount, because React StrictMode's setup→cleanup→setup would leave a
+mounted meter with a dead ticker).
+
+### 6. Deterministic verification (GREEN)
+
+The 25-test Phase 12.0 matrix is green on the fix, and the full deterministic suite is green:
+
+```text
+npm run verify                 PASS — structure OK (14 required files, 16 core modules, 77 test files,
+                               client bundle fresh, lib/client.js mirrored)
+                               tests 940 · pass 940 · fail 0 · cancelled 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs   PASS — no personal content, 9 fixtures structurally preserved
+git diff --check               clean
+client.js == lib/client.js     648,229 bytes, SHA-256 63B52476BBB7589F585333A7477CC802219F113341D99E80E40B5A5A1A97B78A
+new deterministic tests        25/25 green (20/25 RED on v0.1.6 HEAD)
+```
+
+Statistical/performance contracts are unchanged: `DEFAULT_PRESENTATION_REFRESH_MS = 100`, `MIN_RATE_SAMPLES = 3`,
+`MIN_RATE_ELAPSED_MS = 100`; `src/core/`, `src/client/completed/`, TPS/TTFT/reasoning-output attribution, tool timing,
+token allocation, attempt-local reset, completed-curve geometry/connector/peak and render budget are untouched by the
+diff. Assertion T18 proves a navigation rebuild of the t1 fixture reproduces the same completed curve, attempt segments,
+series peaks, metric columns and quality as a clean load; T17 proves the 100 ms cadence and that a completed card stops
+the ticker; T19 proves repeated navigation keeps subscriptions (1 per session), retention watches (1 per session),
+retained turns and timers bounded; T11/T20 prove no cross-session contamination. No presentation tick performs a full
+authoritative rebaseline: recovery runs only on a lifecycle signal (activation, retainInfo edge, foreground edge).
+
+### 7. Real DSH 0.2.1-rc.2 acceptance — R1–R8 (+N1), 9/9 PASS
+
+Acceptance ran on the definitive artifact built from this tree and installed into the same isolated profile:
+`_phase12-runtime\final\dsh-turn-performance-meter-0.1.6.tgz` SHA-256
+`B5232FEA30AEED04181D982DB9D4AA899EE2647414B6742C33D4D046D9822C05`, enabled client 648,229 B SHA-256
+`63B52476…B78A`; the host served a 648,312-byte body whose client prefix is byte-identical (`83`-byte module trailer),
+plugin revision `c3c681dd99e1`, boot revision `84547f0be5dd`, 70 entries, no skipped bundles. Real DeepSeek Account
+route, real subagent sessions, dedicated Chrome (headless CDP 9226 for the navigation matrix, headed CDP 9227 for R6).
+
+| Round | Verdict | Real observations (evidence under `dev/phase12/runtime/out/post-fix/`) |
+|---|---|---|
+| N1 negative control | PASS | old v0.1.6 freeze recorded; new build: nav +1, rebinds +1, `generationAwaiting` observed→resolved, authoritative, no stale pending-first-token, `foregroundResyncs +0`, card tokens 1178 = durable, timer 0 |
+| R1 | PASS | main in tool phase before nav; return is authoritative; no stale waiting; tokens 158 = durable; `foregroundResyncs +0` |
+| R2 | PASS | real child tool phase observed; navigated away **and back inside the same 25.3 s tool window** (tool call 1792771205477 → result 1792771230845); reopened child completed, `generationAwaiting` resolved, feed == source revision, rebinds +1, subs 1, timer 0, tokens 1449 = durable |
+| R3 | PASS | main turn completed while away → completed card on return, tokens 900 = durable, timer 0 |
+| R4 | PASS | child turn completed while away → reopened completed card, tokens 661 = durable |
+| R5 | PASS | 5 round trips; per-session monotonic `navigationResyncs` main `[1,2,2,3,3,4,4,5,5,6,6]`, child `[1,2,3,4,5]`; `eventSourceRebinds` monotonic likewise; page always visible; `foregroundResyncs +0`; subs 1; timers 0; one root/one style; no stale DOM |
+| R6 | PASS | real OS backgrounding: Win32 `ShowWindow(SW_MINIMIZE)` on the dedicated headed Chrome window (`isIconic:true`, hwnd 2623066) + full-screen topmost cover (1707×1067), hidden 12,000 ms, 42 hidden visibility samples, one hidden→visible edge, max rAF gap 13,215 ms, `foregroundResyncs +1` (2 total), turn settled while hidden, recovered completed card, tokens 949 = durable, timer 0, no duplicate samples |
+| R7 | PASS | real 3-attempt turn (per-attempt tokens 559/339/308, total 1206 = durable) with a real tool call; expanded completed curve rendered **2 `dsh-tpm-connector` paths on the output series** (`…:13→14`, `…:14→15`) between eligible runs; peak DOM 316 == view-model 316; curve 59 points; no algorithm regression |
+| R8 | PASS | full page reload recovers both main and child from their authoritative windows; one root/one style; no stale phase |
+
+Per-round diagnostics recorded include sessionId, binding availability, source generation/identity diagnostic, source
+revision, feed revision, controller `projectedViewKind`, meter DOM state, `foregroundResyncs`, `navigationResyncs`,
+`eventSourceRebinds`, `revisionGapRebaselines`, active subscription count and presentation timer count. No prompt, tool
+argument, credential or session text was logged. Full machine-readable detail: `out/post-fix/rounds.json`,
+`out/post-fix/MATRIX.md`, `out/post-fix/samples.jsonl`, per-round screenshots, `out/post-fix/durable/` ground truth,
+and `dev/phase12/runtime/READY.json`.
+
+### 8. Isolation and cleanup
+
+The isolated environment used only new resources: profile `tpm-phase12-iso`, workspace
+`_phase12-runtime\workspace-phase12`, host `127.0.0.1:50121`, dedicated Chrome profiles/CDP ports (9226/9227). The
+operator's running Electron app (PIDs 12392/16524) was never restarted or modified (same start times before/after);
+`profiles\desktop` is byte-identical by manifest (0 added / 0 removed / 0 changed) and `profiles\web` is absent before
+and after. The shared `DSH_HOME = C:\Users\20659\.dsh` is required for the credential service, so new session
+directories were appended exactly as in the Phase 9.4/11.0 precedent; no existing session was modified. After
+acceptance the isolated host and both dedicated Chrome instances were stopped, their browser profiles deleted, and
+temporary audit copies removed; only the accepted `.tgz` artifact and logs were retained outside the repo. The audit
+and runtime evidence under `dev/phase12/` is git-excluded (dev-only).
+
+### 9. Git, bundle, and release discipline
+
+The change set is one ordinary commit on `fix/session-navigation-resync` (no amend, rebase, force push, `reset
+--hard` or `clean`), containing: the controller/MeterRoot fix and rebuilt deterministic `client.js`/`lib/client.js`,
+the new navigation harness and 25-test matrix, the Phase 12.0 documentation, and the `dev/phase12/` git exclusion. The
+remote review branch is advanced by a normal fast-forward push; `main` is not touched and no tag is created. The
+package version stays `0.1.6`, the peer stays exactly `0.2.1-rc.2`, the canonical published v0.1.6 npm package, tag,
+GitHub Release and `.tgz`/sidecar (hash re-verified after the round) are preserved unchanged, and nothing was
+published, tagged, version-bumped or released. The next release (`0.1.7`) is explicitly out of scope for this stage.
+
+### 10. Verdict
+
+**PASS — PHASE 12.0 SESSION NAVIGATION RECOVERY ACCEPTED.** The reproduced real-DSH freeze is fixed by an identity-aware
+session-activation recovery path built on DSH's public `binding`/`retainInfo` APIs, with binding-ready handled
+event-driven, atomic generation rebinds, no polling and no extra scope retention. The deterministic suite is 940/940
+green (25 new tests, 20 of them RED on v0.1.6), the real DSH `0.2.1-rc.2` acceptance is 9/9 PASS on the exact committed
+bundle, foreground recovery and every frozen statistic/curve contract are unchanged, and no release occurred.

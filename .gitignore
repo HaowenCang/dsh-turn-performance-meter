@@ -11,6 +11,10 @@ dev/scratch/
 # logs, audit working notes). Dev-only, never shipped; the report references it.
 dev/phase11/
 
+# Phase 12.0 local session-navigation acceptance evidence (isolated runtime
+# logs, CDP captures, upstream lifecycle audit). Dev-only, never shipped.
+dev/phase12/
+
 # Pre-sanitization fixture originals: the provenance record of what public-release
 # redaction removed. Kept locally, never published — see fixtures/README.md.
 fixtures/raw/

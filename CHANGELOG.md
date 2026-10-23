@@ -7,6 +7,34 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## Unreleased — session navigation recovery (Phase 12.0, planned as 0.1.7)
+
+**Not published, not tagged, not version-bumped.** This entry records the development state on
+`fix/session-navigation-resync`; `package.json` stays `0.1.6` and the exact peer stays `@deepseek-ai/dsh: 0.2.1-rc.2`.
+
+Fixed the reported DSH `0.2.1-rc.2` defect where the live meter could stay frozen on a stale phase (tool call /
+waiting for model) after moving between the main agent and a subagent session, even though the agent had advanced.
+Root cause: navigating away releases the DSH session scope, which retires its binding and disposes its
+`SessionEventSource`; navigating back materializes a new scope with a **new** source (revision restarts at 0). The
+plugin's `attach()` treated an already-known session as still-subscribed, so it kept the retired source and only
+document foreground events triggered the identity-aware `resync()`.
+
+- Every session activation (`sessionId` mount/change) now runs an authoritative binding check: identity-aware
+  rebind of a replaced generation, idempotent authoritative window resync of the same generation, and never a second
+  subscription.
+- `ctx.sessions.retainInfo(sessionId)` (public `ObservableSnapshot`, subscribing does **not** retain) is used as the
+  event-driven binding-ready signal for a temporarily absent binding. No polling and no extra `SessionReference`.
+- A source rebind is atomic: old subscription released, new source adopted/subscribed, full generation rebaseline
+  over the authoritative window, presentation cache cleared. A new scope's empty revision-0 pre-history window is
+  not adopted as evidence: the previous settled card stays readable until the real history publication arrives.
+- A temporarily missing binding suppresses stale live claims (no fabricated tool/waiting state) while telemetry and
+  settled history are retained; session activation is independent of document visibility, and Phase 10.1R foreground
+  recovery is unchanged.
+- **No change** to TPS/TTFT/reasoning-output attribution/tool timing/token allocation/attempt-local reset/completed
+  curve/connector/peak/render budget/revision-gap mechanism; 100 ms cadence, `MIN_RATE_SAMPLES = 3`,
+  `MIN_RATE_ELAPSED_MS = 100` are frozen. The deterministic suite is 940 tests (915 prior + 25 new) with 0 skipped and
+  0 todo.
+
 ## 0.1.6 — 2026-10-17
 
 Supported and tested against DSH `0.2.1-rc.2` only. **No support claim is made beyond DSH `0.2.1-rc.2`**, and the

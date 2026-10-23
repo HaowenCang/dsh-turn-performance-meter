@@ -1842,3 +1842,55 @@ and closed the phase.*
 
 **Status: PASS — PHASE 11.0R CLOSED; DSH 0.2.1-rc.2 COMPATIBILITY ACCEPTED. No release has occurred; ready for
 v0.1.6 release prep.**
+
+## Phase 12.0 — Session navigation / binding-generation recovery (2026-10-23)
+
+- [x] **Baseline verified read-only before editing.** `HEAD = origin/main = 568ebaaeab2c9362a2c265f9d5173bac73b264e5`;
+      annotated tag `v0.1.6` on the same commit; tracked tree clean except the protected untracked canonical release
+      artifacts; `package.json` version `0.1.6`, peer exactly `0.2.1-rc.2`; canonical v0.1.6 `.tgz` SHA-256
+      `6D1196…7884` + sidecar match and were re-verified unchanged after the round. No reset/clean/rebase/amend/force.
+- [x] **Real defect reproduced with the published v0.1.6 on DSH 0.2.1-rc.2.** Isolated host/profile/workspace, real
+      DeepSeek Account route, real subagent: on return the binding's `eventSource` identity had changed (new generation,
+      revision restarted) while `eventSourceRebinds = 0`, `foregroundResyncs = 0`, feed frozen at revision 7 for 18 s,
+      pill stuck on `pending-first-token` across durable turn completion (3,601 output tokens); full reload recovered.
+      Evidence: `dev/phase12/runtime/out/live/` (REAL DSH OBSERVATION).
+- [x] **Upstream lifecycle audit (CONFIRMED).** `replaceMain` retains target then releases previous `mainView`
+      (`navigation.ts:506,525-527`) → last reference retires the scope/binding and drops the Session
+      (`service.ts:543-566,586-595`; `manager.ts:191-198`) → return materializes a new Session and new
+      `eventSource` (`service.ts:598-616`; `session.ts:167`) → v0.1.6 `attach` early-returned without comparing identity
+      (`HEAD:controller.js:625`) → stale cached phase; only foreground events resynced. Report:
+      `dev/phase12/upstream/lifecycle-report.md` (root-cause discrimination and `retainInfo` recommendation included).
+- [x] **Pre-fix deterministic matrix (RED).** `test/session-navigation-recovery.test.js` + new lifecycle harness; on a
+      clean HEAD v0.1.6 export **20 of 25 fail** (all A1–A6 entries), 5 deliberate regression guards pass.
+- [x] **Minimal fix implemented.** Controller: identity-aware `ensureCurrentBinding` shared by `attach`/`resync`;
+      atomic rebind (unsubscribe → adopt/subscribe → generation rebaseline → replay authoritative window → clear
+      presentation); empty revision-0 pre-history generation deferred (`generationAwaiting`) so a settled card is not
+      wiped mid-transition; pending binding suppresses live claims while retaining telemetry; event-driven
+      `ctx.sessions.retainInfo` binding-ready watch that does not retain. MeterRoot: activation recovery in a layout
+      effect on sessionId mount/change, session-associated render path, scheduler lifecycle preserved, foreground
+      recovery untouched. No second feed/store, no polling.
+- [x] **Frozen contracts preserved.** No change to `src/core/`, `src/client/completed/`, TPS/TTFT/phase attribution,
+      tool timing, token allocation, attempt-local reset, curve/connector/peak/render budget, Phase 10.1R revision-gap
+      rule; `DEFAULT_PRESENTATION_REFRESH_MS = 100`, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100` unchanged; no
+      authoritative rebaseline on a presentation tick.
+- [x] **Deterministic gates (GREEN).** `npm run verify` PASS — structure OK (14 required files, 16 core modules, 77 test
+      files, bundle fresh, mirror byte-identical), **tests 940 / pass 940 / fail 0 / cancelled 0 / skipped 0 / todo 0**;
+      `node scripts/verify-sanitization.mjs` PASS; `git diff --check` clean; `client.js == lib/client.js`
+      648,229 bytes SHA-256 `63B52476BBB7589F585333A7477CC802219F113341D99E80E40B5A5A1A97B78A`; 25/25 new tests green.
+- [x] **Real DSH 0.2.1-rc.2 acceptance 9/9 PASS** on the definitive artifact
+      (`_phase12-runtime\final\dsh-turn-performance-meter-0.1.6.tgz` SHA-256
+      `B5232FEA…2C05`, served bundle SHA-256 `63B52476…B78A`): N1 negative control and R1–R8. R2 navigated away and
+      back inside a real 25 s child tool window and recovered authoritatively; R3/R4 completed cards on return/reopen;
+      R5 per-session monotonic counters, subs 1, timers 0, page visible; R6 real Win32 minimize + cover (isIconic,
+      12,000 ms hidden, foregroundResyncs +1, no regression); R7 3 attempts with 2 real eligible output-series
+      connectors and equal peak/DOM metrics; R8 reload recovery. Evidence: `dev/phase12/runtime/out/post-fix/` +
+      `READY.json`.
+- [x] **Isolation and cleanup.** New profile/workspace/ports only; operator app PIDs unchanged; `profiles\desktop`
+      0 added/removed/changed and `profiles\web` absent; shared `DSH_HOME` appended new sessions only (disclosed,
+      credential-service requirement); isolated host and dedicated Chrome instances stopped, browser profiles and scratch
+      copies removed; only accepted artifact + logs retained outside the repo.
+- [x] **Git/release discipline.** One ordinary commit on `fix/session-navigation-resync`; review branch pushed by normal
+      fast-forward; `main` untouched; version stays `0.1.6`; peer exactly `0.2.1-rc.2`; published v0.1.6 tag/npm/GitHub
+      Release/canonical `.tgz` preserved; no publish, tag, version bump or GitHub Release in this phase.
+
+**Status: PASS — PHASE 12.0 SESSION NAVIGATION RECOVERY ACCEPTED. No release has occurred; v0.1.7 remains future work.**

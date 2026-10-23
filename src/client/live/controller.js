@@ -15,7 +15,11 @@
  *      machine) per session; the store is keyed by `(sessionId, turn)`. There
  *      is no global "current turn" anywhere.
  *   2. **One subscription per session.** `attach` is idempotent; switching
- *      sessions back and forth can never double-subscribe an eventSource.
+ *      sessions back and forth can never double-subscribe an eventSource. An
+ *      already-known session is still checked against the **current** binding:
+ *      a session scope generation can be retired and re-materialized while the
+ *      plugin is looking at another session, which replaces the binding's
+ *      eventSource (Phase 12.0).
  *   3. **No statistics here.** The controller routes events; TPS, TTFT, tool
  *      wall time and elapsed come from `LiveMeter` snapshots.
  *   4. **Bounded lifecycle.** `dispose()` unsubscribes every eventSource and
@@ -93,6 +97,8 @@ export function createController({
   const store = new TurnTelemetryStore()
   /** @type {Map<string, object>} sessionId -> session state */
   const sessionsMap = new Map()
+  /** @type {Map<string, () => void>} sessionId -> `sessions.retainInfo` unsubscribe */
+  const retentionWatches = new Map()
   const listeners = new Set()
   let disposed = false
 
@@ -117,6 +123,461 @@ export function createController({
   function invalidate(state) {
     state.viewCache = undefined
     state.settledRead = undefined
+  }
+
+  /**
+   * The event source of the session's **current** binding, or `undefined` when
+   * this client holds no live scope generation for it.
+   *
+   * A DSH client session binding exists only while a scope is materialized
+   * (`ClientSessions.binding` reads `scopes.get(id)?.binding`). Navigating away
+   * releases the last reference, retires the scope and drops the binding; coming
+   * back materializes a new scope whose Session owns a **new**
+   * `MutableSessionEventSource` starting again at revision 0. Identity is the
+   * only reliable generation test — revision numbers restart, and they can also
+   * coincide by accident.
+   */
+  function currentSourceOf(sessionId) {
+    let binding
+    try {
+      binding = typeof sessions?.binding === 'function' ? sessions.binding(sessionId) : undefined
+    } catch {
+      return undefined
+    }
+    if (binding === undefined || binding === null) return undefined
+    const source = binding.eventSource
+    if (source === undefined || source === null) return undefined
+    if (typeof source.getSnapshot !== 'function' || typeof source.subscribe !== 'function') return undefined
+    return source
+  }
+
+  /**
+   * Read the current authoritative window into this session's feed.
+   *
+   * A freshly materialized session scope publishes revision 0 with an **empty**
+   * window before its history RPC completes. That empty generation is not
+   * evidence about the session, so a rebind against it is deferred: the previous
+   * evidence stays readable (settled cards included) and the full generation
+   * reset happens when the first authoritative publication arrives. Without this
+   * deferral, every navigation back would wipe the settled store and briefly
+   * hide a card the new window would then rebuild.
+   */
+  function readWindow(state) {
+    try {
+      const snapshot = state.currentEventSource?.getSnapshot?.()
+      if (!snapshot) return
+      if (state.generationAwaiting === true) {
+        const entries = Array.isArray(snapshot.entries) ? snapshot.entries : []
+        const revision = Number.isFinite(snapshot.revision) ? snapshot.revision : -1
+        if (entries.length === 0 && revision <= 0) return
+        state.generationAwaiting = false
+        state.feed.rebaseline()
+        state.feed.revision = revision
+        state.feed.processEntries(entries)
+        invalidate(state)
+        emit()
+        log('generation adopted after pre-history window', state.sessionId)
+        return
+      }
+      state.feed.applyWindow(snapshot)
+    } catch (error) {
+      log('event window read failed', state.sessionId, error)
+    }
+  }
+
+  /** A source revision that never throws, for diagnostics/return values. */
+  function sourceRevisionOf(source) {
+    try {
+      return source?.getSnapshot?.()?.revision ?? -1
+    } catch {
+      return -1
+    }
+  }
+
+  /**
+   * Adopt a new event source: unsubscribe the retired generation **first**, then
+   * bind the new one, then replay its complete authoritative window.
+   *
+   * Ordering is the atomicity requirement (Phase 12.0 C4): a late mutation of
+   * the superseded generation has no listener to reach by the time the new
+   * source is current, and the replay starts from a cleared feed generation so
+   * the two generations' samples, attempts, tools and token totals can never be
+   * mixed.
+   */
+  function rebindSource(state, source, reason) {
+    state.counters.eventSourceRebinds = (state.counters.eventSourceRebinds ?? 0) + 1
+    if (typeof state.unsub === 'function') {
+      try { state.unsub() } catch { /* the retired generation may already be gone */ }
+      state.unsub = null
+    }
+    state.currentEventSource = source
+    state.unsub = source.subscribe(() => readWindow(state))
+    let snapshot
+    try {
+      snapshot = source.getSnapshot?.()
+    } catch (error) {
+      log('event window read failed', state.sessionId, error)
+      snapshot = undefined
+    }
+    if (isEmptyGeneration(snapshot)) {
+      /**
+       * The source is subscribed, but its window is the empty pre-history
+       * generation of a scope whose `open()` has not published history yet.
+       * Resetting the feed/store now would erase evidence (including a settled
+       * card) that the same session's authoritative window is about to replay;
+       * `readWindow` adopts the generation on the first real publication.
+       */
+      state.generationAwaiting = true
+      invalidate(state)
+      emit()
+      log('eventSource rebind deferred (pre-history generation)', state.sessionId, reason)
+      return
+    }
+    state.generationAwaiting = false
+    state.feed.rebaseline()
+    state.feed.revision = Number.isFinite(snapshot?.revision) ? snapshot.revision : -1
+    if (Array.isArray(snapshot?.entries)) state.feed.processEntries(snapshot.entries)
+    invalidate(state)
+    log('eventSource rebind', state.sessionId, reason)
+  }
+
+  /**
+   * Whether a new source's snapshot is the empty pre-history generation.
+   *
+   * DSH publishes the new scope's `SessionEventSource` at revision 0 with no
+   * entries while `session.open()` loads history. Adopting it as the generation
+   * rebaseline would clear evidence (and a settled card) before the
+   * authoritative window exists; see `readWindow`.
+   */
+  function isEmptyGeneration(snapshot) {
+    if (snapshot === undefined || snapshot === null) return false
+    const entries = Array.isArray(snapshot.entries) ? snapshot.entries : []
+    const revision = Number.isFinite(snapshot.revision) ? snapshot.revision : -1
+    return entries.length === 0 && revision <= 0
+  }
+
+  /**
+   * A temporarily missing binding is a state fact, not a live phase.
+   *
+   * The retired generation's tool / waiting evidence stops being a claim about
+   * the session's current state the moment its binding is gone; the presentation
+   * layer suppresses it (see `project`). Nothing in the telemetry store is
+   * cleared, so a settled card stays readable and a re-materialized generation
+   * rebuilds authoritative evidence rather than losing history.
+   */
+  function markBindingPending(state, reason) {
+    if (state.bindingPending === true) return false
+    state.bindingPending = true
+    state.bindingPendingReason = reason
+    state.generationAwaiting = false
+    state.counters.bindingPendingEpisodes = (state.counters.bindingPendingEpisodes ?? 0) + 1
+    /**
+     * The retired generation can never publish again (its Session was disposed),
+     * so its listener is released at the moment the binding disappears rather
+     * than held until the next activation. The identity is cleared too, which is
+     * what makes the eventual re-materialization a provable rebind. When the host
+     * exposes no `retainInfo` (no binding-ready signal), the subscription is kept
+     * instead: the next activation/foreground resync still compares identity, and
+     * dropping the only evidence path would be strictly worse.
+     */
+    armRetentionWatch(state.sessionId)
+    if (retentionWatches.has(state.sessionId)) {
+      if (typeof state.unsub === 'function') {
+        try { state.unsub() } catch { /* best effort */ }
+      }
+      state.unsub = null
+      state.currentEventSource = null
+    }
+    invalidate(state)
+    emit()
+    log('binding pending', state.sessionId, reason)
+    return true
+  }
+
+  /**
+   * Binding-ready signal (Phase 12.0 C3).
+   *
+   * `ctx.sessions.retainInfo(id)` is DSH's public `ObservableSnapshot` of the
+   * session's retention record. It publishes when the reference count changes —
+   * in particular the 0 → 1 edge of scope materialization and the 1 → 0 edge of
+   * retirement. Subscribing to it retains nothing and adds no SessionReference,
+   * so DSH's keep-alive/refcount semantics are untouched. This is deliberately
+   * event-driven: no polling, and no extra `sessions.retain`.
+   */
+  function armRetentionWatch(sessionId, { immediate = true } = {}) {
+    if (disposed || retentionWatches.has(sessionId)) return
+    if (typeof sessions?.retainInfo !== 'function') return
+    let observable
+    try {
+      observable = sessions.retainInfo(sessionId)
+    } catch {
+      return
+    }
+    if (observable === undefined || observable === null || typeof observable.subscribe !== 'function') return
+    const readRetention = () => {
+      try {
+        return typeof observable.getSnapshot === 'function' ? observable.getSnapshot() : undefined
+      } catch {
+        return undefined
+      }
+    }
+    const isRetained = info => info !== undefined && info !== null
+      && Number.isFinite(info.referenceCount) && info.referenceCount > 0
+    const listener = () => {
+      if (disposed) return
+      const info = readRetention()
+      const state = sessionsMap.get(sessionId)
+      if (!isRetained(info)) {
+        if (state !== undefined && currentSourceOf(sessionId) === undefined) {
+          markBindingPending(state, 'scope-retired')
+        }
+        return
+      }
+      ensureCurrentBinding(sessionId, 'binding-ready')
+    }
+    try {
+      const unsubscribe = observable.subscribe(listener)
+      retentionWatches.set(sessionId, () => { try { unsubscribe?.() } catch { /* best effort */ } })
+    } catch {
+      return
+    }
+    // The scope may already be materialized when the watch is installed (the
+    // activation raced DSH's own retain — the reason attach failed). A session
+    // that just attached normally is already known to be retained and is read
+    // once by the activation path, so it passes `immediate: false`.
+    if (immediate && isRetained(readRetention())) ensureCurrentBinding(sessionId, 'binding-ready')
+  }
+
+  /** Build the per-session controller state and bind its first subscription. */
+  function createSessionState(sessionId, source) {
+    const state = {
+      sessionId,
+      presenter: new LivePresenter(),
+      feed: null,
+      unsub: null,
+      currentEventSource: source,
+      /**
+       * Whether the session's binding is currently missing. Presentation
+       * suppresses live claims while this is true (C5); telemetry is retained.
+       */
+      bindingPending: false,
+      bindingPendingReason: null,
+      /**
+       * Whether the current binding is a new scope generation whose history has
+       * not been published yet (revision 0, empty window). The generation is
+       * adopted on its first authoritative publication; until then old evidence
+       * is retained and live claims are suppressed.
+       */
+      generationAwaiting: false,
+      currentRecord: null,
+      openAttemptId: null,
+      ignoredEvents: 0,
+      droppedDeltas: 0,
+      unmatchedToolResults: 0,
+      unknownEvents: 0,
+      /**
+       * The start instant of the open turn, as the durable `turn/start` row
+       * declared it, tagged with the turn it belongs to. Kept beside the record
+       * so a `turn/end` that arrives after its own opening row left the window
+       * can still close the turn with the observed boundary rather than a
+         * `null` one — and scoped by turn, because a start observed for one turn
+       * is not evidence about another.
+       */
+      observedTurnStart: null,
+      counters: {
+        normalizedTurnEndSeen: 0,
+        turnEndLookupHit: 0,
+        turnEndLookupMiss: 0,
+        /**
+         * A terminal record materialized from the turn's available durable
+         * evidence. Phase 7D.1 narrows what this counter may be read as: before it,
+         * the miss path opened an empty record and closed it, so the counter was
+         * satisfied by a reconstruction that had consumed nothing. It now counts
+           * one reconciliation only — `turn/end` arrived, no record existed, and a
+         * record was built from `feed.turnEvents(turn)` through
+         * `reconstructFromDurable`. It deliberately does **not** claim the evidence
+         * was non-empty: a turn whose only visible row is its own `turn/end`
+         * reconstructs to an empty turn, which is the correct answer and is counted
+         * here too. Read it as "the miss was reconciled", never as "metrics were
+           * recovered" — the issue detail carries the recovered attempt and tool
+         * counts for a caller that needs the distinction.
+         */
+        turnEndReconstructed: 0,
+        storeEndTurnCalled: 0,
+        presenterTurnEndApplied: 0,
+        settledSnapshotBuilt: 0,
+        matchedToolResults: 0,
+        /**
+         * The mixed plane, counted where it is decided (Phase 9.4.4, split into
+         * three facts in Phase 9.4.5).
+         *
+         * Three outcomes are distinguishable, and collapsing any two of them
+         * would misstate what happened:
+         *
+           *   - `settlementStreamsReconciled` — the correlation was proved **and**
+         *     the decoded stream was complete, so it replaced that attempt's
+         *     stream-derived evidence;
+           *   - `settlementStreamsUncorrelated` — no unique attempt was proved to
+         *     own the settlement (or none existed at all), so the existing
+         *     durable-restoration policy restored it as its own attempt;
+           *   - `settlementStreamsRejected` — the correlation **was** proved and the
+         *     reconciliation refused anyway, which today means `decoded.complete
+         *     !== true`. The transient evidence stands.
+         *
+         * Phase 9.4.4 counted both non-reconciled outcomes as
+         * `settlementStreamsUncorrelated`. That was false for the rejected case:
+         * the settlement *was* correlated, and the attempt it was correlated to
+         * is exactly the record the refusal had to protect. Reading "the
+         * correlation failed" from a refused decode is how a replaced-stream
+         * regression would have looked identical to an incomplete decode.
+         */
+        settlementStreamsReconciled: 0,
+        settlementStreamsUncorrelated: 0,
+        settlementStreamsRejected: 0,
+        eventSourceRebinds: 0,
+        foregroundResyncs: 0,
+        /**
+         * Session activation (Phase 12.0). `sessionAttaches` counts first
+         * attachments; `sessionActivationResyncs` counts re-activations that ran
+         * the authoritative binding check (navigation dimension, independent of
+         * document visibility); `bindingReadyResyncs` counts recoveries driven
+         * purely by the retention/materialization signal.
+         */
+        sessionAttaches: 0,
+        sessionActivationResyncs: 0,
+        bindingReadyResyncs: 0,
+        bindingPendingEpisodes: 0,
+      },
+      /** The kind of view the last `project()` returned. */
+      projectedViewKind: null,
+    }
+    state.feed = new SessionEventFeed({
+      sessionId,
+      onEvent: event => {
+        applyEvent(state, event)
+        // Every handled event invalidates presentation. The listener is the
+        // scheduler's coalescing notify, so this stays cheap even at one
+          // call per streamed delta (no render happens here — the scheduler
+        // throttles, and the visible ticker already covers updates).
+        emit()
+      },
+      onIssue: issue => {
+        state.feedIssues = state.feedIssues ?? []
+        if (state.feedIssues.length < 100) state.feedIssues.push(issue)
+        log('feed issue', sessionId, issue.kind, issue.detail)
+      },
+    })
+    // Subscribe first, then the caller performs the initial full pass: a
+    // mutation racing the attach is delivered by the subscription and the
+    // revision guard makes the overlapping read idempotent.
+    state.unsub = source.subscribe(() => readWindow(state))
+    return state
+  }
+
+  /**
+   * Phase 12.0 C1 — the single session-activation entry point.
+   *
+   * `attach(id) === true` may no longer be read as "this session is subscribed to
+   * the current generation": a session that is already in the map must still be
+   * checked against the binding DSH currently exposes. The cases, in order:
+   *
+   *   1. no state, binding ready      → initialize and subscribe (first attach);
+   *   2. no state, binding missing    → arm the retention watch, report pending;
+   *   3. state exists, binding missing → mark pending, keep telemetry, suppress
+   *                                     stale live presentation;
+   *   4. state exists, new source     → atomic rebind + full generation replay;
+   *   5. state exists, same source    → idempotent authoritative window resync.
+   *
+   * Repeated calls can never add a second subscription and never duplicate
+   * metric work: every path either reuses the one subscription or replaces it
+   * one-for-one.
+   *
+   * @returns {{resynced: boolean, sessionId?: string, reason?: string,
+   *   attached?: boolean, sourceRebound?: boolean, bindingPending?: boolean,
+   *   lastFeedRevision?: number, lastSourceRevision?: number,
+   *   revisionGapsDetected?: number, revisionGapRebaselines?: number,
+   *   eventSourceRebinds?: number, foregroundResyncs?: number}}
+   */
+  function ensureCurrentBinding(sessionId, reason = 'session-activation') {
+    if (disposed || typeof sessionId !== 'string' || sessionId === '') {
+      return { resynced: false, sessionId, reason: 'invalid-session' }
+    }
+    const source = currentSourceOf(sessionId)
+    let state = sessionsMap.get(sessionId)
+
+    if (source === undefined) {
+      armRetentionWatch(sessionId)
+      if (state !== undefined) markBindingPending(state, reason)
+      return { resynced: false, sessionId, reason: 'binding-unavailable', bindingPending: true }
+    }
+
+    if (state === undefined) {
+      state = createSessionState(sessionId, source)
+      sessionsMap.set(sessionId, state)
+      state.bindingPending = false
+      state.bindingPendingReason = null
+      state.counters.sessionAttaches = (state.counters.sessionAttaches ?? 0) + 1
+      readWindow(state)
+      // Keep the generation watch armed: a later retire → materialize cycle is
+      // a legitimate lifecycle signal, not a reason to stop observing the id.
+      // The activation path already read this (retained) session, so the watch
+      // installs without a redundant immediate re-check.
+      armRetentionWatch(sessionId, { immediate: false })
+      log('session attach', sessionId)
+      return {
+        resynced: true,
+        sessionId,
+        reason,
+        attached: true,
+        sourceRebound: false,
+        bindingPending: false,
+        lastFeedRevision: state.feed.revision,
+        lastSourceRevision: sourceRevisionOf(source),
+        revisionGapsDetected: state.feed.counters.revisionGapsDetected,
+        revisionGapRebaselines: state.feed.counters.revisionGapRebaselines,
+        eventSourceRebinds: state.counters.eventSourceRebinds,
+      }
+    }
+
+    const wasPending = state.bindingPending === true
+    state.bindingPending = false
+    state.bindingPendingReason = null
+    const sourceRebound = state.currentEventSource !== source
+    if (sourceRebound) {
+      rebindSource(state, source, reason)
+    } else {
+      // Same generation: an authoritative window pass. It is idempotent at an
+      // unchanged revision and detects a revision gap when the feed fell behind.
+      readWindow(state)
+    }
+
+    const resolvedReason = typeof reason === 'string' ? reason : 'session-activation'
+    if (resolvedReason === 'session-activation') {
+      state.counters.sessionActivationResyncs = (state.counters.sessionActivationResyncs ?? 0) + 1
+    } else if (resolvedReason === 'binding-ready') {
+      state.counters.bindingReadyResyncs = (state.counters.bindingReadyResyncs ?? 0) + 1
+    }
+
+    if (wasPending) {
+      // The pending presentation suppression is lifted in the same synchronous
+      // step that adopts the new/incoming generation.
+      invalidate(state)
+      emit()
+    }
+
+    return {
+      resynced: true,
+      sessionId,
+      reason,
+      attached: false,
+      sourceRebound,
+      bindingPending: false,
+      lastFeedRevision: state.feed?.revision ?? -1,
+      lastSourceRevision: sourceRevisionOf(state.currentEventSource),
+      revisionGapsDetected: state.feed?.counters?.revisionGapsDetected ?? 0,
+      revisionGapRebaselines: state.feed?.counters?.revisionGapRebaselines ?? 0,
+      eventSourceRebinds: state.counters?.eventSourceRebinds ?? 0,
+    }
   }
 
   function applyEvent(state, event) {
@@ -617,133 +1078,28 @@ export function createController({
     store,
 
     /**
-     * Subscribe one session's eventSource exactly once. Returns `true` when a
-     * subscription now exists for this session (fresh or already attached).
+     * Session activation (Phase 12.0 C1).
+     *
+     * Returns `true` only when the session is subscribed to its **current**
+     * binding now. An already-known session is no longer a synonym for "still
+     * subscribed to the right generation": the current binding is compared and a
+     * replaced generation is rebound, a same-identity generation is resynced
+     * authoritatively, and a missing binding reports `false` (and arms the
+     * binding-ready watch) instead of pretending the session is live.
+     *
+     * The call is idempotent: repeated activations cannot add a second
+     * subscription or duplicate metric work.
      */
     attach(sessionId) {
-      if (disposed || typeof sessionId !== 'string' || sessionId === '') return false
-      if (sessionsMap.has(sessionId)) return true
-      const binding = typeof sessions?.binding === 'function' ? sessions.binding(sessionId) : undefined
-      if (binding === undefined || binding === null || binding.eventSource === undefined || binding.eventSource === null) {
-        log('binding unavailable', sessionId)
-        return false
-      }
-      const source = binding.eventSource
-      const state = {
-        sessionId,
-        presenter: new LivePresenter(),
-        feed: null,
-        unsub: null,
-        currentEventSource: source,
-        currentRecord: null,
-        openAttemptId: null,
-        ignoredEvents: 0,
-        droppedDeltas: 0,
-        unmatchedToolResults: 0,
-        unknownEvents: 0,
-        /**
-         * The start instant of the open turn, as the durable `turn/start` row
-         * declared it, tagged with the turn it belongs to. Kept beside the record
-         * so a `turn/end` that arrives after its own opening row left the window
-         * can still close the turn with the observed boundary rather than a
-         * `null` one — and scoped by turn, because a start observed for one turn
-         * is not evidence about another.
-         */
-        observedTurnStart: null,
-        /**
-         * Completion-path counters. Debug-only and off by default: each is an
-         * integer incremented inside a handler that already runs, nothing is
-         * allocated per event, and they are read only by `diagnostics()`.
-         */
-        counters: {
-          normalizedTurnEndSeen: 0,
-          turnEndLookupHit: 0,
-          turnEndLookupMiss: 0,
-          /**
-           * A terminal record materialized from the turn's available durable
-           * evidence. Phase 7D.1 narrows what this counter may be read as: before it,
-           * the miss path opened an empty record and closed it, so the counter was
-           * satisfied by a reconstruction that had consumed nothing. It now counts
-           * one reconciliation only — `turn/end` arrived, no record existed, and a
-           * record was built from `feed.turnEvents(turn)` through
-           * `reconstructFromDurable`. It deliberately does **not** claim the evidence
-           * was non-empty: a turn whose only visible row is its own `turn/end`
-           * reconstructs to an empty turn, which is the correct answer and is counted
-           * here too. Read it as "the miss was reconciled", never as "metrics were
-           * recovered" — the issue detail carries the recovered attempt and tool
-           * counts for a caller that needs the distinction.
-           */
-          turnEndReconstructed: 0,
-          storeEndTurnCalled: 0,
-          presenterTurnEndApplied: 0,
-          settledSnapshotBuilt: 0,
-          matchedToolResults: 0,
-          /**
-           * The mixed plane, counted where it is decided (Phase 9.4.4, split into
-           * three facts in Phase 9.4.5).
-           *
-           * Three outcomes are distinguishable, and collapsing any two of them
-           * would misstate what happened:
-           *
-           *   - `settlementStreamsReconciled` — the correlation was proved **and**
-           *     the decoded stream was complete, so it replaced that attempt's
-           *     stream-derived evidence;
-           *   - `settlementStreamsUncorrelated` — no unique attempt was proved to
-           *     own the settlement (or none existed at all), so the existing
-           *     durable-restoration policy restored it as its own attempt;
-           *   - `settlementStreamsRejected` — the correlation **was** proved and the
-           *     reconciliation refused anyway, which today means `decoded.complete
-           *     !== true`. The transient evidence stands.
-           *
-           * Phase 9.4.4 counted both non-reconciled outcomes as
-           * `settlementStreamsUncorrelated`. That was false for the rejected case:
-           * the settlement *was* correlated, and the attempt it was correlated to
-           * is exactly the record the refusal had to protect. Reading "the
-           * correlation failed" from a refused decode is how a replaced-stream
-           * regression would have looked identical to an incomplete decode.
-           */
-          settlementStreamsReconciled: 0,
-          settlementStreamsUncorrelated: 0,
-          settlementStreamsRejected: 0,
-          eventSourceRebinds: 0,
-          foregroundResyncs: 0,
-        },
-        /** The kind of view the last `project()` returned. */
-        projectedViewKind: null,
-      }
-      state.feed = new SessionEventFeed({
-        sessionId,
-        onEvent: event => {
-          applyEvent(state, event)
-          // Every handled event invalidates presentation. The listener is the
-          // scheduler's coalescing notify, so this stays cheap even at one
-          // call per streamed delta (no render happens here — the scheduler
-          // throttles, and the visible ticker already covers updates).
-          emit()
-        },
-        onIssue: issue => {
-          state.feedIssues = state.feedIssues ?? []
-          if (state.feedIssues.length < 100) state.feedIssues.push(issue)
-          log('feed issue', sessionId, issue.kind, issue.detail)
-        },
-      })
-      const read = () => {
-        try {
-          const snap = state.currentEventSource?.getSnapshot?.()
-          if (snap) state.feed.applyWindow(snap)
-        } catch (error) {
-          log('event window read failed', sessionId, error)
-        }
-      }
-      // Subscribe first, then the initial full pass: a mutation racing the
-      // attach is delivered by the subscription and the revision guard makes
-      // the overlapping read idempotent.
-      state.unsub = source.subscribe(read)
-      read()
-      sessionsMap.set(sessionId, state)
-      log('session attach', sessionId)
-      return true
+      return ensureCurrentBinding(sessionId, 'session-attach').resynced === true
     },
+
+        /**
+     * The single authoritative binding check behind `attach` and `resync`
+     * (Phase 12.0 C1). Exposed so the slot component can run it on every
+     * session activation without going through the foreground-resync counter.
+         */
+    ensureCurrentBinding,
 
     /** Detach presentation interest; the subscription itself stays (see docs). */
     detach(sessionId) {
@@ -757,7 +1113,8 @@ export function createController({
     },
 
     /**
-     * Authoritative foreground resynchronization (Phase 10.1R).
+     * Authoritative resynchronization (Phase 10.1R foreground recovery, Phase
+     * 12.0 session activation).
      *
      * 1. Resolves the current session binding.
      * 2. Inspects current binding.eventSource and detects source identity replacement.
@@ -765,78 +1122,35 @@ export function createController({
      *    and performs a full generation rebaseline (restarting revision numbering).
      * 4. On same source identity: obtains authoritative snapshot and feeds through
      *    recovery-safe SessionEventFeed (which detects revision gaps and rebaselines if needed).
-     * 5. Invalidates presentation cache and records foreground recovery diagnostics.
+     * 5. Invalidates presentation cache and records recovery diagnostics.
+     *
+     * The foreground dimension is counted here, exactly as before; the session
+     * activation dimension is counted by `ensureCurrentBinding` itself. Both are
+     * independent of each other (Phase 12.0 C6).
      *
      * @param {string} sessionId
      * @param {string} [reason]
      * @returns {object} diagnostic result
      */
     resync(sessionId, reason = 'foreground-recovery') {
-      if (disposed || typeof sessionId !== 'string' || sessionId === '') {
-        return { resynced: false, reason: 'invalid-session' }
-      }
-      let state = sessionsMap.get(sessionId)
-      if (state === undefined) {
-        const attached = this.attach(sessionId)
-        if (!attached) return { resynced: false, reason: 'binding-unavailable', sessionId }
-        state = sessionsMap.get(sessionId)
+      const result = ensureCurrentBinding(sessionId, reason)
+      if (result.resynced !== true) return result
+      const state = sessionsMap.get(sessionId)
         if (state === undefined) return { resynced: false, reason: 'state-unavailable', sessionId }
-      }
-
-      const binding = typeof sessions?.binding === 'function' ? sessions.binding(sessionId) : undefined
-      if (binding === undefined || binding === null || binding.eventSource === undefined || binding.eventSource === null) {
-        return { resynced: false, reason: 'no-binding', sessionId }
-      }
-
-      const currentSource = binding.eventSource
-      let sourceRebound = false
-
-      if (state.currentEventSource !== currentSource) {
-        sourceRebound = true
-        state.counters.eventSourceRebinds = (state.counters.eventSourceRebinds ?? 0) + 1
-        log('eventSource rebind', sessionId)
-        if (typeof state.unsub === 'function') {
-          try { state.unsub() } catch { /* ignore */ }
-          state.unsub = null
-        }
-        state.currentEventSource = currentSource
-        const read = () => {
-          try {
-            const snap = state.currentEventSource?.getSnapshot?.()
-            if (snap) state.feed.applyWindow(snap)
-          } catch (error) {
-            log('event window read failed', sessionId, error)
-          }
-        }
-        state.unsub = currentSource.subscribe(read)
-
-        const snapshot = currentSource.getSnapshot()
-        state.feed.rebaseline()
-        state.feed.revision = Number.isFinite(snapshot?.revision) ? snapshot.revision : -1
-        if (Array.isArray(snapshot?.entries)) {
-          state.feed.processEntries(snapshot.entries)
-        }
-        invalidate(state)
-        emit()
-      } else {
-        const snapshot = currentSource.getSnapshot()
-        state.feed.applyWindow(snapshot)
-        invalidate(state)
-      }
-
       state.counters.foregroundResyncs = (state.counters.foregroundResyncs ?? 0) + 1
-
       return {
         resynced: true,
         sessionId,
         reason,
-        sourceRebound,
+        sourceRebound: result.sourceRebound === true,
+        bindingPending: state.bindingPending === true,
         lastFeedRevision: state.feed?.revision ?? -1,
-        lastSourceRevision: currentSource.getSnapshot?.()?.revision ?? -1,
+        lastSourceRevision: sourceRevisionOf(state.currentEventSource),
         revisionGapsDetected: state.feed?.counters?.revisionGapsDetected ?? 0,
         revisionGapRebaselines: state.feed?.counters?.revisionGapRebaselines ?? 0,
         eventSourceRebinds: state.counters?.eventSourceRebinds ?? 0,
         foregroundResyncs: state.counters?.foregroundResyncs ?? 0,
+        navigationResyncs: state.counters?.sessionActivationResyncs ?? 0,
       }
     },
 
@@ -862,6 +1176,18 @@ export function createController({
     project(sessionId, atMs = nowMs()) {
       const state = sessionsMap.get(sessionId)
       if (disposed || typeof sessionId !== 'string' || state === undefined) {
+        return { kind: 'hidden', state: 'inactive', turn: null }
+      }
+      /**
+       * Phase 12.0 C5: with no live binding, the previous generation's tool or
+       * waiting evidence is not a claim about the session's current state. A
+       * settled turn is different — it is historical, static evidence the
+       * telemetry store really does hold — so the completed card stays readable
+       * and no history is discarded while the binding is pending.
+       */
+      if ((state.bindingPending === true || state.generationAwaiting === true)
+        && state.presenter.machine.state !== 'settled') {
+        state.projectedViewKind = 'hidden'
         return { kind: 'hidden', state: 'inactive', turn: null }
       }
       /**
@@ -923,10 +1249,24 @@ export function createController({
         livePresentedToolCount: meter !== undefined && meter.phase === 'tool' ? unresolved : 0,
         foregroundResyncs: state.counters?.foregroundResyncs ?? 0,
         eventSourceRebinds: state.counters?.eventSourceRebinds ?? 0,
+        /**
+         * Phase 12.0 dimensions, kept separate from foreground recovery:
+         * `sessionAttaches` (first attachment), `navigationResyncs` (authoritative
+         * session re-activation, e.g. A -> B -> A), `bindingReadyResyncs`
+         * (recovery driven by the retention/materialization signal),
+         * `bindingPendingEpisodes` (how often a live binding disappeared while
+         * the session was known). `bindingPending` is the current fact.
+         */
+        sessionAttaches: state.counters?.sessionAttaches ?? 0,
+        navigationResyncs: state.counters?.sessionActivationResyncs ?? 0,
+        bindingReadyResyncs: state.counters?.bindingReadyResyncs ?? 0,
+        bindingPendingEpisodes: state.counters?.bindingPendingEpisodes ?? 0,
+        bindingPending: state.bindingPending === true,
+        generationAwaiting: state.generationAwaiting === true,
         revisionGapsDetected: state.feed?.counters?.revisionGapsDetected ?? 0,
         revisionGapRebaselines: state.feed?.counters?.revisionGapRebaselines ?? 0,
         lastFeedRevision: state.feed?.revision ?? -1,
-        lastSourceRevision: state.currentEventSource?.getSnapshot?.()?.revision ?? -1,
+        lastSourceRevision: sourceRevisionOf(state.currentEventSource),
         counters: { ...(state.feed?.counters ?? {}), ...state.counters },
       }
     },
@@ -953,6 +1293,10 @@ export function createController({
       for (const state of sessionsMap.values()) {
         try { state.unsub?.() } catch { /* best effort */ }
       }
+      for (const unsubscribe of retentionWatches.values()) {
+        try { unsubscribe() } catch { /* best effort */ }
+      }
+      retentionWatches.clear()
       sessionsMap.clear()
       listeners.clear()
       store.dispose()

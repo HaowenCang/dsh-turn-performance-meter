@@ -40,13 +40,25 @@
  * `onRender` through a recording React stub and counts dispatches per tick.
  */
 
-import { createElement as h, useEffect, useRef, useState } from 'react'
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPresentationScheduler } from './refresh.js'
 import { LivePill, meterDiagnostics } from './LiveMeter.js'
 import { CompletedMeter } from '../completed/CompletedMeter.js'
 import { LIVE_CSS, LIVE_STYLE_ID } from './live-css.js'
 import { COMPLETED_CSS } from '../completed/completed-css.js'
 import { BASE_CSS } from '../base-css.js'
+
+/**
+ * Recovery must be complete **before the first paint** of a newly activated
+ * session, and `useLayoutEffect` is the only hook that runs at that point.
+ * The named import is undefined under a minimal host/stub React that does not
+ * expose the hook; the fallback keeps the lifecycle working (one paint later)
+ * instead of crashing the slot.
+ */
+const useBeforePaint = typeof useLayoutEffect === 'function' ? useLayoutEffect : useEffect
+
+/** The projection the slot renders for "no session / no view". */
+const HIDDEN_VIEW = Object.freeze({ kind: 'hidden', state: 'inactive', turn: null })
 
 /** Reference count for the plugin's single style tag. */
 let styleUsers = 0
@@ -129,20 +141,32 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
     }
 
     /**
-     * The projected view is *state*, refreshed only by the presentation
-     * scheduler (once per mount/session change, and while live on each tick) —
-     * never during render. The slot's owner re-renders its occupants on every
+     * The projected view is *state*, refreshed by the presentation scheduler
+     * (once per mount/session change, and while live on each tick) — never by a
+     * plain parent render. The slot's owner re-renders its occupants on every
      * chat update; if each of those renders re-projected `Date.now()`, the DOM
-     * would update at the chat's cadence and bypass the throttle.
+     * would update at the chat's cadence and bypass the throttle. The one
+     * exception is the session-switch derivation documented at `currentView`
+     * below, which projects only because the state belongs to another session.
      */
     const [view, setView] = useState(() => (
       sessionId === null
-        ? { kind: 'hidden', state: 'inactive', turn: null }
+        ? HIDDEN_VIEW
         : controller.project(sessionId, Date.now())
     ))
 
     const sessionIdRef = useRef(sessionId)
     sessionIdRef.current = sessionId
+    /**
+     * Which session the `view` state belongs to.
+     *
+     * The slot's owner may reuse one component instance across a session
+     * switch (the `sessionId` prop changes); the state then still holds the
+     * previous session's projection until the activation effect runs. Rendering
+     * it for one frame would paint B's phase as A's (or vice versa), so the
+     * render path derives the current session's projection directly instead.
+     */
+    const viewSessionRef = useRef(sessionId)
     const viewRef = useRef(view)
     viewRef.current = view
     const foregroundDirtyRef = useRef(true)
@@ -152,13 +176,14 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
       meterDiagnostics().refreshCalls += 1
       const id = sessionIdRef.current
       const nextView = id === null
-        ? { kind: 'hidden', state: 'inactive', turn: null }
+        ? HIDDEN_VIEW
         : controller.project(id, Date.now())
+      viewSessionRef.current = id
       viewRef.current = nextView
       setView(nextView)
     }
 
-    /** Created once per mounted meter; disposed implicitly by the effect below. */
+    /** Created once per mounted meter; its timers are stopped by the effect below. */
     const [scheduler] = useState(() => {
       const diagnostics = meterDiagnostics()
       diagnostics.schedulerCreated += 1
@@ -201,8 +226,9 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
       }
       meterDiagnostics().refreshCalls += 1
       const recoveredView = id === null
-        ? { kind: 'hidden', state: 'inactive', turn: null }
+        ? HIDDEN_VIEW
         : controller.project(id, now)
+      viewSessionRef.current = id
       viewRef.current = recoveredView
       setView(recoveredView)
       scheduler.resume()
@@ -216,14 +242,33 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
 
     useEffect(() => acquireStyle(), [])
 
-    useEffect(() => {
+    /**
+     * Session activation (Phase 12.0 C2/C6/C7).
+     *
+     * Every activation — first mount and every `sessionId` change — runs the
+     * authoritative binding check (`ensureCurrentBinding`) and refreshes the
+     * view from the recovered controller state. In production this runs in a
+     * layout effect, so the recovered projection is what the first paint after
+     * the switch shows. Document visibility is a *separate* dimension handled
+     * by the listeners below; a session switch does not produce, and must not
+     * need, a visibilitychange/pageshow/focus event.
+     */
+    useBeforePaint(() => {
       if (sessionId === null) {
         refreshView()
         return undefined
       }
-      const attached = controller.attach(sessionId)
+      if (typeof controller.ensureCurrentBinding === 'function') {
+        try {
+          controller.ensureCurrentBinding(sessionId, 'session-activation')
+        } catch {
+          controller.attach(sessionId)
+        }
+      } else {
+        controller.attach(sessionId)
+      }
       if (debug) {
-        try { console.debug('[dsh-tpm] attach', sessionId, '=>', attached) } catch { /* diagnostics */ }
+        try { console.debug('[dsh-tpm] activation', sessionId) } catch { /* diagnostics */ }
       }
       refreshView()
       return controller.subscribe(() => {
@@ -293,11 +338,27 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
       }
     }, [scheduler, doc, win])
 
+    /**
+     * A session switch re-associates the rendered view synchronously. The
+     * activation layout effect below replaces the state with the authoritative
+     * projection before paint; this render-path derivation is the guard for the
+     * first render of that switch (and for hosts where `useLayoutEffect` is not
+     * available), so the previous session's live view is never painted as the
+     * new session's current state (Phase 12.0 C7).
+     */
+    const currentView = viewSessionRef.current === sessionId
+      ? view
+      : (sessionId === null ? HIDDEN_VIEW : controller.project(sessionId, Date.now()))
+    viewRef.current = currentView
+
     // The single presentation ticker: on only while a live view is visible in foreground,
     // suspended when document is backgrounded, stopped on completion and on unmount.
-    // Ingestion is never throttled.
-    const visible = view.kind !== 'hidden'
-    const live = visible && !isStatic(view)
+    // Ingestion is never throttled. `stop()` clears both timers, so no timer survives a
+    // dead component. The scheduler is deliberately not disposed here: React StrictMode
+    // runs setup -> cleanup -> setup on mount, and disposing the per-mount scheduler in
+    // that cleanup would leave the still-mounted meter with a permanently dead ticker.
+    const visible = currentView.kind !== 'hidden'
+    const live = visible && !isStatic(currentView)
     useEffect(() => {
       if (!isDocumentVisible(doc)) {
         scheduler.suspend()
@@ -313,7 +374,7 @@ export function makeMeterSlot({ controller, t, debug = false, documentTarget, wi
     }, [live, scheduler, doc])
 
     if (!visible) return null
-    if (view.kind === 'completed') return h(CompletedMeter, { view, translate })
-    return h(LivePill, { view, translate })
+    if (currentView.kind === 'completed') return h(CompletedMeter, { view: currentView, translate })
+    return h(LivePill, { view: currentView, translate })
   }
 }
