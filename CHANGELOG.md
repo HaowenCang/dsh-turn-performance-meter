@@ -30,10 +30,16 @@ document foreground events triggered the identity-aware `resync()`.
 - A temporarily missing binding suppresses stale live claims (no fabricated tool/waiting state) while telemetry and
   settled history are retained; session activation is independent of document visibility, and Phase 10.1R foreground
   recovery is unchanged.
+- **Resource lifecycle (Phase 12.0R).** The binding-ready `retainInfo` watch installed by this fix is now released on
+  the session scope's `1 -> 0` retirement edge and re-armed on activation, instead of staying installed for the client
+  lifetime. Visiting many sessions therefore no longer leaves one live retention observer callback (and one map entry)
+  per visited session; a retired session needs no permanent watcher because returning to it is an authoritative
+  session activation. Historical telemetry — settled cards, turn records and bounded feed evidence — is retained
+  unchanged. Additive read-only `controller.lifecycle()` reports `{ sessions, retentionWatches, listeners, disposed }`.
 - **No change** to TPS/TTFT/reasoning-output attribution/tool timing/token allocation/attempt-local reset/completed
   curve/connector/peak/render budget/revision-gap mechanism; 100 ms cadence, `MIN_RATE_SAMPLES = 3`,
-  `MIN_RATE_ELAPSED_MS = 100` are frozen. The deterministic suite is 940 tests (915 prior + 25 new) with 0 skipped and
-  0 todo.
+  `MIN_RATE_ELAPSED_MS = 100` are frozen. The deterministic suite is 946 tests (915 prior + 25 Phase 12.0 + 6
+  Phase 12.0R lifecycle) with 0 skipped and 0 todo.
 
 ## 0.1.6 — 2026-10-17
 

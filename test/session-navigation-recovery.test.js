@@ -190,11 +190,15 @@ test('A3/T05. binding missing at activation, materialized later: attach happens 
     assert.equal(viewKey(controller.project('B', 1300)), 'streaming-output')
 
     // The scope retires again: the plugin must not keep presenting the frozen
-    // generation as a live claim, and must not clear the historical store.
+    // generation as a live claim, and must not clear the historical store. The
+    // retired generation's watch is released (Phase 12.0R); the explicit
+    // activation below (a return to the session) re-arms it.
     sessions.retire('B')
+    assert.equal(controller.lifecycle().retentionWatches, 0, 'the retired session holds no retention watch')
     assert.equal(controller.project('B', 1300).kind, 'hidden', 'a missing binding suppresses stale live evidence')
     assert.equal(source.listenerCount(), 0, 'the retired generation listener is released')
     assert.equal(controller.attach('B'), false, 'attach reports that no current binding exists')
+    assert.equal(controller.lifecycle().retentionWatches, 1, 'a pending activation waits for its binding with one watch')
 
     // Re-materialization restores the true state without a manual resync.
     const source2 = sessions.materialize('B', createFakeSource('B'))
@@ -355,11 +359,16 @@ test('C5. a temporarily missing binding hides stale live evidence but keeps sett
     // A live phase is not evidence about the session once its binding is gone.
     openSession(sessions, controller, 'A', 'tool', 3)
     sessions.retire('A')
+    assert.equal(controller.lifecycle().retentionWatches, 0, 'retirement releases the generation watch')
     assert.equal(controller.project('A', 1200).kind, 'hidden', 'live tool evidence is suppressed while the binding is missing')
 
     // The next generation first publishes an empty pre-history window: the live
-    // claim stays suppressed (not re-presented as current).
+    // claim stays suppressed (not re-presented as current). The watch was
+    // released at retirement; the return itself is the activation that adopts
+    // the new generation (Phase 12.0R).
     const source2 = sessions.materialize('A', createFakeSource('A'))
+    assert.equal(controller.attach('A'), true, 'return activation adopts the new generation')
+    assert.equal(controller.lifecycle().retentionWatches, 1, 'activation arms exactly one watch for the new generation')
     assert.equal(controller.diagnostics('A').generationAwaiting, true, 'the pre-history generation is not treated as evidence')
     assert.equal(controller.project('A', 1300).kind, 'hidden', 'no stale live claim survives the pre-history window')
 
@@ -372,8 +381,11 @@ test('C5. a temporarily missing binding hides stale live evidence but keeps sett
     // Now a settled card is real history. Losing the binding must not erase it,
     // and a re-materialized pre-history window must keep showing it.
     sessions.retire('A')
+    assert.equal(controller.lifecycle().retentionWatches, 0)
     assert.equal(viewKey(controller.project('A', 6000)), 'settled', 'settled history stays readable while pending')
     const source3 = sessions.materialize('A', createFakeSource('A'))
+    assert.equal(controller.attach('A'), true, 'the next return activation adopts the pre-history generation')
+    assert.equal(controller.lifecycle().retentionWatches, 1)
     assert.equal(controller.diagnostics('A').generationAwaiting, true)
     assert.equal(viewKey(controller.project('A', 6000)), 'settled', 'the settled card survives the pre-history window')
     source3.replace(turnWindow('completed'), 1)

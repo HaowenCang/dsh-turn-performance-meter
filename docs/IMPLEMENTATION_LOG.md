@@ -6527,3 +6527,259 @@ session-activation recovery path built on DSH's public `binding`/`retainInfo` AP
 event-driven, atomic generation rebinds, no polling and no extra scope retention. The deterministic suite is 940/940
 green (25 new tests, 20 of them RED on v0.1.6), the real DSH `0.2.1-rc.2` acceptance is 9/9 PASS on the exact committed
 bundle, foreground recovery and every frozen statistic/curve contract are unchanged, and no release occurred.
+
+---
+
+## Phase 12.0R — Session resource-lifecycle closure (2026-10-23)
+
+### 1. Scope, baseline, and constraints
+
+This round audits the **resource lifecycle** of the Phase 12.0 recovery mechanism. The navigation freeze itself is
+already fixed and has passed real DSH acceptance; the recovery mechanism is not redesigned, and no statistic,
+cadence, publication gate or completed-curve behaviour is touched. The Phase 12.0 review commit
+`bdcd4265ae127e4c64336e6be101e3a2f8eab8d5` on `fix/session-navigation-resync` is the baseline; protected `main` stays
+`568ebaaeab2c9362a2c265f9d5173bac73b264e5`; `package.json` stays `0.1.6`, the peer exactly `@deepseek-ai/dsh
+0.2.1-rc.2`; no tag, publish, version bump or GitHub Release occurs. The only production change is the smallest
+lifecycle fix described in §5 (plus additive read-only `lifecycle()` diagnostics), and it is committed as an ordinary
+follow-up commit on the review branch.
+
+### 2. Upstream `retainInfo` contract, re-read (CONFIRMED)
+
+Re-verified against the installed 0.2.1-rc.2 bundles used by the real acceptance environment
+(`_phase11-runtime\dsh-0.2.1-rc.2\node_modules\@deepseek-ai\dsh-api-session-controller\lib\client.js`) and the
+reference source at `687f282e` (`packages/api/session-controller/src/client/sessions/service.ts`):
+
+| Fact | Evidence |
+|---|---|
+| `retainInfo(id)` returns a stable-per-id `ObservableSnapshot<SessionRetainInfo>`; the host creates a per-id `retainObservers` record on first call and **never removes it** (only the client root disposal drops the service). | compiled `client.js:3804,3865`; source `service.ts:248,314-332` |
+| `subscribe()` only adds a listener and returns an unsubscribe that deletes it. It does not retain, materialize a scope, open history or change the reference count. | compiled `client.js:3865-3880`; source `service.ts:314-332` |
+| Publications are the reference-count identity transitions only (`publishRetention`, `service.ts:572-584`): the `0 → 1` materialization/retain edge and the `1 → 0` retirement edge; it reports counts/`retainedBy`, never a generation identity. | source `service.ts:572-584`; snapshot `:568-570` |
+| On the `1 → 0` edge `retireScope` has already deleted the scope record (so `binding(id)` is `undefined`), unbound the scope and dropped the `Session`. A retired `eventSource` is silent forever: no disposal/end publication exists. | source `service.ts:586-595`; compiled `client.js:4111`; contract `contract/events.ts:120-205` |
+| The next retain calls `materializeScope`: new `ctx`, new `Session` (the old one was dropped), therefore a **new** `MutableSessionEventSource` whose revision restarts at 0. A retired id's next visit is a *new binding generation*. | source `service.ts:598-616`; compiled `client.js:4122` |
+| The dock is a strict session slot keyed by the binding's `ctx` (`sessionGenerationKeyOf`), so a generation change remounts the component; the meter's `useBeforePaint` effect runs `ensureCurrentBinding(..., 'session-activation')` on mount and on every `sessionId` change. | compiled renderer `client.js:613` + `scoped-slots.tsx:386,1029-1058`; plugin `MeterRoot.js:256-288` |
+
+**Consequence for the plugin.** `retainInfo` is the only public per-id lifecycle signal and subscribing is free of
+retention effects, so it is the correct signal — but the *host* keeps one observer record per id for the client
+lifetime. The plugin's own listener, by contrast, is its own resource and must not outlive the generation it
+observes. DSH's own `ui-session` does exactly that for the current main conversation: it watches `retainInfo` only for
+the current id and disposes that watch when the id changes (`ui-session/src/client/index.ts:442-466`; compiled
+`ui-session/lib/client.js:913-932`) — upstream precedent for "observe only while relevant". `sessionsMap` (session
+state: `LivePresenter`, `SessionEventFeed`, retained turns) is the plugin's **intended historical telemetry**, bounded
+per session by `DEFAULT_HISTORY_LIMIT = 4` settled turns and `MAX_RETAINED_TURNS = 32` feed turns.
+
+### 3. Retention before and after Phase 12.0
+
+Counts are for a client that has visited `N` distinct sessions and then retired every scope:
+
+| Resource | v0.1.6 (`568ebaa`) | Phase 12.0 (`bdcd426`) | **Phase 12.0R (this round)** |
+|---|---|---|---|
+| `sessionsMap` per-session state | `N` (intended telemetry) | `N` | `N` — unchanged, bounded per session |
+| `retentionWatches` map entries | `0` (no `retainInfo`) | **`N` forever until `dispose()`** | **`0`** for retired sessions; exactly one per live/pending session |
+| plugin-installed `retainInfo` callbacks in the host observer | `0` | **one per visited session, never released** | **`0`** for retired sessions |
+| active `eventSource` subscriptions | **`N` dead listeners** — v0.1.6 `attach` returns early for a known session (`HEAD:controller.js:625`) and `detach` is a no-op (`:749`), so the retired source is never unsubscribed | `1` per live generation; retired sources released on the `1 → 0` edge | `1` per live generation; retired sources released (unchanged) |
+| host-owned `retainObservers` records | `0` | `N` | `N` — created by the public API, **not removable**, listener set emptied on retirement; small and bounded by ids observed in the page lifetime |
+
+The Phase 12.0 fix therefore *fixed* an older leak (dead `eventSource` listeners) but introduced its own
+`O(visited sessions)` live subscription: one `retainInfo` callback per session ever attached, retained for the whole
+client lifetime even after the session's scope — and the only generation that callback could ever observe — is gone.
+
+### 4. The finding: an inactive retired session needs no watcher
+
+**Verified:** an inactive retired session requires **no** permanently installed retention watcher, and returning to it
+recovers entirely through authoritative session activation.
+
+1. `retentionWatches` exists to (a) release the retired generation's `eventSource` listener on the silent `1 → 0`
+   edge, and (b) catch a binding materializing while the plugin is attached to a session whose binding was missing.
+   Both purposes are tied to a **live** generation.
+2. When the reference count reaches 0, the host has already deleted the binding and dropped the `Session`; the plugin
+   holds no live evidence that can still advance, and DSH remounts the dock on the next generation. Returning to the
+   session therefore always runs `ensureCurrentBinding(..., 'session-activation')` from the layout effect, which
+   rebinds/replays the authoritative window — the same path R1–R8 already accepted. The Phase 10.1R foreground
+   `resync` remains as a second recovery path.
+3. Item 7 of the round's constraints (do not lose live evidence for genuinely running sessions) is satisfied because
+   a genuinely retained/running session has `referenceCount > 0`: any holder (`mainView`, `sidebarView`,
+   `sidebarChat`, `controllerOperation`, `gateway`, …) keeps the watch installed. Only the `1 → 0` edge — by
+   definition no live evidence — releases it.
+4. A session whose activation found the binding temporarily missing keeps its watch: that is the one case where the
+   plugin is attached and waiting for the `0 → 1` edge while mounted. The release in §5 is in the **retirement
+   listener** only, never in the pending-activation path.
+5. **Framing precision (independent audit).** The release shrinks DSH's per-id *listener set*; the host's
+   `retainObservers` record itself is documented root-lifetime and cannot be reclaimed through the public API. The
+   acceptance claim is therefore about the **plugin-owned** subscription (`retentionWatches` entry + installed
+   callback), not about "DSH-side resources", and it is measured that way in §6. The observable-behaviour requirement
+   is: after the `1 → 0` edge the plugin installs no callback that can ever fire for that id, while a genuinely live
+   session still installs exactly one.
+
+**Independent audit verdict.** `dev/phase12/phase12r/audit-upstream.md` (read-only, source + installed-bundle line
+pairs) confirms the finding: "an inactive retired session needs no watch; return recovers entirely through
+authoritative activation, with foreground resync as a fallback", with the current `retainInfo`-only-for-the-displayed-id
+pattern of `ui-session` as upstream precedent. Its risk table requires (I1) `markBindingPending`'s dead-source cleanup
+to run **before** the release, (I2) exactly one re-arm on **every** successful activation, and (I6) the foreground
+resync to stay; all three are satisfied by the fix in §5, and the accepted residuals are listed there.
+
+The only residual host-side cost is the `retainObservers` record `retainInfo` itself creates; the public API offers no
+removal, so it is classified as host-owned and bounded by the ids observed, not as a plugin leak.
+
+### 5. Minimal fix (M1–M3)
+
+`src/client/live/controller.js` only:
+
+- **M1 — release on retirement.** The `retainInfo` listener's `1 → 0` branch now calls a new
+  `releaseRetentionWatch(sessionId)`: delete the map entry and invoke the host unsubscribe. `markBindingPending` still
+  releases the retired `eventSource` listener and keeps telemetry/settled history exactly as Phase 12.0 defined.
+- **M2 — re-arm on every activation.** `ensureCurrentBinding` re-arms exactly one watch (`immediate: false`) whenever
+  it resolves a current binding for an already-known session. `armRetentionWatch` remains idempotent, so repeated
+  activations, foreground resyncs and `binding-ready` callbacks cannot duplicate a subscription.
+- **M3 — diagnostic only.** Additive `controller.lifecycle()` → `{ sessions, retentionWatches, listeners, disposed }`,
+  read-only, used by the deterministic regression and the real-DSH debug handle. No production behaviour depends on it.
+
+Unchanged: the atomic rebind, `generationAwaiting` pre-history deferral, pending-binding presentation suppression,
+event-driven binding-ready, the foreground resync path, one eventSource subscription per live session, no polling and
+no `SessionReference` retention. Two Phase 12.0 tests were updated because their assertions encoded the old permanent
+watch (`C5`, `T05`): retirement now releases the watch and the explicit return activation re-arms/adopts the new
+generation; every recovery assertion is kept.
+
+**Ordering.** The listener performs `markBindingPending` (presentation suppression, dead-source unsubscribe, cached
+source cleared) **before** `releaseRetentionWatch`, which is the order the independent audit's I1 requires; releasing
+first would leave the dead `eventSource` subscription installed until the next activation.
+
+**Accepted residuals** (independent risk table, `audit-upstream.md` §6): *R3* — if an id is retired and then
+re-materialized by a **non-displaying transient** retainer while a live turn runs before the user returns, live deltas
+of that invisible turn are not ingested; the authoritative window replay on return reconstructs completed attempts
+from durable settlements, and only that invisible turn's exact live start/TTFT could be unknown. Reachability is
+INFERRED low (display-implying retainers — `mainView`/`sidebarView`/`sidebarChat` — mount a dock and therefore
+re-arm), no observable loss occurs, and this is the same tail-attach behaviour Phase 12.0 already handles. *R6* — an
+explicit activation of an already-retired id re-arms a watch that may never see another `1 → 0`; that path is the
+deliberately kept "activation found a temporarily missing binding" arm and is bounded to one id. *R11* — the remount
+that guarantees "a displayed session is never binding-less" is 0.2.1-rc.2 renderer behaviour, not a public `ISessions`
+guarantee; the Phase 10.1R foreground resync is therefore kept as the host-agnostic second recovery path.
+
+### 6. Deterministic 100+ session regression and measurements
+
+**Test.** New `test/resource-lifecycle.test.js` (6 tests, ~135 ms, no production timing dependence) over the existing
+`test/helpers/session-navigation.js` fake host, using the same `turnWindow` streams the Phase 12.0 matrix drives
+through the real feed:
+
+- `L1` a live generation holds exactly one subscription and one watch; repeated `attach`/`resync`/`ensureCurrentBinding`
+  stay idempotent;
+- `L2` retirement releases the watch and the subscription while the settled card, turn record and feed evidence stay
+  readable; a repeated retire cannot re-install a watch;
+- `L3` revisiting a retired session recovers authoritatively (rebind, one subscription, one re-armed watch) and a
+  second retire releases it again with telemetry intact; `L3b` covers the empty revision-0 pre-history generation;
+- `L4` **120 distinct sessions** (`main` + 119 `subagent-NNN`) with realistic interleaved subagent lifecycles: a live
+  main, 40 long-lived subagents over three retire/materialize rounds, 20 revisited subagents, 59 transient subagents,
+  then every scope retired;
+- `L5` `controller.lifecycle()` cardinalities, including after `dispose()`.
+
+**RED (unfixed `bdcd4265`, captured before the fix edit):** `tests 6, pass 1, fail 5`. At 120 sessions after retiring
+all of them:
+
+```text
+{"sessionsMap":120,"retentionCallbacks":120,"retentionWatches":120,
+ "eventSourceSubscriptions":0,"storeTurns":120,"sessionsWithRecords":120,
+ "sessionsWithRetainedTurns":120,"settledCards":120}
+```
+
+**GREEN (fixed tree):** `tests 6, pass 6, fail 0`, re-run three times with identical results. The same diagnostic reads
+`retentionCallbacks: 0, retentionWatches: 0, eventSourceSubscriptions: 0, storeTurns: 120, settledCards: 120`; an
+18-session revisit sample recovers with one subscription and one watch each, then releases both again.
+
+**Measurements** (`node --expose-gc dev/phase12/phase12r/measure-lifecycle.mjs`; genuine pre-fix run on a detached
+worktree of `bdcd4265`, post-fix run on the fixed tree; retired state = every scope retired):
+
+| N | `sessionsMap` pre → post | `retentionWatches` pre → post | observer callbacks pre → post | eventSource subs pre → post | `storeTurns` pre → post | heap Δ pre → post |
+|---|---|---|---|---|---|---|
+| 25 | 25 → 25 | **25 → 0** | **25 → 0** | 0 → 0 | 25 → 25 | +1.09 MB → +1.09 MB |
+| 50 | 50 → 50 | **50 → 0** | **50 → 0** | 0 → 0 | 50 → 50 | +1.72 MB → +1.58 MB |
+| 100 | 100 → 100 | **100 → 0** | **100 → 0** | 0 → 0 | 100 → 100 | +2.53 MB → +2.47 MB |
+| 150 | 150 → 150 | **150 → 0** | **150 → 0** | 0 → 0 | 150 → 150 | +3.48 MB → +3.39 MB |
+
+The live state is `N` watches and `N` subscriptions in both trees (exactly one each per live generation). The heap
+delta is dominated by the intended per-session telemetry (~23 KB per visited session at N=150) and is unchanged within
+run-to-run noise, so the fix claims **no memory win**: the measurable win is that an inactive retired session installs
+zero `retainInfo` observer callbacks and zero watches, instead of one of each per session ever visited. Evidence:
+`dev/phase12/phase12r/{red,green,measure-before,measure-after}.txt` (see `EVIDENCE-NOTES.md` for the correction of an
+earlier mislabelled pre-fix file).
+
+### 7. Intended historical telemetry retention vs unnecessary live subscriptions
+
+`sessionsMap` growth is **intended** and preserved: after visiting 120 sessions and retiring all of them, the
+controller keeps all 120 states, 120 turn records, 120 feeds with durable evidence and 120 readable settled cards, and
+a revisit replays the authoritative window over them (verified by `L4`). That cost is bounded per session
+(`DEFAULT_HISTORY_LIMIT = 4`, `MAX_RETAINED_TURNS = 32`) and buys instant, non-flickering completed cards. The
+retention watcher was the opposite: an `O(visited sessions)` **live subscription** whose callbacks, after retirement,
+can never carry information the plugin can act on. It is released; the telemetry is not evicted.
+
+### 8. Regression gates
+
+```text
+npm run verify                     PASS — structure OK (14 required files, 16 core modules, 78 test files,
+                                   client bundle fresh, lib/client.js mirrored)
+node --test test/*.test.js         tests 946 · pass 946 · fail 0 · cancelled 0 · skipped 0 · todo 0
+                                   (940 prior + 6 Phase 12.0R lifecycle tests)
+session-navigation-recovery        25/25 PASS (incl. updated C5/T05)
+resource-lifecycle                 6/6 PASS (1/6 on unfixed baseline)
+node scripts/verify-sanitization.mjs  PASS — no personal content, all structural evidence preserved
+git diff --check                   clean
+client.js == lib/client.js         651,961 bytes, SHA-256 07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69
+```
+
+Frozen contracts re-checked by the independent verifier: `DEFAULT_PRESENTATION_REFRESH_MS = 100`,
+`MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`; no diff in `src/core/` or `src/client/completed/`; no change to
+TPS/TTFT attribution, tool timing, token allocation, statistics or completed curves.
+
+### 9. Focused real DSH 0.2.1-rc.2 acceptance — PASS
+
+The change touches subscription/eviction semantics, so a focused real-runtime acceptance was repeated on the fixed
+artifact in the isolated DSH 0.2.1-rc.2 environment (own profile `tpm-phase12-iso`, own workspace
+`workspace-phase12`, dedicated headless Chrome/CDP 9226, shared `DSH_HOME` only for the shipped DeepSeek Account
+credentials; only **new** sessions were appended; the operator app PIDs `12392/16524` and `profiles\desktop` were not
+touched). The fixed tree was packed **outside** the repository to
+`_phase12-runtime\final-r\dsh-turn-performance-meter-0.1.6.tgz` (400,009 B, SHA-256
+`931AF439B882E95BDA41F642A9D6F97042DAD426A98E2FDA3B88EF094F524B3E`); the canonical root `0.1.6` tarball is still
+`6D1196D2…7884`. The bundled `client.js` extracted from that tarball is 651,961 B, SHA-256
+`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`, byte-identical to the repo's rebuilt
+`client.js`/`lib/client.js`. After installing it into the isolated profile and restarting only that host, boot acceptance
+proved the served plugin body (652,044 B, SHA-256 `29CAD5EE98B5305BEB903770FD48C2042EFADEF5EEF35EC95079634540BE9C9F`,
+plugin rev `39925f2c68b2`, boot rev `4a0421cbc3c4`) has a byte-identical prefix to the installed fixed client, with the
+known 83-byte module trailer and no skipped bundles.
+
+**Real run (REAL DSH OBSERVATION).** New main session `session-6c9b0c05-…`, real subagent child `4325be5e-…`, route
+DeepSeek Account → DeepSeek-V4.1-Flash (High), Full access, parent turn 64.9 s. **3/3 main → child → main round trips
+happened inside the live parent turn** (returns at 1792774213642 / 1792774220076 / 1792774226508, before the durable
+`turnEnd` 1792774269642; 4.96–5.12 s per child stay). On every return: `binding.eventSource` identity changed
+(source ids 2 → 4, 4 → 6, 6 → 8) and was followed by `eventSourceRebinds +1` and `navigationResyncs +1`,
+`feedRevision == lastSourceRevision`, `foregroundResyncs` delta **0** while the page was visible, `bindingPending`
+false, `generationAwaiting` false. The parent turn completed with an authoritative completed card: no live pill, no
+stale `pending-first-token`, `generatedTokens 476 == durable 476`.
+
+**New lifecycle fact, observed live.** After every return `controller.lifecycle()` reported
+`{ sessions: 3, retentionWatches: 1, listeners: 1, disposed: false }` — three visited sessions but **one** retention
+watch, i.e. the visited child's watch was released rather than retained as a second permanent callback. At rest the
+instrument recorded exactly one active plugin `eventSource` subscription (`activePlugin: 1`; source listeners 3 =
+host modules + the plugin's one). The crucial regression: while on main the child's binding was unavailable
+(`retentionWatches` still 1); re-opening the child after its watch had been released recovered it through activation
+(`rebind +1`, `navigationResyncs +1`, `feed == source`, authoritative completed card, `generatedTokens 218 == durable
+218`), and returning to main left `retentionWatches` back at 1. `foregroundResyncs` delta over the whole run was 0, one
+meter root/one style tag were present, and no console errors were collected. The child turn independently completed
+(33.1 s, 3 attempts, `pwsh` + `send_message` tools). Evidence: `dev/phase12/phase12r/runtime/out/` (`run-summary.json`,
+`samples.jsonl`, `driver.log`, per-trip screenshots), with `out-run1/`–`out-run3/` kept as earlier iterations in which
+the product checks passed but the parent turn was too short for all three trips to fall inside it.
+
+### 10. Git and release discipline
+
+One ordinary follow-up commit on `fix/session-navigation-resync` (no amend, rebase, force push, `reset --hard` or
+`clean`) containing the controller lifecycle fix, the two updated Phase 12.0 test assertions, the new
+`test/resource-lifecycle.test.js`, the rebuilt `client.js`/`lib/client.js`, and the documentation. `main`, the
+`v0.1.6` tag, the canonical `.tgz`/sidecar artifacts, the package version and the peer dependency are untouched, and
+nothing is published, tagged or released; the dev evidence directory is git-ignored (`dev/phase12/`).
+
+### 11. Verdict
+
+**PASS — PHASE 12.0R RESOURCE LIFECYCLE ACCEPTED.** The Phase 12.0 commit `bdcd4265` remains valid and its recovery
+behaviour is preserved unchanged (all its tests and the real-runtime navigation path re-verified); the audit found one
+demonstrable, bounded-but-unnecessary live subscription — one `retainInfo` observer callback per session ever visited,
+held after the generation that could ever publish was retired — and closed it with a minimal lifecycle fix plus
+additive diagnostics. An inactive retired session needs no permanent watcher: authoritative activation on return
+recovers it, and genuinely running sessions (`referenceCount > 0`) keep their watch. Historical telemetry retention is
+intentional and untouched; no release occurred.
