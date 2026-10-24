@@ -815,13 +815,18 @@ PASS, 0 FAIL, 0 NOT OBSERVED.**
 The per-check raw evidence is under `dev/phase13/runtime/out/` (`MATRIX.md`, `run-summary.json`, per-round
 `run-summary.json` / `driver.log` / `samples.jsonl` / screenshots), with the isolated environment runbook under
 `_phase13-runtime/RUNBOOK.md`. Because every required item is observed, the migration is not limited by an unobserved
-runtime dimension; the final verdict is **PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; PENDING INDEPENDENT SOURCE
-AUDIT**, recorded in `docs/IMPLEMENTATION_LOG.md` Phase 13.0.
+runtime dimension; the final verdict is **PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; INDEPENDENT SOURCE AUDIT
+CLOSED**. The runtime matrix recorded above is this project's own executed evidence; the separate independent GitHub
+remote source audit closed in Phase 13.0R verified the committed source, the manifest, the code diff and the contract
+tests at source level and did **not** re-run the browser matrix, so it is not reported as a runtime re-test. Full
+record: `docs/IMPLEMENTATION_LOG.md` Phase 13.0 and Phase 13.0R.
 
 ### 16.7 Supported version
 
 The only supported and tested DSH for the current working tree is `0.2.1-rc.3`, verified against the isolated installed
 package recorded in §16 and the real-browser acceptance matrix recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 13.0).
+The baseline is integrated on `main` (Phase 13.0R fast-forward, no merge commit); the annotated `v0.1.6` tag still
+points at `568ebaaeab2c9362a2c265f9d5173bac73b264e5` and the published `v0.1.6` release is unchanged.
 The published `v0.1.6` release remains bounded to `0.2.1-rc.2` and is not retroactively re-scoped; the working tree is
 unreleased and keeps version `0.1.6`. This project does **not** claim `0.2.1+`, `0.2.x` or dual-runtime support, and the
 exact peer pins exactly one runtime by design. The recorded corpora keep the version they were captured on —

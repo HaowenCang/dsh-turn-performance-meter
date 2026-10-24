@@ -7,11 +7,12 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
-## Unreleased — DSH 0.2.1-rc.3 compatibility (Phase 13.0)
+## Unreleased — DSH 0.2.1-rc.3 compatibility (Phase 13.0 / 13.0R)
 
 **Not published, not tagged, not version-bumped.** This entry records the development state on
-`compat/dsh-021-rc3`; `package.json` stays `0.1.6`. It is a runtime-target compatibility migration, not a feature
-release: no TPS, TTFT, estimator, curve, rendering or lifecycle algorithm changed.
+`compat/dsh-021-rc3` (fast-forwarded to `main` in Phase 13.0R); `package.json` stays `0.1.6`. It is a runtime-target
+compatibility migration, not a feature release: no TPS, TTFT, estimator, curve, rendering or lifecycle algorithm
+changed.
 
 The development target moved from DSH `0.2.1-rc.2` (reference commit
 `687f282e8625c6b8d11ff58211a90524be2e4317`) to `0.2.1-rc.3` (reference commit
@@ -61,7 +62,17 @@ The development target moved from DSH `0.2.1-rc.2` (reference commit
   suspended while hidden; R8 a genuine multi-attempt connector (output, attempt 2 → 3) with 547 tokens == durable;
   R9 the rc.3 header View-tabs More menu and draft reuse leave the dock seat, mount count and bound session
   unchanged. Evidence is local, under the git-ignored `dev/phase13/`. Verdict:
-  **PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; PENDING INDEPENDENT SOURCE AUDIT.**
+  **PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; INDEPENDENT SOURCE AUDIT CLOSED.**
+- **Independent source audit closed (Phase 13.0R), and the reviewed branch was fast-forwarded to `main`.** The
+  external GitHub remote source audit passed on the GitHub commit, the package manifest (`0.1.6`, exact peer
+  `0.2.1-rc.3`, no exemption), the code diff (no production logic change; the bundle is byte-identical at
+  `07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`) and the contract tests. It is a *source-level*
+  verification and did **not** independently re-run the isolated real-browser matrix, so the 123/123 runtime result
+  above remains this project's own executed evidence. The accepted history
+  `568ebaae → bdcd4265 → 5500c576 → 011ab975 →` the closure commit was fast-forwarded onto `main` with `--ff-only`; no
+  merge commit exists, `HEAD == origin/main` and divergence is `0 0`. The round is documentation-only — no production
+  source, test, bundle or manifest file changed — and no release occurred: version `0.1.6`, exact peer `0.2.1-rc.3`,
+  and the published `v0.1.6` artifact unchanged and still bounded to `0.2.1-rc.2`.
 
 ## Unreleased — session navigation recovery (Phase 12.0, planned as 0.1.7)
 

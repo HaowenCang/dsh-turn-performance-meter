@@ -18,11 +18,13 @@ provides two UI modes: a compact live meter during execution and a completed tur
 > `v0.1.6` is the first release for that runtime. It changes no TPS, TTFT, estimator, curve, rendering or lifecycle
 > algorithm.
 >
-> **Working tree (unreleased, branch `compat/dsh-021-rc3`): DSH `0.2.1-rc.3` only.** Phase 13.0 moved the exact peer
+> **Working tree (unreleased, integrated to `main`): DSH `0.2.1-rc.3` only.** Phase 13.0 moved the exact peer
 > to `0.2.1-rc.3` and re-audited every consumed declaration; no production source changed and the bundle is
-> byte-identical to the accepted `v0.1.6` build. Compatibility is **ACCEPTED pending independent source audit** (source
-> audit 0 breaking interfaces; isolated real-browser matrix boot + R1–R9 = 123/123 checks PASS). The published `v0.1.6`
-> artifact is **not** re-scoped: it remains bounded to `0.2.1-rc.2`, and no release occurred. See §2.1.
+> byte-identical to the accepted `v0.1.6` build. Compatibility is **ACCEPTED and the independent source audit is
+> CLOSED** (Phase 13.0R verified the GitHub commit, manifest, code diff and contract tests at source level; the
+> isolated real-browser matrix boot + R1–R9 = 123/123 checks PASS, not independently re-run by the auditor). The
+> published `v0.1.6` artifact is **not** re-scoped: it remains bounded to `0.2.1-rc.2`, and no release occurred. See
+> §2.1.
 >
 > **已发布 npm 与 GitHub `v0.1.6`，面向 DSH `0.2.1-rc.2`。** 版本 `0.1.6`，已发布到公开 npm registry。主要分发方式为
 > npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.6.tgz` 作为离线回退，本地检出
@@ -32,9 +34,11 @@ provides two UI modes: a compact live meter during execution and a completed tur
 > 因此 **`0.2.1-rc.2` 兼容性为 ACCEPTED（已接受）**，`v0.1.6` 是该运行时的首个发布。本次发布不改变任何 TPS、TTFT、
 > 估计器、曲线、渲染或生命周期算法。
 >
-> **工作树（未发布，分支 `compat/dsh-021-rc3`）：仅面向 DSH `0.2.1-rc.3`。** Phase 13.0 将精确 peer 迁移到
+> **工作树（未发布，已集成到 `main`）：仅面向 DSH `0.2.1-rc.3`。** Phase 13.0 将精确 peer 迁移到
 > `0.2.1-rc.3`，并重新审计了本插件读取的全部声明；生产源码未改动，bundle 与已验收的 `v0.1.6` 构建逐字节一致。
-> 已发布的 `v0.1.6` 产物**不**被重新划定范围，仍限定于 `0.2.1-rc.2`。详见 §2.1。
+> 兼容性为 **ACCEPTED，且独立源码审计已 CLOSED**（Phase 13.0R 在源码层面核验 GitHub commit、Manifest、代码 diff 与
+> 契约测试；隔离实机浏览器矩阵 boot + R1–R9 = 123/123 通过，审计方未独立重跑）。已发布的 `v0.1.6` 产物**不**被重新
+> 划定范围，仍限定于 `0.2.1-rc.2`。详见 §2.1。
 
 ## 1. What it does / 功能
 
@@ -64,8 +68,9 @@ React layer never re-derives a metric.
 
 ```text
 Version (working tree): 0.1.6
-Development target:     DSH 0.2.1-rc.3 only (Phase 13.0, compatibility ACCEPTED pending independent source audit)
-Compatibility status:   ACCEPTED — DSH 0.2.1-rc.3 (Phase 13.0 source audit + isolated real-browser matrix 123/123)
+Development target:     DSH 0.2.1-rc.3 only (Phase 13.0/13.0R, compatibility ACCEPTED; source audit closed)
+Compatibility status:   ACCEPTED — DSH 0.2.1-rc.3 (Phase 13.0 real-browser matrix 123/123; Phase 13.0R independent
+                        source audit CLOSED)
 Released:               v0.1.6 -> DSH 0.2.1-rc.2
                         v0.1.5 -> DSH 0.2.0-rc.2
                         v0.1.4 -> DSH 0.2.0-rc.2
@@ -160,6 +165,14 @@ compatibility exemption and no `skippedBundles` entry, registered its dock and w
 (R1–R9). The claim stays bounded: the working tree supports `0.2.1-rc.3` only, and `v0.1.6` remains the published
 artifact for `0.2.1-rc.2`. Record: `docs/DSH_API_NOTES.md` §16 and `docs/IMPLEMENTATION_LOG.md` Phase 13.0.
 
+**Phase 13.0R closed the independent audit and integrated the branch.** The external GitHub remote source audit passed
+on the GitHub commit, the manifest, the code diff and the contract tests; it is a source-level verification and **did
+not re-run the real-browser matrix**, so the 123/123 runtime result stays this project's own executed evidence. The
+accepted history (`568ebaae → bdcd4265 → 5500c576 → 011ab975 →` the closure commit) was fast-forwarded onto `main` with
+no merge commit, leaving `HEAD == origin/main` and divergence `0 0`. No release occurred: the version stays `0.1.6`,
+the exact peer stays `0.2.1-rc.3`, and `v0.1.6` remains the published `0.2.1-rc.2` artifact. Verdict:
+**PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; INDEPENDENT SOURCE AUDIT CLOSED.**
+
 **Phase 13.0 将未发布的工作树迁移到 `0.2.1-rc.3`（参考 commit `1f81c047fc48fa190a683e469daa699857e9afe8`）。**
 本次审计从两个参考 commit 与两套已安装运行时重新推导了全部接口：所有被消费的声明**逐字节相同**——包括
 `SessionEventWindow` / `SessionEventChange` / `MutableSessionEventSource` 契约、`Session` 与 `SessionManager`、
@@ -174,6 +187,13 @@ bundle 加载器以及插件兼容性评估器。唯一不兼容项是插件自�
 `skippedBundles`，注册了自身 dock 并通过真实浏览器矩阵（R1–R9）验收。声明仍保持限定：工作树仅支持 `0.2.1-rc.3`，
 `v0.1.6` 仍是面向 `0.2.1-rc.2` 的已发布产物。记录见 `docs/DSH_API_NOTES.md` §16 与
 `docs/IMPLEMENTATION_LOG.md` Phase 13.0。
+
+**Phase 13.0R 完成了独立审计闭环并集成分支。** 外部 GitHub 远端源码审计在 GitHub commit、Manifest、代码 diff 与契约
+测试上通过；该审计属于源码级验证，**未重跑实机浏览器矩阵**，因此 123/123 的实机结果仍是本项目自行执行的证据。已验收
+提交链（`568ebaae → bdcd4265 → 5500c576 → 011ab975 →` 闭环提交）以 fast-forward 方式进入 `main`，未产生 merge
+commit，`HEAD == origin/main`，divergence `0 0`。未发生发布：版本仍为 `0.1.6`，精确 peer 仍为 `0.2.1-rc.3`，
+`v0.1.6` 仍是面向 `0.2.1-rc.2` 的已发布产物。结论：
+**PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; INDEPENDENT SOURCE AUDIT CLOSED。**
 
 `v0.1.2` is the release in which the `0.2.0-rc.2` target became the shipped one, and `v0.1.3`, `v0.1.4` and `v0.1.5`
 carry it forward unchanged. Those published artifacts are immutable — `v0.1.5`, `v0.1.4`, `v0.1.3` and `v0.1.2`

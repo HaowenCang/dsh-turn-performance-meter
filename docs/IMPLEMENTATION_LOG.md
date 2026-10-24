@@ -6978,9 +6978,113 @@ tagged or released; the dev evidence directory is git-ignored (`dev/phase13/`).
 
 ### 10. Verdict
 
-**PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; PENDING INDEPENDENT SOURCE AUDIT.** Source compatibility is confirmed
-by an independent, re-derived audit (0 breaking interfaces; every consumed declaration byte-identical; the only
-incompatibility was the plugin's own stale peer pin), production source is unchanged (bundle byte-identical to the
-accepted Phase 12.0R artifact), the deterministic suite is 960/960 with 0 skipped/todo, and the isolated real-browser
-matrix on DSH `0.2.1-rc.3` is 123/123 checks PASS across boot and R1–R9 with no NOT OBSERVED item. The claim is
-bounded to `0.2.1-rc.3`; the published `v0.1.6` remains the `0.2.1-rc.2` artifact and no release occurred.
+**PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; INDEPENDENT SOURCE AUDIT CLOSED.** Source compatibility was
+re-derived in §2 (0 breaking interfaces; every consumed declaration byte-identical; the only incompatibility was the
+plugin's own stale peer pin), production source is unchanged (bundle byte-identical to the accepted Phase 12.0R
+artifact), the deterministic suite is 960/960 with 0 skipped/todo, and the isolated real-browser matrix on DSH
+`0.2.1-rc.3` is 123/123 checks PASS across boot and R1–R9 with no NOT OBSERVED item. The claim is bounded to
+`0.2.1-rc.3`; the published `v0.1.6` remains the `0.2.1-rc.2` artifact and no release occurred. Phase 13.0R (below)
+closes the external independent GitHub remote source audit and fast-forwards the accepted history onto `main`; the
+final phase status is **PASS — PHASE 13.0 INTEGRATED; READY FOR v0.1.7 RELEASE PREP.**
+
+## Phase 13.0R — Independent audit closure and fast-forward main integration (2026-10-24)
+
+### 1. Scope, and what this round is not
+
+Documentation closure and integration only. Phase 13.0's isolated real-host acceptance was already complete and its
+source was already on the review branch; this round records the **external independent GitHub remote source audit** as
+closed and moves the accepted history onto `main` by fast-forward. It is **not a release round**: `package.json` stays
+`0.1.6` with the exact peer `0.2.1-rc.3`, nothing is published to npm, no tag is created, no GitHub Release is created,
+and the published `v0.1.6` artifacts stay bound to `0.2.1-rc.2`.
+
+Production code is frozen for the round: `package.json`, `src/**`, `test/**`, `client.js`, `lib/client.js`, `index.js`
+and `cordis.patch.yml` are not modified; only `README.md`, `CHANGELOG.md`, `docs/IMPLEMENTATION_LOG.md` and
+`docs/DSH_API_NOTES.md` change, and **Phase 13.0 production logic is unchanged** — the closure re-verified the frozen
+bundle rather than rebuilding it. No `reset --hard`, `rebase`, `--amend`, `--force` or `--force-with-lease` is used
+anywhere in the round.
+
+### 2. Baseline re-verified read-only before any write
+
+| Item | Value |
+|---|---|
+| `origin/main` | `568ebaaeab2c9362a2c265f9d5173bac73b264e5` |
+| review branch `compat/dsh-021-rc3` | `011ab97540ef434e7f178716245c9932b85a36b0` (local == remote) |
+| commit chain | `568ebaae` → `bdcd4265` → `5500c576` → `011ab975`, exact and linear |
+| merge-base(`main`, `compat/dsh-021-rc3`) | `568ebaaeab2c9362a2c265f9d5173bac73b264e5` |
+| divergence | `0 3` — `main` has no commit the branch lacks; history is not forked |
+| tracked tree | clean |
+| untracked | only the protected canonical release artifacts (`dsh-turn-performance-meter-0.1.5.tgz` / `0.1.6.tgz` + `.sha256` sidecars) |
+| local version / peer | `0.1.6` / `@deepseek-ai/dsh` `0.2.1-rc.3` |
+
+The three accepted development commits are `bdcd426` (Phase 12.0 session-navigation recovery), `5500c57` (Phase 12.0R
+retention-watch lifecycle) and `011ab97` (Phase 13.0 rc.3 support). The remote `main` had not moved and no unexpected
+tracked file was present, so the round proceeded.
+
+### 3. Independent GitHub remote source audit — CLOSED (source-level)
+
+The external audit was run against the **GitHub-hosted remote source**, not against this workstation's working tree,
+and passed on all four of its checks:
+
+- **GitHub commit** — `011ab97540ef434e7f178716245c9932b85a36b0` on `compat/dsh-021-rc3` is the commit the acceptance
+  record names, reached through the mandated linear chain from `568ebaae`.
+- **Manifest** — the audited `package.json` declares version `0.1.6`, the exact peer
+  `"@deepseek-ai/dsh": "0.2.1-rc.3"`, the unchanged `exports` / `files` / `dsh.bundle` / `dsh.client` metadata, and no
+  compatibility exemption.
+- **Code diff** — the diff against the accepted Phase 12.0R tree contains no production logic change: `src/**`,
+  `index.js` and `cordis.patch.yml` are untouched, the metric engine and renderer are unchanged, and the bundle is
+  byte-identical at `07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`. The only behavioural
+  declaration change is the peer pin.
+- **Contract tests** — the committed contract layers, including `test/dsh-021-rc3-contract.test.js`, are present and
+  consistent with the committed source, and the source-level claims of the Phase 13.0 record hold.
+
+**Evidence class, stated plainly.** The independent audit is a *source-level* verification. **It did not independently
+re-run the isolated real-browser matrix.** The 123/123 real-runtime result remains this project's own executed
+evidence, reported here, not an independently replayed one. A source audit establishes source identity, manifest
+correctness, diff scope and contract-test consistency; it does not observe browser rendering, and nothing in this
+record claims that it did.
+
+### 4. Deterministic gates re-run on the frozen tree
+
+```text
+npm run verify                          PASS — structure OK (14 required files, 16 core modules, 79 test files,
+                                        client bundle fresh, lib/client.js mirrored);
+                                        tests 960 · pass 960 · fail 0 · cancelled 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs    PASS — no personal content, all structural evidence preserved
+git diff --check                        clean
+client.js == lib/client.js              651,961 bytes each, SHA-256
+                                        07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69
+package version                         0.1.6
+exact peer                              @deepseek-ai/dsh 0.2.1-rc.3
+```
+
+The regression suite is **960/960 PASS with 0 failures, 0 skipped and 0 todo**, the bundle SHA-256 is unchanged from
+the Phase 13.0/12.0R accepted artifact, and the staged diff of the closure commit contains documentation only — no
+production, test, bundle or manifest file.
+
+### 5. Git integration — fast-forward only, no merge commit
+
+The closure commit `docs(compat): close DSH 0.2.1-rc.3 acceptance` is an ordinary commit on `compat/dsh-021-rc3` on
+top of `011ab975` (no `--amend`, no rebase). It was pushed to the remote review branch with a normal, non-force push,
+and the remote branch was then confirmed to contain `bdcd4265`, `5500c576`, `011ab975` and the closure commit in that
+order, descending linearly from `568ebaae`. `origin/main` was re-confirmed still `568ebaae…`, the merge-base still
+`568ebaae…`, and no fork or unexpected file present; `main` was advanced with
+`git merge --ff-only origin/compat/dsh-021-rc3` and pushed. **No merge commit exists.** Final state:
+`HEAD == origin/main ==` the closure commit, divergence `0 0`.
+
+### 6. Release protection
+
+Untouched by this round: tags `v0.1.0`–`v0.1.6` (the annotated `v0.1.6` tag still points at
+`568ebaaeab2c9362a2c265f9d5173bac73b264e5`), the published `v0.1.6` npm package and GitHub Release, and the canonical
+`dsh-turn-performance-meter-0.1.6.tgz` (`6D1196D226ED93605263407E37CE7C44120576FB57AB476CD4D3F88F2CCB7884`) and
+`dsh-turn-performance-meter-0.1.5.tgz` (`9FE55298DA4972399CE6BD6046841C0A228A5E4B9577B01788C5C7D9179A1B6C`) tarballs
+with their `.sha256` sidecars. No `v0.1.7` tag, npm publication or GitHub Release is created; no desktop/web profile,
+session or test evidence is modified or cleaned.
+
+### 7. Verdict
+
+**PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; INDEPENDENT SOURCE AUDIT CLOSED.** Phase 13.0's isolated real-host
+acceptance (960/960 deterministic tests, 123/123 real-browser checks) and its unchanged production source are
+preserved exactly, the external source audit is closed without being misrepresented as a runtime re-test, and the
+accepted history is fast-forwarded onto `main` with divergence `0 0`. The published `v0.1.6` remains the `0.2.1-rc.2`
+artifact; the working tree remains unreleased at version `0.1.6` on the `0.2.1-rc.3` peer.
+**PASS — PHASE 13.0 INTEGRATED; READY FOR v0.1.7 RELEASE PREP.**
