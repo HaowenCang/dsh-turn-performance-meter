@@ -6783,3 +6783,204 @@ held after the generation that could ever publish was retired — and closed it 
 additive diagnostics. An inactive retired session needs no permanent watcher: authoritative activation on return
 recovers it, and genuinely running sessions (`referenceCount > 0`) keep their watch. Historical telemetry retention is
 intentional and untouched; no release occurred.
+
+## Phase 13.0 — DSH 0.2.1-rc.3 compatibility migration (2026-10-24)
+
+### 1. Scope, baseline, and constraints
+
+A **runtime-target compatibility migration**, not a feature round. The accepted Phase 12.0/12.0R tree
+`5500c57655c1f519e40611b3dc9a3160c7a3ff1a` (branch `fix/session-navigation-resync`) is the starting point; the review
+branch is `compat/dsh-021-rc3`, created from it without reset, rebase, amend or force push. Protected `main` stays
+`568ebaaeab2c9362a2c265f9d5173bac73b264e5`, `fix/session-navigation-resync` is left untouched, `package.json` keeps
+version `0.1.6`, no tag, publish, version bump or GitHub Release occurs, and the published `v0.1.6` artifact is not
+re-scoped. The migration was required by DSH `0.2.1-rc.3` (reference commit
+`1f81c047fc48fa190a683e469daa699857e9afe8`, tag `dsh-v0.2.1-rc.3`), moving from `0.2.1-rc.2`
+(`687f282e8625c6b8d11ff58211a90524be2e4317`).
+
+Git state at the start was confirmed read-only before any write: `HEAD` was exactly `5500c57`, `main` was exactly
+`568ebaa`, `origin/main` and `origin/fix/session-navigation-resync` matched their local refs, and the canonical release
+artifacts, tags `v0.1.0`–`v0.1.6` and the `compat/dsh-021-rc2-review` remote branch were present and untouched. No
+other task had updated `main`, so the accepted baseline was a direct ancestor of the review branch.
+
+### 2. Independent upstream audit (CONFIRMED)
+
+Both reference commits were checked out with `git worktree add` from a full clone
+(`_isolated\study-rich-021rc2-phase0\upstream-source\deepseek-harness`, left detached at rc.2) into
+`_phase13-runtime\upstream\rc2` and `.../rc3`; each worktree's `git rev-parse HEAD` equals the mandated full SHA. Every
+"unchanged" claim was decided by comparing blob hashes (`git rev-parse <sha>:<path>`) and reading the changed hunks, not
+by summary. The six commits between the baselines are `release(dsh): 0.2.1-rc.3`, the official `/models` listing on the
+API-key route, navigation entry customization (#6247), navigation pins/menu icons (#6883), navigation-entry analytics
+(#6600), and the release merge (#6999). None touches the session-controller event window, the session contracts or the
+compatibility evaluator.
+
+| Interface | Verdict | Evidence |
+|---|---|---|
+| `SessionEventWindow`, revision/change, `MutableSessionEventSource` | **NON-BREAKING** | `contract/events.ts` blob `bc825f08fd` in both commits |
+| `SessionBinding`, `sessions.binding(id)`, `sessions.retainInfo(id)` | **NON-BREAKING** | `contract/sessions.ts` `a52d2c15` identical; `service.ts` single comment-only hunk (1 line); cached `retainObservers` implementation unchanged |
+| `retainScope`/`retireScope`/`materializeScope` | **NON-BREAKING (not public API)** | private members of the client service; only prose mentions in the plugin |
+| `Session`, `SessionManager` | **NON-BREAKING** | `contract/session.ts` `2c8f16c4ae`, `sessions/session.ts` `09494e01ab`, `sessions/manager.ts` `b8bec9be8a` identical |
+| transient `assistant/live-chunk`; durable `turn/start`, `turn/end`, settlements, tool plane | **NON-BREAKING** | `contract/events.ts` identical; `sessions/assistant-stream.ts` `973fd108` identical; `core/session/src/types.ts` identical |
+| `conversation.input.dock` (name + scope), `InputBar`, `ConversationPanel`, slot renderer/registry | **NON-BREAKING** | dock `{ kind: 'list'; scope: 'session'; owner: InputZone }`, `apply.ts`, `ConversationContent.tsx` render site unchanged; `InputBar.tsx` `ef95796577`, `ConversationPanel.tsx` `8bd11aac33`, `ui-slots/**` and `ui-renderer` registry identical |
+| web client bundle loader, `skippedBundles`, module trailer, `dsh.client.inject` | **NON-BREAKING** | `packages/client/modules/**` and `web/**` unchanged; only additive first-party row `dsh-client-ui-entry-customization` |
+| Cordis injections (3 packages) | **NON-BREAKING** | all three present at `0.2.1-rc.3` and still rows of `bundle/web-app/cordis.patch.yml` |
+| plugin compatibility checker | **checker NON-BREAKING; behaviour BREAKING via the plugin's peer pin** | `plugin-compatibility.ts` `2e4ca573` identical; see §3 |
+| `ui-workspace/navigation.ts` | **NON-BREAKING** | `replaceMain()` byte-identical; draft handling / blank reuse / JSDoc only |
+| `ui-conversation` More menu + slots | **NON-BREAKING** | strictly additive: new root slot `conversation.session.header.views.actions`, `view-pins.ts`, header menu; no slot removed |
+
+Compiled cross-check: the isolated rc.3 install (306 `@deepseek-ai` packages) has byte-identical `events.d.ts`,
+`sessions.d.ts`, `session.d.ts` and `client/index.d.ts`; `sessions/service.d.ts` differs only by the one comment line;
+the `ui-conversation` compiled deltas are the additive `views.actions` slot and `whenDraftExists` only.
+
+### 3. The one real incompatibility, and the migration change
+
+The compatibility checker did not change; the plugin's **peer pin did not match the new runtime**. With no
+`engines.dsh`, DSH requires every `@deepseek-ai/dsh` peer to satisfy the runtime
+(`plugin-compatibility.ts:62-73`); against `0.2.1-rc.3` the exact `0.2.1-rc.2` peer is unmet, and
+`app-boot/src/profile.ts:751-768` throws and catches into `skippedBundles` — **silently, with no stderr** — so the
+plugin's bundle layer would never load. This was first established from the source and then observed as absent/present
+on the isolated host. The migration change is exactly one declaration:
+`"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.3" }`.
+
+The exact pin is deliberate (no wide semver range, per the phase contract and the project's evidence-boundary
+convention). A range such as `^0.2.1-rc.2` would satisfy both rc.2 and rc.3, but this project's rule is that a supported
+runtime claim must match one exercised reference exactly; the working tree therefore supports `0.2.1-rc.3` only, and
+the published `v0.1.6` artifact keeps its own exact `0.2.1-rc.2` pin. No compatibility exemption is used or required:
+the isolated profile has no `version-exemptions` entry and `allow-version --accept-risk` plays no part in the acceptance.
+
+### 4. Production source — no change (proven)
+
+`src/**`, `index.js`, `cordis.patch.yml` and the client bundle are untouched. The rebuilt bundle is byte-identical to
+the Phase 12.0R accepted artifact: `client.js` and `lib/client.js` are 651,961 bytes, SHA-256
+`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`, mirrored. Frozen values re-verified:
+`DEFAULT_PRESENTATION_REFRESH_MS = 100`, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`; no diff under
+`src/core/` or `src/client/completed/`; no change to TPS, TTFT, token allocation, tool timing, phase attribution,
+completed curve or peak definitions.
+
+### 5. Deterministic gate
+
+```text
+node scripts/verify-structure.mjs   PASS — structure OK (14 required files, 16 core modules, 79 test files,
+                                    client bundle fresh, lib/client.js mirrored)
+node --test test/*.test.js          tests 960 · pass 960 · fail 0 · cancelled 0 · skipped 0 · todo 0
+                                    (946 Phase 12.0/12.0R baseline + 14 rc.3 contract tests)
+node scripts/verify-sanitization.mjs PASS — no personal content, all structural evidence preserved
+git diff --check                    clean
+client.js == lib/client.js          651,961 bytes, SHA-256 07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69
+```
+
+### 6. Isolated environment (CONFIRMED, outside the repo)
+
+A genuinely isolated DSH `0.2.1-rc.3` environment was provisioned under `E:\Projects\DSHarness\_phase13-runtime`:
+`npm install --save-exact @deepseek-ai/dsh@0.2.1-rc.3` (resolved
+`https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.2.1-rc.3.tgz`, integrity
+`sha512-H+E9HLnHf7fJqzen84Z9Bq8ggb5xbrcbyhZjXTJLE9NabHr3zteGvTRvdvGkxPl4ov80is4WLglFmSo+/olJjg==`, 614 packages,
+306 `@deepseek-ai/*`), an **isolated `DSH_HOME`** (`_phase13-runtime\dsh-home-iso`) and a new profile
+`tpm-phase13-iso` created from the shipped `web` template. Ports 50131/50132 and dedicated Chrome profiles on CDP
+9227/9228 are used; the operator's desktop app on 12127 and its browser are never attached to, never written and never
+signalled.
+
+**Credential isolation.** Two boots were run in order. *Attempt A* used no credentials configuration at all: the host
+served the real UI (`303 → 200`, 37,907 B; no-token `GET /` → 401) but produced **no** model listing, because the
+isolated home's own `.credentials.yaml` holds only a `browser-session` grant and no provider/account record — i.e. a
+fully isolated home has no model route. *Attempt B* added the shipped credential provider's documented read-only share
+to the isolated profile patch:
+
+```yaml
+- id: credentials
+  name: '@deepseek-ai/dsh-credentials-local'
+  config:
+    path: C:/Users/20659/.dsh/.credentials.yaml
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+    reasoningEffort: high
+```
+
+Everything else (profiles, sessions, storages, attachments, usage) stays inside the isolated home. The account model
+listing then loaded: `[llm-deepseek-account] model listing from https://api.deepseek.com/models loaded 2 model(s),
+skipped 0 row(s)`. No credential value was read, printed or copied; the shared file is read in place. (rc.3 fetches the
+listing lazily, on first UI catalog access, not at boot.)
+
+**Protected surface, before vs after** (baseline 07:07Z, after 07:31Z; evidence under `_phase13-runtime\snapshots\`):
+the 12127 listener is unchanged (pid 20532); `profiles\desktop` is **identical** (3,952 files, manifest digest
+`21fad4eb…a56b`, 0 added / 0 removed / 0 changed); the shared `profiles\` tree is unchanged (4,490 entries, 0/0/0); the
+shared `.credentials.yaml` SHA-256 is unchanged (`fdea1009…27ce`); and no operator PID or start time changed. The only
+shared-state delta is the operator app's own live agent-session records for this workspace, written by the protected
+app itself — not by this phase.
+
+**Plugin install and boot acceptance.** The adapted tree was packed **outside** the repository to
+`_phase13-runtime\final\dsh-turn-performance-meter-0.1.6.tgz` (400,012 B, SHA-256
+`9A2845079EB17BC93C5CB043E57B04D561F54478FFD43AA867AF7D0B694AB91E`; bundled `client.js` 651,961 B,
+`07F717FA…ED69`); the canonical root `dsh-turn-performance-meter-0.1.6.tgz` is unchanged at
+`6D1196D226ED93605263407E37CE7C44120576FB57AB476CD4D3F88F2CCB7884`. It was installed with
+`plugin --profile tpm-phase13-iso add file:…`, exit 0, installed `peerDependencies["@deepseek-ai/dsh"] = "0.2.1-rc.3"`,
+no version exemption, no incompatibility diagnostic in any host log, and no `skippedBundles` entry: the served boot
+graph has **71 entries** (70 baseline + this plugin), plugin rev `0c26f9f4b972`, release `0.2.1-rc.3` (boot rev
+`c610b27528bd`, commit `be72761`), the plugin entry carrying all three declared Cordis injections. The served plugin
+body is 652,044 B (SHA-256 `D149AC8F129AA8ABAEF754A5CA5E86D3672D19B9E00F77C56FDABA52D5C2EDCD`) — a byte-identical
+prefix of the installed `client.js` plus the known 83-byte module trailer. On the real page: one `.dsh-tpm-root`, one
+`.dsh-tpm-card`, one plugin style tag, the meter mounted inside `[data-slot="conversation.input.dock"]`, above the
+composer card (meter `top 632 / bottom 668`; composer card `top 674`), and zero plugin console errors: boot acceptance
+**19/19 PASS**.
+
+### 7. Real DSH `0.2.1-rc.3` acceptance — boot + R1–R9, 123/123 checks PASS
+
+All rounds ran against the definitive isolated host above (never restarted during the matrix), through a dedicated
+headless Chrome on CDP 9227 (R7 on a dedicated headed Chrome, CDP 9228). The route was the shipped DeepSeek Account
+route (`DeepSeek-V4.1-Flash 1017`, reasoning effort High, access mode Full access). Evidence:
+`dev/phase13/runtime/out/MATRIX.md`, `out/run-summary.json` and `out/<round>/run-summary.json`, `driver.log`,
+`samples.jsonl`, screenshots and `durable-<session>.json` decodes.
+
+| Round | Verdict | Checks | Key real observations |
+|---|---|---|---|
+| boot | PASS | 19/19 | exact peer accepted, no exemption, no `skippedBundles`; 71-entry graph, plugin rev `0c26f9f4b972`, three injections; one dock-mounted meter above the composer; 0 console errors |
+| R1 | PASS | 12/12 | live TTFT stage 107 ms after send, settled card TTFT 0.84 s; 205 live TPS samples; configured cadence 100 ms; real DOM update p50 = 100 ms, p95 = 103 ms (n = 210); scheduler 9.73 ticks/s; timer stopped on completion; durable turn completed (4,013 output tokens, 21.1 s) |
+| R2 | PASS | 11/11 | real `pwsh Start-Sleep` call/result window 8,315 ms; one-cadence-tick (87 ms) transition; after the guard, 107 tool-phase samples show the tool stopwatch and **no** model rate/TPS; model resumes waiting→warming→streaming; card TPS ≈186 / ≈273; no stale tool state; 0 approval prompts |
+| R3 | PASS | 11/11 | completed card tokens **2,002 == durable** exactly, attempts **1 == durable**, peak ≈306, curve 104 points; card turn id matches durable `turn/end`; settled-card TTFT 1.28 s (durable stream-derived 690 ms, INFERRED delta) |
+| R4 | PASS | 14/14 | real child `6895fe17…`; **3/3 A→B→A trips inside the live parent turn** (returns 1792827772846 / 779204 / 785504 before `turnEnd` 1792827828291; ~5 s child dwell); per return: `binding.eventSource` identity 1→3→5→7, `eventSourceRebinds +1`, `navigationResyncs +1`, `foregroundResyncs +0` while visible, `feedRevision == lastSourceRevision`, `retentionWatches = 1`, one active plugin subscription; card 440 tokens == durable, 3 attempts; child turn durable completed (284 tokens, 3 attempts, `pwsh` + `send_message`) |
+| R5 | PASS | 10/10 | real scope retirement observed while the child was visible (main `bindingAvailable = false`, `bindingPending = true`); retired sources (rev 308, rev 1) have **0 listeners / 0 active plugin records**; each new generation carries **exactly one** plugin subscription; identity 1→3→5; `feed == source`; no child card ever shown on main; final card `data-session` = main; `retentionWatches = 1` |
+| R6 | PASS | 13/13 | deterministic 120/150-session simulation: retired scopes hold **0** callbacks / watches / subscriptions while `sessionsMap == storeTurns == N`, re-visit arms exactly 1 then retires back to 0 (LOCAL TEST RESULT); real visits of 3 distinct sessions keep `{sessions: 3, retentionWatches: 1, listeners: 1}` with every previous binding retired, and the re-visited session re-arms one watch and one subscription; one root |
+| R7 | PASS | 10/10 | **real Win32 minimize + restore**: `ShowWindow(SW_MINIMIZE)` `isIconic = true`, 9,000 ms hold with no CDP calls, measured hidden 8,848–9,231 ms; page-side `visible→hidden` and `hidden→visible` edges recorded (restore latency 63 ms), in-page rAF max gap 9,496 ms; **`foregroundResyncs` 0 → 1 for exactly one real hidden→visible edge** (duplicates coalesced); scheduler suspended on every hidden sample (`ticking=false`, `timerCount=0`); after restore `feed == source`, `generationAwaiting=false`, one root / one style / one subscription; the turn continued and settled with 2,974 tokens == durable; 0 console errors |
+| R8 | PASS | 9/9 | genuine multi-attempt turn: 3 attempts (per-attempt tokens 82 / 325 / 140), 2 real `pwsh` call/result cycles, **1 continuity connector rendered** (series `output`, attempt 2 → 3); curve 33 data points; peak ≈404; card tokens 547 == durable, attempts 3; footer `tools 2 · 4.9s / attempts 3 / completed`; timer stopped |
+| R9 | PASS | 14/14 | rc.3 navigation: real main A → real child B → A, then New Session and a draft session; **header View-tabs More menu observed** (tabs Chat + Trajectory, launcher aria-label "More conversation views", `dsh-client-ui-entry-customization` row present): 3 open/close cycles with menu∩meter = 0, menu∩composer = 0, meter/composer position delta 0, exactly one `.dsh-tpm-root` / style tag / plugin subscription, unchanged subscribe count and bound session; sidebar panel-list More verified with the same invariants; the meter's bound `sessionId` followed the visible session throughout and never showed another session's state; rc.3's draft behaviour verified (a blank/draft session is not listed after navigating away; New Session reuses the same blank id and restores the unsent draft; the meter renders no root for the draft and the correct settled cards for A and B) |
+
+**No product check is NOT OBSERVED and none failed.** The R7 visibility dimension was initially unobserved because of a
+driver-side window protocol error (the page started occluded and the restore did not re-raise the window, so Chromium
+delivered no visibility edge); after the verified protocol — resolve the window by CDP `document.title`, Alt-unlock +
+`HWND_TOPMOST` + `SetForegroundWindow`, poll until `visible`, `SW_MINIMIZE`, quiet hold, then `SW_RESTORE` + topmost
+raise — the real hidden→visible edge and the single foreground recovery were observed. No synthetic visibility/CDP
+override was used, and no event was fabricated.
+
+### 8. Phase 12.0/12.0R fixes preserved
+
+The migration changes no production source, so the recovery machinery is literally unchanged and was re-verified in the
+real runtime: session activation recovery (every mount runs `ensureCurrentBinding`), source-identity-aware rebind (R4:
+identity 1→3→5→7 each followed by one rebind), authoritative revision resync (R4/R5/R7: `feedRevision ==
+lastSourceRevision`), pre-history generation deferral (`generationAwaiting` handling, contract test), `bindingPending`
+stale-state suppression (R5: no child card on main while the binding was gone), retired retention-watcher release and
+single-watcher rebuild on re-entry (R5/R6: old sources 0 listeners, new sources exactly one plugin subscription,
+`retentionWatches = 1`), historical telemetry retention (R6 deterministic and real), foreground recovery (R7: exactly
+one resync per real hidden→visible edge), and main/subagent statistical isolation (R4/R5: separate cards, tokens and
+attempts, no cross-session state). Frozen values re-checked: `DEFAULT_PRESENTATION_REFRESH_MS = 100`,
+`MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`; TPS, TTFT, token allocation, tool timing, phase attribution,
+completed curve and peak definitions are untouched.
+
+### 9. Git and release discipline
+
+One ordinary commit on the new review branch `compat/dsh-021-rc3` (created from `5500c576`; no reset, rebase, amend or
+force push) containing the exact-peer change, the three contract-test layers, the rebuilt (byte-identical) bundle files,
+`.gitignore` and the documentation. `main` (`568ebaa`) and `fix/session-navigation-resync` (`5500c57`) are untouched;
+the `v0.1.0`–`v0.1.6` tags, the canonical `dsh-turn-performance-meter-0.1.6.tgz` (`6D1196D2…7884`) and `0.1.5.tgz`
+artifacts and the published npm versions (`0.1.1`–`0.1.6`, `latest = 0.1.6`) are unchanged; nothing is published,
+tagged or released; the dev evidence directory is git-ignored (`dev/phase13/`).
+
+### 10. Verdict
+
+**PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; PENDING INDEPENDENT SOURCE AUDIT.** Source compatibility is confirmed
+by an independent, re-derived audit (0 breaking interfaces; every consumed declaration byte-identical; the only
+incompatibility was the plugin's own stale peer pin), production source is unchanged (bundle byte-identical to the
+accepted Phase 12.0R artifact), the deterministic suite is 960/960 with 0 skipped/todo, and the isolated real-browser
+matrix on DSH `0.2.1-rc.3` is 123/123 checks PASS across boot and R1–R9 with no NOT OBSERVED item. The claim is
+bounded to `0.2.1-rc.3`; the published `v0.1.6` remains the `0.2.1-rc.2` artifact and no release occurred.

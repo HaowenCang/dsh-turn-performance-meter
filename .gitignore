@@ -15,6 +15,11 @@ dev/phase11/
 # logs, CDP captures, upstream lifecycle audit). Dev-only, never shipped.
 dev/phase12/
 
+# Phase 13.0 local DSH 0.2.1-rc.3 compatibility-audit and runtime-acceptance
+# evidence (upstream interface audit, isolated-host logs, CDP captures).
+# Dev-only, never shipped.
+dev/phase13/
+
 # Pre-sanitization fixture originals: the provenance record of what public-release
 # redaction removed. Kept locally, never published — see fixtures/README.md.
 fixtures/raw/

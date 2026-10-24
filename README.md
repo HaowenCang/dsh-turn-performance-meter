@@ -18,6 +18,12 @@ provides two UI modes: a compact live meter during execution and a completed tur
 > `v0.1.6` is the first release for that runtime. It changes no TPS, TTFT, estimator, curve, rendering or lifecycle
 > algorithm.
 >
+> **Working tree (unreleased, branch `compat/dsh-021-rc3`): DSH `0.2.1-rc.3` only.** Phase 13.0 moved the exact peer
+> to `0.2.1-rc.3` and re-audited every consumed declaration; no production source changed and the bundle is
+> byte-identical to the accepted `v0.1.6` build. Compatibility is **ACCEPTED pending independent source audit** (source
+> audit 0 breaking interfaces; isolated real-browser matrix boot + R1–R9 = 123/123 checks PASS). The published `v0.1.6`
+> artifact is **not** re-scoped: it remains bounded to `0.2.1-rc.2`, and no release occurred. See §2.1.
+>
 > **已发布 npm 与 GitHub `v0.1.6`，面向 DSH `0.2.1-rc.2`。** 版本 `0.1.6`，已发布到公开 npm registry。主要分发方式为
 > npm 包 `dsh-turn-performance-meter`；GitHub Release 资产 `dsh-turn-performance-meter-0.1.6.tgz` 作为离线回退，本地检出
 > 目录用于开发。发布与运行时对应关系见 §2.1。
@@ -25,6 +31,10 @@ provides two UI modes: a compact live meter during execution and a completed tur
 > **`v0.1.5` 继续面向 DSH `0.2.0-rc.2` 发布**，不做改写。Phase 11.0 完成了源码迁移，Phase 11.0R 完成了运行时验收，
 > 因此 **`0.2.1-rc.2` 兼容性为 ACCEPTED（已接受）**，`v0.1.6` 是该运行时的首个发布。本次发布不改变任何 TPS、TTFT、
 > 估计器、曲线、渲染或生命周期算法。
+>
+> **工作树（未发布，分支 `compat/dsh-021-rc3`）：仅面向 DSH `0.2.1-rc.3`。** Phase 13.0 将精确 peer 迁移到
+> `0.2.1-rc.3`，并重新审计了本插件读取的全部声明；生产源码未改动，bundle 与已验收的 `v0.1.6` 构建逐字节一致。
+> 已发布的 `v0.1.6` 产物**不**被重新划定范围，仍限定于 `0.2.1-rc.2`。详见 §2.1。
 
 ## 1. What it does / 功能
 
@@ -54,8 +64,8 @@ React layer never re-derives a metric.
 
 ```text
 Version (working tree): 0.1.6
-Development target:     DSH 0.2.1-rc.2 only (Phase 11.0/11.0R, compatibility ACCEPTED)
-Compatibility status:   ACCEPTED — DSH 0.2.1-rc.2 (Phase 11.0R R5 real-run acceptance)
+Development target:     DSH 0.2.1-rc.3 only (Phase 13.0, compatibility ACCEPTED pending independent source audit)
+Compatibility status:   ACCEPTED — DSH 0.2.1-rc.3 (Phase 13.0 source audit + isolated real-browser matrix 123/123)
 Released:               v0.1.6 -> DSH 0.2.1-rc.2
                         v0.1.5 -> DSH 0.2.0-rc.2
                         v0.1.4 -> DSH 0.2.0-rc.2
@@ -77,6 +87,7 @@ plugin v0.1.3  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe
 plugin v0.1.4  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.5  ->  DSH 0.2.0-rc.2   reference commit 639ed015397290b3745d163aafe02ffee4aa3f84
 plugin v0.1.6  ->  DSH 0.2.1-rc.2   reference commit 687f282e8625c6b8d11ff58211a90524be2e4317
+plugin 0.1.6   ->  DSH 0.2.1-rc.3   reference commit 1f81c047fc48fa190a683e469daa699857e9afe8  (working tree, unreleased)
 ```
 
 **`0.2.1-rc.2` is the normative runtime for `v0.1.6`.** Phase 11.0 moved the development target to it
@@ -131,6 +142,39 @@ Phase 11.0R 用一次专门构造的真实 turn 重新测试 R5，观察到了�
 源码级验证，不能替代运行时渲染。完整记录见 `docs/IMPLEMENTATION_LOG.md` Phase 11.0R。结论：
 **PASS — DSH 0.2.1-rc.2 COMPATIBILITY ACCEPTED。**
 
+**Phase 13.0 moved the unreleased working tree to `0.2.1-rc.3` (reference commit
+`1f81c047fc48fa190a683e469daa699857e9afe8`).** The audit re-derived every interface from both reference commits and
+from both installed runtimes: all consumed declarations are **byte-identical** — the `SessionEventWindow` /
+`SessionEventChange` / `MutableSessionEventSource` contract, `Session` and `SessionManager`,
+`SessionBinding`/`sessions.binding()`, `sessions.retainInfo()` and its stable-per-id observer source, the transient
+`assistant/live-chunk` producer, the durable turn/settlement events, the compact `AssistantStreamRecord` decoder, the
+`conversation.input.dock` slot, the slot renderer/registry, the bundle loader and the plugin-compatibility evaluator.
+The only incompatible item was the plugin's own exact `0.2.1-rc.2` peer pin: the rc.3 checker is unchanged, so that
+pin is unmet and a profile bundle is silently skipped, which is why the pin moved. The rc.3 product changes are
+additive and outside the consumed surface (Conversation header View-tab More menu and its root-scope slot, View pins,
+navigation entry customization, `ui-workspace` draft/reuse handling). **No production source changed**, the rebuilt
+bundle is byte-identical to the Phase 12.0R artifact
+(`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`), and the deterministic suite is **960 tests, 960
+pass, 0 fail, 0 skipped, 0 todo**. On an isolated DSH `0.2.1-rc.3` host the plugin installed with the exact peer, no
+compatibility exemption and no `skippedBundles` entry, registered its dock and was exercised by the real-browser matrix
+(R1–R9). The claim stays bounded: the working tree supports `0.2.1-rc.3` only, and `v0.1.6` remains the published
+artifact for `0.2.1-rc.2`. Record: `docs/DSH_API_NOTES.md` §16 and `docs/IMPLEMENTATION_LOG.md` Phase 13.0.
+
+**Phase 13.0 将未发布的工作树迁移到 `0.2.1-rc.3`（参考 commit `1f81c047fc48fa190a683e469daa699857e9afe8`）。**
+本次审计从两个参考 commit 与两套已安装运行时重新推导了全部接口：所有被消费的声明**逐字节相同**——包括
+`SessionEventWindow` / `SessionEventChange` / `MutableSessionEventSource` 契约、`Session` 与 `SessionManager`、
+`SessionBinding`/`sessions.binding()`、`sessions.retainInfo()` 及其按 id 稳定的观察源、瞬态 `assistant/live-chunk`
+生产端、durable turn/结算事件、紧凑 `AssistantStreamRecord` 解码器、`conversation.input.dock` 插槽、插槽渲染器/注册表、
+bundle 加载器以及插件兼容性评估器。唯一不兼容项是插件自身的精确 `0.2.1-rc.2` peer：rc.3 检查器未变，该 peer 因此
+不满足，profile bundle 会被静默跳过——这正是 peer 必须迁移的原因。rc.3 的产品变更均为新增且位于消费面之外
+（Conversation 头部 View 标签的 More 菜单及其 root 作用域插槽、View 固定状态、导航入口定制、`ui-workspace` 草稿/复用
+处理）。**生产源码未改动**，重建 bundle 与 Phase 12.0R 产物逐字节一致
+（`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`），确定性测试为 **960 tests、960 pass、
+0 fail、0 skipped、0 todo**。在隔离的 DSH `0.2.1-rc.3` 主机上，插件以精确 peer 安装成功，未使用兼容性豁免，也未进入
+`skippedBundles`，注册了自身 dock 并通过真实浏览器矩阵（R1–R9）验收。声明仍保持限定：工作树仅支持 `0.2.1-rc.3`，
+`v0.1.6` 仍是面向 `0.2.1-rc.2` 的已发布产物。记录见 `docs/DSH_API_NOTES.md` §16 与
+`docs/IMPLEMENTATION_LOG.md` Phase 13.0。
+
 `v0.1.2` is the release in which the `0.2.0-rc.2` target became the shipped one, and `v0.1.3`, `v0.1.4` and `v0.1.5`
 carry it forward unchanged. Those published artifacts are immutable — `v0.1.5`, `v0.1.4`, `v0.1.3` and `v0.1.2`
 declare `0.2.0-rc.2` and `v0.1.1` still declares `0.1.7-rc.2` — so the releases are **separately bounded** rather than
@@ -173,22 +217,25 @@ The eight captures under `fixtures/dsh-turns/` were recorded against `0.1.5`. Th
 arithmetic, the decoder and historical compatibility, and they are **not** evidence for the tool/result shape, the
 settle-assistant semantics, the turn completion lifecycle or the client event-window behaviour, nor are they a supported
 runtime contract. `package.json` declares an exact compatibility gate,
-`"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.2" }`. DSH evaluates that peer against the running runtime version
+`"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.3" }`. DSH evaluates that peer against the running runtime version
 before a profile starts the plugin, so an unsupported DSH is rejected instead of silently admitted. The exact range is
 deliberate: `^0.2.1-rc.2`, `~0.2.1-rc.2`, `>=0.2.1-rc.2`, `0.2.x` and `*` would all admit runtimes this project has
-never exercised, and the dual `0.2.0-rc.2 || 0.2.1-rc.2` range would erase the evidence boundary between the 0.2.0 and
-0.2.1 references. The recorded corpora keep the version they were captured on: `fixtures/dsh-turns/` is `0.1.5`,
-`fixtures/dsh-0.1.7/` is `0.1.7-rc.2`, and neither is restamped; `test/dsh-020-contract.test.js` keeps the 0.2.0-rc.2
-evidence it was written on, and `test/dsh-021-contract.test.js` is the 0.2.1-rc.2 layer.
+never exercised, and the dual `0.2.1-rc.2 || 0.2.1-rc.3` range would erase the evidence boundary between the rc.2 and
+rc.3 references. An exact pin matches exactly one runtime: the working tree therefore supports `0.2.1-rc.3` only, and
+the published `v0.1.6` artifact keeps its own exact `0.2.1-rc.2` pin. The recorded corpora keep the version they were
+captured on: `fixtures/dsh-turns/` is `0.1.5`, `fixtures/dsh-0.1.7/` is `0.1.7-rc.2`, and neither is restamped;
+`test/dsh-020-contract.test.js` keeps the 0.2.0-rc.2 evidence it was written on, `test/dsh-021-contract.test.js` is the
+0.2.1-rc.2 layer, and `test/dsh-021-rc3-contract.test.js` is the 0.2.1-rc.3 layer.
 
 `fixtures/dsh-turns/` 下的八段录制采集自 `0.1.5`。它们仍是指标算术、解码器与历史兼容性的证据，但**不是** tool/result
 形状、settle-assistant 语义、turn 完成生命周期或客户端事件窗口行为的证据，也不构成受支持的运行时契约。`package.json`
-声明精确兼容门控 `"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.2" }`。DSH 会在 profile 启动插件前用当前运行时
+声明精确兼容门控 `"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.3" }`。DSH 会在 profile 启动插件前用当前运行时
 版本校验该 peer，因此不受支持的 DSH 会被拒绝，而不会被静默接受。使用精确范围是有意的：`^0.2.1-rc.2`、`~0.2.1-rc.2`、
-`>=0.2.1-rc.2`、`0.2.x` 与 `*` 都会放行本项目从未实际验证过的运行时，而 `0.2.0-rc.2 || 0.2.1-rc.2` 这样的双范围会抹掉
-0.2.0 与 0.2.1 两个参考之间的证据边界。已录制语料保留其采集时的版本：`fixtures/dsh-turns/` 为 `0.1.5`，
+`>=0.2.1-rc.2`、`0.2.x` 与 `*` 都会放行本项目从未实际验证过的运行时，而 `0.2.1-rc.2 || 0.2.1-rc.3` 这样的双范围会抹掉
+rc.2 与 rc.3 两个参考之间的证据边界。精确 pin 只能匹配一个运行时：因此工作树仅支持 `0.2.1-rc.3`，已发布的 `v0.1.6`
+产物继续保留其自身的精确 `0.2.1-rc.2` pin。已录制语料保留其采集时的版本：`fixtures/dsh-turns/` 为 `0.1.5`，
 `fixtures/dsh-0.1.7/` 为 `0.1.7-rc.2`，两者均未改写版本标记；`test/dsh-020-contract.test.js` 保留其编写时的
-0.2.0-rc.2 证据，`test/dsh-021-contract.test.js` 是 0.2.1-rc.2 层。
+0.2.0-rc.2 证据，`test/dsh-021-contract.test.js` 是 0.2.1-rc.2 层，`test/dsh-021-rc3-contract.test.js` 是 0.2.1-rc.3 层。
 
 ## 3. Install / 安装
 

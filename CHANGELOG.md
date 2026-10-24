@@ -7,6 +7,62 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## Unreleased — DSH 0.2.1-rc.3 compatibility (Phase 13.0)
+
+**Not published, not tagged, not version-bumped.** This entry records the development state on
+`compat/dsh-021-rc3`; `package.json` stays `0.1.6`. It is a runtime-target compatibility migration, not a feature
+release: no TPS, TTFT, estimator, curve, rendering or lifecycle algorithm changed.
+
+The development target moved from DSH `0.2.1-rc.2` (reference commit
+`687f282e8625c6b8d11ff58211a90524be2e4317`) to `0.2.1-rc.3` (reference commit
+`1f81c047fc48fa190a683e469daa699857e9afe8`, tag `dsh-v0.2.1-rc.3`).
+
+- Exact peer is now `"@deepseek-ai/dsh": "0.2.1-rc.3"`. This is the only required change: the rc.3 compatibility
+  checker is byte-identical, and an exact `0.2.1-rc.2` peer is unmet on an rc.3 runtime, which silently puts a profile
+  bundle into `skippedBundles` — without the moved pin the meter would not load at all. No compatibility exemption is
+  used or required, and `allow-version --accept-risk` is not part of the migration. The pin is exact on purpose (no
+  wide semver range): the working tree therefore supports `0.2.1-rc.3` only, and the published `v0.1.6` artifact keeps
+  its own exact `0.2.1-rc.2` pin and is not restamped.
+- **No production source change.** Every DSH declaration this plugin consumes is byte-identical between the two
+  reference commits — the `SessionEventWindow`/`SessionEventChange`/`MutableSessionEventSource` contract, `Session` and
+  `SessionManager`, `SessionBinding`/`sessions.binding()`, `sessions.retainInfo()` with its stable-per-id observer
+  source, the transient `assistant/live-chunk` producer, the durable `turn/start`/`turn/end`/settlement events, the
+  compact `AssistantStreamRecord` decoder, `conversation.input.dock` (`{ kind: 'list'; scope: 'session'; owner:
+  InputZone }`), the slot renderer/registry, the bundle loader and the plugin-compatibility evaluator. The rc.3 product
+  changes are additive and outside the consumed surface: the Conversation header View-tab More menu (new root-scope
+  slot `conversation.session.header.views.actions`, registered by the first-party entry-customization row), View pins,
+  navigation entry customization, and the `ui-workspace` new-session draft/reuse behaviour. The rebuilt bundle is
+  therefore byte-identical to the Phase 12.0R accepted artifact:
+  `client.js`/`lib/client.js` 651,961 B, SHA-256
+  `07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`.
+- **Tests.** `test/dsh-021-rc3-contract.test.js` is the new normative layer: it pins the rc.3 reference commit, the
+  exact peer, the historical evidence boundary, the three Cordis injections and the bundle patch, the dock seat and its
+  `order: -10`, the absence of any rc.3 menu seat in the plugin's registration, the wire evidence, the
+  `retainInfo`/source-generation semantics (observe-only watch, release on generation retirement, exactly one re-armed
+  watch and one subscription on the returning activation, pre-history revision-0 deferral) and the frozen 100 ms
+  cadence with `MIN_RATE_SAMPLES = 3` / `MIN_RATE_ELAPSED_MS = 100`. The rc.2 layer
+  (`test/dsh-021-contract.test.js`) and the 0.2.0 layer (`test/dsh-020-contract.test.js`) are retained as historical
+  records; only their cross-file peer guard tracks the live peer. Suite: **960 tests, 960 pass, 0 fail, 0 skipped,
+  0 todo** (946 Phase 12.0/12.0R baseline + 14 rc.3 contract tests).
+- The Phase 12.0/12.0R fixes are preserved unchanged: session activation recovery, source-identity-aware rebind,
+  authoritative revision resync, pre-history generation deferral, `bindingPending` stale-state suppression, retired
+  retention-watcher release, single-watcher rebuild on re-entry, historical telemetry retention, foreground recovery,
+  and main/subagent statistical isolation.
+- **Real DSH `0.2.1-rc.3` acceptance: 123/123 checks PASS, 0 failed, 0 not observed.** On an isolated `0.2.1-rc.3` host
+  (exact peer accepted, no compatibility exemption, plugin in the served module graph with three Cordis injections, no
+  `skippedBundles`) the real-browser matrix observed: boot/dock 19/19; R1 live TTFT + live TPS + 100 ms cadence
+  (p50 100 ms, p95 103 ms, timer stopped on completion); R2 a real `pwsh` tool window pauses the rate and the model
+  phase resumes after it; R3 completed-card tokens and attempts exactly equal to the durable turn (2,002 tokens,
+  1 attempt, peak ≈306); R4 three real main → subagent → main trips inside a live parent turn with identity rebind,
+  one watcher and one plugin subscription per return; R5 a real scope retirement leaves the retired source with zero
+  listeners and the new generation with exactly one plugin subscription; R6 the 120/150-session retention contract
+  (retired sessions hold zero plugin watchers while telemetry is retained, a re-visit arms exactly one); R7 a real
+  Win32 minimize/restore producing exactly one foreground recovery per real hidden→visible edge with the ticker
+  suspended while hidden; R8 a genuine multi-attempt connector (output, attempt 2 → 3) with 547 tokens == durable;
+  R9 the rc.3 header View-tabs More menu and draft reuse leave the dock seat, mount count and bound session
+  unchanged. Evidence is local, under the git-ignored `dev/phase13/`. Verdict:
+  **PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; PENDING INDEPENDENT SOURCE AUDIT.**
+
 ## Unreleased — session navigation recovery (Phase 12.0, planned as 0.1.7)
 
 **Not published, not tagged, not version-bumped.** This entry records the development state on

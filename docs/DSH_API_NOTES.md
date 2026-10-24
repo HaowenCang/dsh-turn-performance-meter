@@ -669,3 +669,163 @@ recorded corpora keep the version they were captured on — `fixtures/dsh-turns/
 `0.1.7-rc.2` — and neither is restamped. `test/dsh-021-contract.test.js` is the narrow layer that asserts the wire
 shapes above against the current runtime; `test/dsh-020-contract.test.js` is retained as the 0.2.0-rc.2 historical
 record.
+
+## 16. DSH 0.2.1-rc.3 compatibility baseline
+
+| Item | Value |
+|---|---|
+| Local installed version | `0.2.1-rc.3` |
+| Public reference commit | `1f81c047fc48fa190a683e469daa699857e9afe8` (tag `dsh-v0.2.1-rc.3`, "Merge pull request #6999 from deepseek-harness/worktree/release-dsh-0.2.1-rc.3") |
+| Superseded reference commit | `687f282e8625c6b8d11ff58211a90524be2e4317` (`0.2.1-rc.2`, tag `dsh-v0.2.1-rc.2`) |
+| Older reference commits | `639ed015397290b3745d163aafe02ffee4aa3f84` (`0.2.0-rc.2`), `477b4f420553e8a52c2fbccc464d7561b239c443` (`0.1.7-rc.2`) |
+| Verified local package path | `E:\Projects\DSHarness\_phase13-runtime\dsh-0.2.1-rc.3\node_modules\@deepseek-ai\dsh` — an isolated prefix install (`npm install --save-exact @deepseek-ai/dsh@0.2.1-rc.3`), version read back as `0.2.1-rc.3`, tarball `https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.2.1-rc.3.tgz`, integrity `sha512-H+E9HLnHf7fJqzen84Z9Bq8ggb5xbrcbyhZjXTJLE9NabHr3zteGvTRvdvGkxPl4ov80is4WLglFmSo+/olJjg==` |
+| Verified date | 2026-10-24 |
+| Version exemption required | no |
+
+### 16.1 Method
+
+Three independent checks, run because the normative runtime moved, not because a defect was suspected.
+
+1. **Content-addressed comparison of the upstream declarations.** Each consumed declaration was resolved at both
+   commits with `git rev-parse <sha>:<path>` in two worktrees of a full `deepseek-ai/deepseek-harness` clone
+   (`_phase13-runtime\upstream\rc2`, `.../rc3`, both verified by `git rev-parse HEAD` to the full SHAs above) and the
+   blob hashes compared. Between the two reference commits there are **6 commits**, all of them product work
+   (`release(dsh): 0.2.1-rc.3`, the official `/models` listing on the API-key route, navigation entry customization,
+   navigation pins/analytics, and the release merge); none of them is a session-controller or event-window change.
+2. **Read of the installed `0.2.1-rc.3` runtime.** The published packages ship compiled JavaScript plus `.d.ts`
+   declarations, so every source finding was re-checked against the installed `lib/types/**` and `lib/*.js` of the
+   isolated rc.3 install and against the installed rc.2 tree. All 306 composed packages report `0.2.1-rc.3`.
+3. **Execution where a static read is not decisive.** The installed compatibility evaluator was executed against the
+   real manifest/runtime strings, the contract tests were run against the plugin tree, and the real-browser acceptance
+   matrix was run on the isolated rc.3 host (§16.6).
+
+### 16.2 Upstream comparison — the consumed declarations are unchanged; the changes are additive
+
+| Upstream path | rc.2 / rc.3 blob | Verdict |
+|---|---|---|
+| `packages/api/session-controller/src/client/contract/events.ts` | `bc825f08fd` | identical — `SessionEventWindow`, the four `SessionEventChange` kinds, `MutableSessionEventSource` |
+| `packages/api/session-controller/src/client/contract/sessions.ts` | `a52d2c15` | identical — `SessionBinding` borrow, `retainInfo(id)` doc + signature |
+| `packages/api/session-controller/src/client/contract/session.ts` | `2c8f16c4ae` | identical — `Session` |
+| `packages/api/session-controller/src/client/sessions/session.ts` | `09494e01ab` | identical |
+| `packages/api/session-controller/src/client/sessions/manager.ts` | `b8bec9be8a` | identical — `SessionManager` |
+| `packages/api/session-controller/src/client/session-wire-event.ts` | `59d6ef5b` | identical |
+| `packages/api/session-controller/src/client/sessions/assistant-stream.ts` | `973fd108` | identical — the transient `assistant/live-chunk` producer |
+| `packages/llm/llm/src/assistant-stream.ts` | `7fca34c5` | identical — `AssistantStreamRecord` `time0`/`dt[]` and `isTokenDelta` |
+| `packages/core/session/src/types.ts` | identical | `turn/start`, `turn/end`, `assistant/message`, `assistant/attempt`, `tool/call`, `tool/result` and the envelope |
+| `packages/boot/app-boot/src/plugin-compatibility.ts` | `2e4ca573` | identical — the compatibility checker |
+| `packages/client/ui-conversation/src/client/skeleton/InputBar.tsx` | `ef95796577` | identical |
+| `packages/client/ui-conversation/src/client/skeleton/ConversationPanel.tsx` | `8bd11aac33` | identical |
+| `packages/client/ui-conversation/src/client/skeleton/ConversationContent.tsx` | identical | the `conversation.input.dock` render site (`:168`) |
+| `packages/client/ui-renderer/src/client/registry.ts` / `packages/client/ui-slots/**` | identical | slot registry, `inject`, `register`, strict session-scope props |
+| `packages/api/session-controller/src/client/sessions/service.ts` | 1 line | **comment-only** — one JSDoc sentence inside `SessionSummary`; `retainInfo`'s cached `retainObservers` implementation is unchanged |
+| `packages/client/ui-conversation/src/client/contract/slots.ts` | `a02f5aa6` → `4a0bd3a7` | **strictly additive** — new root-scope slot `conversation.session.header.views.actions`, `ConversationViewActionsOwnerProps`, and header `hooks`/`setPinned`; `conversation.input.dock` at `:272` is unchanged text |
+| `packages/client/ui-workspace/src/client/navigation.ts` | changed | `replaceMain()` byte-identical; the changes are draft handling (`whenDraftExists`), blank-session reuse across presets, and JSDoc |
+| `packages/client/ui-conversation/src/client/{apply.ts,skeleton/ConversationSession.tsx,view-pins.ts,contract/input.ts,contract/composer-submission.ts,input/**}` | changed | additive View-tab More menu, View pins, and draft/submission metadata — no dock, no session-scope, no wire contract |
+
+The load-bearing result is that the event-window file, the session-controller contracts, the assistant-stream decoder and
+the compatibility checker are **byte-identical**. The rc.3 product changes are a header More menu for View tabs and the
+new-session draft/reuse behaviour in `ui-workspace`, neither of which is a declaration this plugin consumes.
+
+### 16.3 The one real incompatibility, and the migration change
+
+The compatibility checker did not change; the **peer pin did not match the new runtime**. With no `engines.dsh`, DSH
+evaluates every `@deepseek-ai/dsh` peer with `semver.satisfies(runtimeVersion, requirement)`; against `0.2.1-rc.3` an
+exact `0.2.1-rc.2` peer is unmet, and `app-boot/src/profile.ts` **silently** pushes a profile bundle with an unmet
+requirement into `skippedBundles` — the meter would not load at all. This was verified from the rc.3 sources and the
+unchanged evaluator, and confirmed on the isolated host (below).
+
+The migration change is therefore exactly one declaration:
+
+```json
+"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.3" }
+```
+
+The exact pin is deliberate and follows the project's existing convention (§14.4, §15.4): a range would admit runtimes
+this project has not exercised, and the phase contract forbids a wide semver range. The consequence is stated plainly:
+the working tree now supports **only** `0.2.1-rc.3`; the published `v0.1.6` artifact keeps its own exact `0.2.1-rc.2`
+pin and is not restamped. `0.2.1-rc.3` still ships exact-version exemptions (`allow-version`, `revoke-version`,
+`version-exemptions`); **no exemption is used or required**, and `allow-version --accept-risk` is not part of this
+migration.
+
+### 16.4 Installed-runtime confirmation
+
+| Contract | rc.3 installed evidence | What the plugin reads | Verdict |
+|---|---|---|---|
+| `SessionEventWindow` / `SessionEventChange` / `SessionEventSource` | `dsh-api-session-controller/lib/types/client/contract/events.d.ts` — **byte-identical** to the rc.2 installed file | `revision`, the four change kinds, `getSnapshot`/`subscribe` | unchanged |
+| `SessionBinding` / `sessions.binding()` / `retainInfo()` | `dsh-api-session-controller/lib/types/client/sessions/service.d.ts` — one comment line differs; `binding(id): SessionBinding \| undefined` and `retainInfo(id)` are unchanged | binding identity, `eventSource`, retention watch | unchanged |
+| `Session` / `SessionManager` | `dsh-api-session-controller/lib/types/client/contract/session.d.ts` and `sessions/*.d.ts` byte-identical | session generation identity | unchanged |
+| `conversation.input.dock` / `InputZone` | `dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts` — the rc.3 additions are the new `views.actions` slot and view-pin hooks; `conversation.input.dock` keeps `{ kind: 'list'; scope: 'session'; owner: InputZone }` | slot registration at `order: -10`, `props.sessionId` | unchanged |
+| `slots` service + `locale` service | `dsh-client-ui-renderer`, `dsh-client-locale` declarations unchanged | `ctx.slots.inject/register`, `ctx.locale.register/bind` | unchanged |
+| Cordis injection packages | all three declared packages (`dsh-api-session-controller`, `dsh-client-locale`, `dsh-client-ui-conversation`) are present at `0.2.1-rc.3` and remain rows of the `dsh-base`/`dsh-web-app` compositions | `dsh.client.inject` | unchanged |
+| Web bundle loader | `@deepseek-ai/dsh-client-modules` package version moved to `0.2.1-rc.3`; its loader source is unchanged and the `__ModuleLoader__` / `rev` / `platform` / `immediately` / `inject` protocol is identical | served plugin body, boot rev, `skippedBundles` | unchanged |
+| Plugin-compatibility gate | `dsh-app-boot` evaluator byte-identical; decision is exact-version equality with `{ includePrerelease: true }` | `peerDependencies['@deepseek-ai/dsh']` | unchanged decision; the pin moved |
+
+rc.3 also adds the first-party `@deepseek-ai/dsh-client-ui-entry-customization` row to the web bundle. It registers only
+sidebar/guide/header-view seats; it does not touch `conversation.input.dock` and does not collide with this plugin's
+seat id or order.
+
+### 16.5 Differences between the two references assessed as irrelevant
+
+- The View-tab More menu and its root-scope slot `conversation.session.header.views.actions`: new seats in the session
+  header, beside the dock, not a change to it. The header renders More only while that slot has registrations, so a
+  plugin that registers nothing there is invisible to the menu.
+- View pins (`view-pins.ts`, `setPinned`, `entryPins`): presentation state for the Conversation header.
+- `ui-workspace` new-session draft/reuse behaviour (`whenDraftExists`, preset-aware blank reuse): a navigation-policy
+  change. It is the one rc.3 change that the plugin can *notice* — New Session may now open an existing blank session
+  instead of creating one, so the dock can be remounted on a session id it has visited before. That is exactly the
+  class of navigation the Phase 12.0 binding-generation recovery already handles, and R9 exercises it end to end.
+- Navigation entry customization and its analytics events: keyboard/entry surfaces outside this plugin.
+- The official `/models` listing on the DeepSeek API-key route and the account catalog's lazy first-access listing:
+  route plumbing; the plugin reads usage from turn events, never from the model catalog.
+- Additive submission metadata (`newSession`, `agentPreset`): composer plumbing.
+
+### 16.6 Real-runtime acceptance — observed, with no unobserved item
+
+On the isolated `0.2.1-rc.3` host the plugin was installed from the adapted tarball (exact peer accepted, no
+compatibility exemption, no `skippedBundles` entry, 71-entry served graph, plugin rev `0c26f9f4b972`) and the served
+bundle was byte-identical to the built `client.js` plus the 83-byte module trailer. The real-browser matrix then observed
+**boot 19/19, R1 12/12, R2 11/11, R3 11/11, R4 14/14, R5 10/10, R6 13/13, R7 10/10, R8 9/9, R9 14/14 — 123/123 checks
+PASS, 0 FAIL, 0 NOT OBSERVED.**
+
+- **R1** live TTFT (107 ms to the first-response stage; settled card TTFT 0.84 s), 205 live TPS samples, configured
+  100 ms cadence with real DOM update p50 = 100 ms / p95 = 103 ms, 9.73 scheduler ticks/s, timer stopped on completion.
+- **R2** real `pwsh` tool window 8,315 ms: after a one-cadence-tick transition (87 ms), 107 tool-phase samples carry
+  the tool stopwatch and no model rate; the following model phase resumes.
+- **R3** completed card tokens 2,002 and attempts 1 exactly match the durable turn; peak ≈306; 104-point curve.
+- **R4** three real main → subagent-child → main trips inside a live parent turn: `binding.eventSource` identity
+  1→3→5→7 with `eventSourceRebinds +1` and `navigationResyncs +1` per return, `foregroundResyncs +0` while visible,
+  `feedRevision == lastSourceRevision`, `retentionWatches = 1`, one active plugin subscription; card 440 tokens equals
+  durable.
+- **R5** a real scope retirement while the child was visible left the retired sources with **0 listeners / 0 plugin
+  records**; each new generation carries exactly one plugin subscription, `feed == source`, no stale foreign card.
+- **R6** deterministic 120/150-session simulation: retired scopes hold 0 callbacks/watches/subscriptions while
+  `sessionsMap == storeTurns == N`, and a re-visit arms exactly one watch (LOCAL TEST RESULT); real visits keep
+  `{sessions: 3, retentionWatches: 1}` with each previous binding retired.
+- **R7** real Win32 minimize + restore: 8,848–9,231 ms hidden, page-side hidden→visible edges, `foregroundResyncs 0 → 1`
+  for exactly one real edge, scheduler suspended while hidden, authoritative state after restore, turn settled with
+  2,974 tokens == durable.
+- **R8** a genuine multi-attempt turn (3 attempts, 2 real tool cycles) rendered a real continuity connector
+  (output, attempt 2 → 3), peak ≈404, card tokens 547 == durable.
+- **R9** the rc.3 header View-tabs More menu (new root slot `conversation.session.header.views.actions`, rendered
+  because the first-party entry-customization row is present) was opened and closed three times: no intersection with
+  the meter or composer, no position delta, no duplicate mount or subscription, unchanged bound session; the sidebar
+  panel-list More menus behave identically. rc.3's draft reuse (New Session reopens the same blank session and restores
+  the unsent draft) does not disturb the meter's `sessionId` binding.
+
+The per-check raw evidence is under `dev/phase13/runtime/out/` (`MATRIX.md`, `run-summary.json`, per-round
+`run-summary.json` / `driver.log` / `samples.jsonl` / screenshots), with the isolated environment runbook under
+`_phase13-runtime/RUNBOOK.md`. Because every required item is observed, the migration is not limited by an unobserved
+runtime dimension; the final verdict is **PASS — DSH 0.2.1-rc.3 COMPATIBILITY ACCEPTED; PENDING INDEPENDENT SOURCE
+AUDIT**, recorded in `docs/IMPLEMENTATION_LOG.md` Phase 13.0.
+
+### 16.7 Supported version
+
+The only supported and tested DSH for the current working tree is `0.2.1-rc.3`, verified against the isolated installed
+package recorded in §16 and the real-browser acceptance matrix recorded in `docs/IMPLEMENTATION_LOG.md` (Phase 13.0).
+The published `v0.1.6` release remains bounded to `0.2.1-rc.2` and is not retroactively re-scoped; the working tree is
+unreleased and keeps version `0.1.6`. This project does **not** claim `0.2.1+`, `0.2.x` or dual-runtime support, and the
+exact peer pins exactly one runtime by design. The recorded corpora keep the version they were captured on —
+`fixtures/dsh-turns/` is `0.1.5`, `fixtures/dsh-0.1.7/` is `0.1.7-rc.2` — and neither is restamped.
+`test/dsh-021-rc3-contract.test.js` is the narrow layer that asserts the wire shapes, the metadata and the
+`retainInfo`/generation semantics against the rc.3 target; `test/dsh-021-contract.test.js` and
+`test/dsh-020-contract.test.js` are retained as the rc.2 and 0.2.0 historical records.

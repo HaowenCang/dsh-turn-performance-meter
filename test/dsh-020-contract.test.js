@@ -114,18 +114,19 @@ test('the historical 0.2.0-rc.2 peer pairing is retained as evidence, and the wo
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   /**
-   * Phase 11.0 moved the working-tree peer to `0.2.1-rc.2`. This file remains
-   * the 0.2.0-rc.2 contract record — every shape assertion below was established
-   * against the reference commit named here — and it must not silently
-   * re-authorise the runtime it was written for. The exact pin for the current
-   * target and its own reference commit live in `test/dsh-021-contract.test.js`;
-   * this assertion is the cross-file guard that the historical record and the
-   * current manifest cannot drift apart.
+   * Phase 11.0 moved the working-tree peer to `0.2.1-rc.2`, and Phase 13.0 moved
+   * it on to `0.2.1-rc.3`. This file remains the 0.2.0-rc.2 contract record —
+   * every shape assertion below was established against the reference commit
+   * named here — and it must not silently re-authorise the runtime it was
+   * written for. The exact pin for the current target and its own reference
+   * commit live in `test/dsh-021-rc3-contract.test.js`; this assertion is the
+   * cross-file guard that the historical record and the current manifest cannot
+   * drift apart.
    */
   assert.equal(REFERENCE_020, '639ed015397290b3745d163aafe02ffee4aa3f84', 'the 0.2.0-rc.2 evidence commit is retained')
 
   const range = manifest.peerDependencies['@deepseek-ai/dsh']
-  assert.equal(range, '0.2.1-rc.2', 'the working tree declares the Phase 11.0 target runtime')
+  assert.equal(range, '0.2.1-rc.3', 'the working tree declares the Phase 13.0 target runtime')
   assert.equal(range === '0.2.0-rc.2', false, 'the historical runtime is no longer the declared peer')
   assert.deepEqual(Object.keys(manifest.peerDependencies), ['@deepseek-ai/dsh'], 'the DSH peer is the only peer')
 
@@ -140,10 +141,9 @@ test('the historical 0.2.0-rc.2 peer pairing is retained as evidence, and the wo
   }
   assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
 
-  // Phase 11.0/11.0R moved the peer to the accepted 0.2.1-rc.2 target, and
-  // v0.1.6 is the release round that ships it: the version and the peer move
-  // together, so the published artifact names the runtime it was verified on.
-  assert.equal(manifest.version, '0.1.6', 'the release round carries the version paired with the 0.2.1-rc.2 peer')
+  // v0.1.6 is the release version paired with the accepted runtime line; a
+  // compatibility migration moves the peer, not the release version.
+  assert.equal(manifest.version, '0.1.6', 'the release version is unchanged by the peer migration')
 })
 
 // ---------------------------------------------------------------------------

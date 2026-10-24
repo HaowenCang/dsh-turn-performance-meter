@@ -22,10 +22,15 @@
  *   `packages/client/ui-conversation/src/client/skeleton/TodoPanel.module.css` identical
  *
  * `src/dsh/**` therefore moved no code, and the Phase 9.2–10.1R.1 metric
- * semantics are untouched. This file is the 0.2.1 normative layer; the
+ * semantics are untouched.
+ *
+ * Phase 13.0 moved the working-tree peer to `0.2.1-rc.3`. This file remains the
+ * 0.2.1-rc.2 record: its wire-shape evidence is not restamped, and only the
+ * cross-file guard below tracks the live peer so the layers cannot drift apart.
+ * The rc.3 normative layer is `test/dsh-021-rc3-contract.test.js`; the
  * historical 0.2.0-rc.2 evidence remains in `test/dsh-020-contract.test.js`,
  * which is deliberately not restamped. What this file pins is the claim the
- * migration actually makes — the wire evidence the plugin consumes on
+ * 0.2.1-rc.2 migration actually made — the wire evidence the plugin consumes on
  * 0.2.1-rc.2 still has the shape the adapter expects:
  *
  *   SessionEvent envelope    `seq` / `time` / `type` / `data`
@@ -112,10 +117,14 @@ function settlementEntry(type, seq, time, options) {
 // Compatibility metadata
 // ---------------------------------------------------------------------------
 
-test('the DSH peer is pinned exactly to the 0.2.1-rc.2 target, with the 0.1.6 release version paired to it', async () => {
+test('the historical 0.2.1-rc.2 peer pairing is retained as evidence, and the working tree peer moved to the rc.3 line', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   /**
+   * Phase 13.0 moved the working-tree peer to `0.2.1-rc.3`. This file remains
+   * the 0.2.1-rc.2 historical record; this assertion is the cross-file guard
+   * that the record and the live declaration cannot drift apart.
+   *
    * Exact version only. `^0.2.1-rc.2`, `~0.2.1-rc.2`, `>=0.2.1-rc.2`,
    * `0.2.x`, `*` and the dual `0.2.0-rc.2 || 0.2.1-rc.2` range are all rejected
    * here. Each of them would admit a runtime this project has never exercised,
@@ -123,7 +132,8 @@ test('the DSH peer is pinned exactly to the 0.2.1-rc.2 target, with the 0.1.6 re
    * the `0.2.0-rc.2` and `0.2.1-rc.2` references.
    */
   const range = manifest.peerDependencies['@deepseek-ai/dsh']
-  assert.equal(range, '0.2.1-rc.2')
+  assert.equal(range, '0.2.1-rc.3', 'the working tree declares the Phase 13.0 target runtime')
+  assert.equal(range === '0.2.1-rc.2', false, 'the historical runtime is no longer the declared peer')
   assert.deepEqual(Object.keys(manifest.peerDependencies), ['@deepseek-ai/dsh'], 'the DSH peer is the only peer')
 
   for (const operator of ['^', '~', '>', '<', '*', '||', 'x', 'X', ' - ']) {
@@ -131,9 +141,9 @@ test('the DSH peer is pinned exactly to the 0.2.1-rc.2 target, with the 0.1.6 re
   }
   assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
 
-  // v0.1.6 is the release round for the accepted 0.2.1-rc.2 target: the peer
-  // and the version move together, and v0.1.5 stays bound to 0.2.0-rc.2.
-  assert.equal(manifest.version, '0.1.6', 'the release version is paired with the 0.2.1-rc.2 peer')
+  // v0.1.6 is the release version paired with the accepted runtime line; a
+  // compatibility migration moves the peer, not the release version.
+  assert.equal(manifest.version, '0.1.6', 'the release version is unchanged by the peer migration')
 })
 
 test('the 0.2.0-rc.2 contract file is retained as historical evidence rather than restamped', async () => {
@@ -147,7 +157,7 @@ test('the 0.2.0-rc.2 contract file is retained as historical evidence rather tha
   assert.match(historical, /DSH 0\.2\.0-rc\.2 compatibility layer/, 'the historical file keeps its Phase 9.3 identity')
   assert.ok(historical.includes(REFERENCE_020), 'the historical file keeps the 0.2.0-rc.2 reference commit')
   assert.ok(
-    historical.includes("assert.equal(range, '0.2.1-rc.2'"),
+    historical.includes("assert.equal(range, '0.2.1-rc.3'"),
     'the historical file carries the current-peer guard so the two files cannot drift apart',
   )
 })
