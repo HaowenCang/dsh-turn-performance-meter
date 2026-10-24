@@ -7,7 +7,68 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
-## Unreleased — DSH 0.2.1-rc.3 compatibility (Phase 13.0 / 13.0R)
+## 0.1.7 — RELEASE PREPARED (awaiting npm publish) — 2026-10-24
+
+**RELEASE PREPARED, NOT PUBLISHED.** Version `0.1.7` is the first release that declares an `engines.dsh` range instead
+of an exact `@deepseek-ai/dsh` peer. The release-prep commit is on `main`; `npm publish`, the Git tag and the GitHub
+Release happen only after the release owner completes npm 2FA (Release Phase B). Until the registry accepts the
+canonical tarball, read every "prepared" statement in this entry as *not yet distributed*.
+
+### Fixes
+
+- **Main agent ↔ subagent navigation no longer freezes the live meter in a stale tool/waiting phase.** Returning from a
+  subagent child (or switching sessions while a turn is live) re-binds the plugin to the visible session's current
+  event-source generation, performs an authoritative revision resync, and re-projects the live phase instead of leaving
+  the previous session's tool stopwatch or waiting state on screen (Phase 12.0; preserved unchanged in 0.1.7).
+- **The event-source subscription is restored after a source-generation replacement.** A new `MutableSessionEventSource`
+  for the same session id is recognized by object identity (not by revision, which restarts at 0); the plugin rebinds,
+  defers adoption until the first authoritative window, and keeps exactly one plugin subscription for the visible
+  session (Phase 12.0).
+- **Retention watches are released when a session scope retires.** Navigating away from a session releases its
+  plugin-owned retention watcher instead of accumulating one watcher per visited session; re-visiting re-arms exactly
+  one. Visited-session historical telemetry is retained, but no live subscription survives the retirement
+  (Phase 12.0R).
+
+### Compatibility
+
+- Compatibility is now declared as `"engines": { "dsh": ">=0.2.1-rc.2 <0.2.2-0" }`. The exact
+  `"peerDependencies": { "@deepseek-ai/dsh": "…" }` declaration is removed from the published manifest; no other DSH
+  peer, compatibility-exemption setting or `engines.node` constraint is added.
+- The host compatibility evaluator gives an own `engines.dsh` range precedence over DSH peers, compares it with semver
+  including prereleases (`includePrerelease: true`), and treats a satisfied range as compatible with no diagnostic and
+  no version exemption. The release uses no `allow-version --accept-risk` step.
+- **DSH `0.2.1-rc.2` and DSH `0.2.1-rc.3` passed real isolated-runtime acceptance for 0.1.7:** disposable profile
+  install, served boot graph with the three client injections, dock seat, one meter root, completed-card tokens equal to
+  the durable turn, main ↔ subagent navigation recovery, and retention-watcher release/re-arm. See
+  `docs/IMPLEMENTATION_LOG.md` Phase A and `docs/DSH_API_NOTES.md` §17.
+- Versions inside the declared range that are not listed above (for example a future `0.2.1-rc.4` or the final `0.2.1`)
+  are **allowed to install by the range decision but have not been device-verified**. This release makes no runtime
+  compatibility claim for them.
+- DSH `0.2.0` series and DSH `0.2.2` series are **not supported**; the evaluator rejects them, and the upper bound is
+  closed (`<0.2.2-0`) rather than open.
+
+### Stability
+
+- No change to TPS, TTFT, token allocation, tool timing, peak statistics, completed-curve geometry or the 100 ms
+  refresh strategy. Production code and both bundles are byte-identical to the accepted Phase 12.0R/13.0 artifact:
+  `client.js` / `lib/client.js` 651,961 bytes, SHA-256
+  `07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`.
+
+### Historical versions
+
+- `v0.1.6` keeps its original exact `"@deepseek-ai/dsh": "0.2.1-rc.2"` declaration. Its npm package, Git tag, GitHub
+  Release and canonical `dsh-turn-performance-meter-0.1.6.tgz` are not modified or restamped.
+- No historical Git tag, npm package or GitHub Release is changed by 0.1.7.
+- `v0.1.7` is the first release to use the `engines.dsh` range; earlier releases keep their exact declarations.
+
+### Verification at release preparation
+
+Deterministic suite **966 tests / 966 pass / 0 fail / 0 skipped / 0 todo** (960 pre-existing + 6 range tests), structure
+check clean, `client.js == lib/client.js` at the accepted 651,961 bytes / SHA-256
+`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`, sanitization check clean, and the frozen constants
+`DEFAULT_PRESENTATION_REFRESH_MS = 100`, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100` unchanged.
+
+## Development record — DSH 0.2.1-rc.3 compatibility (Phase 13.0 / 13.0R)
 
 **Not published, not tagged, not version-bumped.** This entry records the development state on
 `compat/dsh-021-rc3` (fast-forwarded to `main` in Phase 13.0R); `package.json` stays `0.1.6`. It is a runtime-target
@@ -74,10 +135,12 @@ The development target moved from DSH `0.2.1-rc.2` (reference commit
   source, test, bundle or manifest file changed — and no release occurred: version `0.1.6`, exact peer `0.2.1-rc.3`,
   and the published `v0.1.6` artifact unchanged and still bounded to `0.2.1-rc.2`.
 
-## Unreleased — session navigation recovery (Phase 12.0, planned as 0.1.7)
+## Development record — session navigation recovery (Phase 12.0, released in 0.1.7)
 
-**Not published, not tagged, not version-bumped.** This entry records the development state on
-`fix/session-navigation-resync`; `package.json` stays `0.1.6` and the exact peer stays `@deepseek-ai/dsh: 0.2.1-rc.2`.
+**Included in the prepared `0.1.7` release; this section is the development record.** It was written while on
+`fix/session-navigation-resync`, when `package.json` was still `0.1.6` with the exact peer
+`@deepseek-ai/dsh: 0.2.1-rc.2`. Release 0.1.7 carries these fixes forward unchanged and replaces only the compatibility
+declaration (see the 0.1.7 entry above).
 
 Fixed the reported DSH `0.2.1-rc.2` defect where the live meter could stay frozen on a stale phase (tool call /
 waiting for model) after moving between the main agent and a subagent session, even though the agent had advanced.

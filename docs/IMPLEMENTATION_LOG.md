@@ -7088,3 +7088,171 @@ preserved exactly, the external source audit is closed without being misrepresen
 accepted history is fast-forwarded onto `main` with divergence `0 0`. The published `v0.1.6` remains the `0.2.1-rc.2`
 artifact; the working tree remains unreleased at version `0.1.6` on the `0.2.1-rc.3` peer.
 **PASS — PHASE 13.0 INTEGRATED; READY FOR v0.1.7 RELEASE PREP.**
+
+## Release Phase A — v0.1.7 release preparation (2026-10-24)
+
+### 1. Scope
+
+Release preparation only. Nothing is published to npm, no Git tag is created, no GitHub Release is created and no
+release asset is uploaded in this phase; Release Phase B (registry byte verification, annotated tag, GitHub Release,
+three-way byte consistency) starts only after the release owner confirms npm accepted the publish with 2FA.
+
+Production code is frozen: no change to `src/core/**`, `src/client/**`, `src/dsh/**`, `src/host/**`, `index.js`,
+`cordis.patch.yml`, `client.js` or `lib/client.js`. The only expected changes are `package.json`, the compatibility
+contract tests, the new `test/dsh-engine-range.test.js`, and the release documentation. The release artifact is built
+from the committed release source; the canonical tarball is produced once, in Phase A's final step, and is never
+re-packed.
+
+### 2. Baseline verified read-only before any write
+
+| Item | Value |
+|---|---|
+| Branch | `main` |
+| `HEAD` | `1c63b98c5c2d365a382e7b8b74b42360b005af01` |
+| `origin/main` | `1c63b98c5c2d365a382e7b8b74b42360b005af01` |
+| Divergence | `0 0` |
+| Tracked tree | clean |
+| Untracked | the four protected canonical artifacts only: `dsh-turn-performance-meter-0.1.5.tgz` (`9FE55298DA4972399CE6BD6046841C0A228A5E4B9577B01788C5C7D9179A1B6C`) + sidecar, `…-0.1.6.tgz` (`6D1196D226ED93605263407E37CE7C44120576FB57AB476CD4D3F88F2CCB7884`) + sidecar |
+| Existing bundle | `client.js` == `lib/client.js`, 651,961 bytes, SHA-256 `07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69` |
+| npm registry | `0.1.1`–`0.1.6` published; **`0.1.7` absent** (E404) |
+| Git tags | `v0.1.0`–`v0.1.6`; no `v0.1.7` |
+| GitHub Releases | up to `v0.1.6`; no `v0.1.7` (404) |
+
+No reset, clean, rebase, amend or force push is used at any point.
+
+### 3. The one manifest change
+
+```json
+{
+  "version": "0.1.7",
+  "engines": { "dsh": ">=0.2.1-rc.2 <0.2.2-0" }
+}
+```
+
+Removed: `"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.3" }`. No other DSH peer, no `peerDependenciesMeta`, no
+compatibility-exemption configuration and no `engines.node` are added. `exports`, `files`, `scripts`, `publishConfig`,
+`dsh.bundle.patch`, `dsh.client.platform`, `dsh.client.immediately` and the three `dsh.client.inject` packages are
+unchanged.
+
+### 4. Evaluator semantics — verified from the installed implementation and the reference source
+
+`packages/boot/app-boot/src/plugin-compatibility.ts` is byte-identical at the rc.2 (`687f282e…`) and rc.3
+(`1f81c047…`) reference commits (`git diff --stat` empty for it, `compatibility-preflight.ts` and `profile.ts`).
+`profile.ts` (profile-bundle skip) and `compatibility-preflight.ts` (loader-row disable) both call the same
+`evaluatePluginCompatibility`; there is no second installation rule. `satisfies()` is
+`semver.satisfies(runtimeVersion, range, { includePrerelease: true })`; an own `engines.dsh` decides alone and
+`peerDependencies` are ignored while it is present. A matching range returns `undefined` (no diagnostic, no exemption);
+only an unmet requirement produces `requirements: { "engines.dsh": <range> }`. `engines.dsh` is not an npm/pnpm engine
+key, so pnpm does not block the install; the host evaluator is the gate. `allow-version --accept-risk` is not needed
+for any runtime inside the range.
+
+The installed evaluators were executed directly (`dsh-app-boot/lib/index.js` `evaluatePluginCompatibility` +
+`getDshRuntimeVersion`). Both installed runtimes (rc.2 and rc.3 evaluator code) returned the same decisions for the
+v0.1.7 manifest:
+
+| Runtime | Decision |
+|---|---|
+| `0.2.0-rc.2` | REJECT |
+| `0.2.1-rc.1` | REJECT |
+| `0.2.1-rc.2` | ACCEPT |
+| `0.2.1-rc.3` | ACCEPT |
+| `0.2.1-rc.4` | ACCEPT (range only, not device-verified) |
+| `0.2.1` | ACCEPT (range only, not device-verified) |
+| `0.2.2-rc.1` | REJECT |
+| `0.2.2` | REJECT |
+
+Priority was executed with a test-only manifest declaring a valid `engines.dsh` **and** a deliberately mismatched DSH
+peer: compatible on both rc.2 and rc.3, so the peer is ignored. The reverse manifest (failing `engines.dsh`, matching
+peer) rejects with the `engines.dsh` requirement — a matching peer cannot rescue it. The production manifest carries no
+peer at all.
+
+### 5. Tests
+
+- `test/dsh-engine-range.test.js` (new, 6 tests): manifest shape; the eight-row range matrix (host evaluator when
+  resolvable, spec-faithful portable comparator as the self-contained fallback); inclusive rc.2 / exclusive `0.2.2-0`
+  boundaries; `engines.dsh` priority over a mismatched peer; non-DSH peer irrelevance.
+- `test/dsh-021-rc3-contract.test.js`: the current declaration test now pins `0.1.7`, `engines.dsh` exactly, no DSH
+  peer, no `engines.node`; the historical-layer guard tracks the new declaration. All rc.3 wire-shape, dock, injection,
+  retainInfo/generation assertions are unchanged.
+- `test/dsh-021-contract.test.js` and `test/dsh-020-contract.test.js`: wire-shape evidence untouched; only their
+  cross-file working-declaration guard moved from the superseded exact-peer read to the `engines.dsh` read. Their
+  historical reference commits (`687f282e…`, `639ed015…`) are unchanged and no assertion was deleted or weakened.
+- The historical published declaration remains accurate: `v0.1.6` shipped the exact
+  `"@deepseek-ai/dsh": "0.2.1-rc.2"` peer, recorded in the 0.1.6 CHANGELOG entry and the immutable artifacts.
+- Suite: **966 tests, 966 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo** (960 pre-existing + 6 new). Groups re-run
+  individually to prove the protected counts: session navigation **25/25**, resource lifecycle **6/6**, engine range
+  **6/6**.
+
+### 6. Isolated install acceptance — DSH 0.2.1-rc.2 and DSH 0.2.1-rc.3
+
+Two fresh disposable profiles, each in its own `DSH_HOME`, installed a **temporary local** v0.1.7 tarball (never a
+published version): 404,662 bytes, SHA-256
+`98D5BEA31A9FA56A775A971752BFAE6370147C580292817985C88A59E06A26BB`. No existing desktop, web or other user profile was
+used or modified; each host ran on a dedicated port with a dedicated headless Chrome profile under `_release-v017/`.
+
+| Check (both runtimes) | rc.2 | rc.3 |
+|---|---|---|
+| `dsh plugin … add "file:<temp>.tgz"` | exit 0 | exit 0 |
+| Installed version / declaration | `0.1.7`, `engines.dsh`, no peer | same |
+| pnpm lock | `engines: {dsh: '>=0.2.1-rc.2 <0.2.2-0'}`, no DSH peer resolution | same |
+| Served boot graph: plugin row + 3 injections + immediately | PASS | PASS |
+| Served body = installed client.js + 83-byte trailer | PASS | PASS |
+| Installed host evaluator accepts the manifest | PASS (runtime `0.2.1-rc.2`) | PASS (runtime `0.2.1-rc.3`) |
+| No `skippedBundles`, no incompatibility diagnostic | PASS | PASS |
+| No version exemption (`compatibility.json` absent) | PASS | PASS |
+| Dock seat, one `.dsh-tpm-root`, one style, above composer | PASS (7/7) | PASS (7/7) |
+| Real model route `DeepSeek-V4.1-Flash` + `High`, Full access, completed card tokens == durable | PASS | PASS |
+| Main → real subagent child → main navigation: identity rebind + nav resync + `feed == source`, no stuck tool/waiting, one watch, one plugin subscription | PASS (Phase 12.0R scenario, 76 checks, 0 failure) | PASS (R4, 14/14) |
+| Retention release on retirement, one watch re-armed on re-visit | PASS (scenario lifecycle checks) | PASS (R6, 13/13) |
+| Boot-HTTP check count | 19/19 | 19/19 |
+
+No required scenario is NOT_VERIFIED on either runtime. `0.2.1-rc.4` and `0.2.1` remain semver-gate results only and
+are explicitly not claimed as device-verified. Per-runtime evidence: `dev/release-v017/rc2/out/`,
+`dev/release-v017/rc3/out/`, `_release-v017/rc2/evidence/`, `_release-v017/rc3/evidence/` (host logs, boot graph,
+served plugin body, screenshots, run summaries).
+
+### 7. Deterministic gates
+
+```text
+npm run build:client                    PASS — client.js rebuilt from src/, mirrored to lib/client.js
+npm run verify                          PASS — structure OK (14 required files, 16 core modules, 80 test files,
+                                        client bundle fresh, lib/client.js mirrored)
+                                        tests 966 · pass 966 · fail 0 · cancelled 0 · skipped 0 · todo 0
+node scripts/verify-sanitization.mjs    PASS — no personal content, structural evidence preserved
+git diff --check                        clean
+client.js == lib/client.js              651,961 bytes each, SHA-256
+                                        07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69
+test/dsh-engine-range.test.js           6/6
+test/session-navigation-recovery.test.js 25/25 (original navigation suite preserved)
+test/resource-lifecycle.test.js         6/6 (original lifecycle suite preserved)
+frozen constants                        DEFAULT_PRESENTATION_REFRESH_MS = 100, MIN_RATE_SAMPLES = 3,
+                                        MIN_RATE_ELAPSED_MS = 100
+package version / declaration           0.1.7 / engines.dsh >=0.2.1-rc.2 <0.2.2-0, no peerDependencies
+```
+
+The bundle SHA-256 is unchanged from the accepted Phase 12.0R/13.0 artifact; production source, `index.js` and
+`cordis.patch.yml` have no diff. `git diff --stat` for this phase lists only `package.json`, the three contract-test
+layers, the new range test and the four documentation files.
+
+### 8. Git and artifact handling
+
+The release-prep commit is an ordinary commit `chore(release): prepare v0.1.7` on top of the verified
+`1c63b98c5c2d365a382e7b8b74b42360b005af01` baseline, with no merge commit, amend, rebase or force push. Its exact SHA
+and the final `HEAD == origin/main == RELEASE_SOURCE` / divergence `0 0` verification are recorded in the release report
+and local release evidence, because a commit cannot contain its own SHA. The canonical tarball is produced **once**
+after that commit is pushed and the tree is verified clean, from the committed `RELEASE_SOURCE`; it is never re-packed,
+and its byte size, SHA-256, SHA-1, SHA-512 integrity, packed manifest and 8-file allowlist are recorded beside it with a
+`.sha256` sidecar.
+
+Protection: npm publication, Git tag creation, GitHub Release creation and release-asset upload are **not performed** in
+Phase A. `v0.1.6` (npm package, annotated tag, GitHub Release, canonical tarball `6D1196D2…7884`) and `v0.1.5` (canonical
+tarball `9FE55298…1B6C`) are not modified. The release owner executes the single local `npm publish` command and
+handles npm 2FA; Release Phase B follows only after the registry accepts it.
+
+### 9. Verdict
+
+**PASS — v0.1.7 RELEASE PREPARED; AWAITING NPM 2FA.** The prepared manifest declares exactly
+`engines.dsh = ">=0.2.1-rc.2 <0.2.2-0"` with no DSH peer; the installed host evaluators accept it on both device-verified
+runtimes and reject the `0.2.0`/`0.2.2` lines; the deterministic suite is 966/966 with 0 skipped/todo; the bundle is
+byte-identical to the accepted artifact; and both isolated runtimes passed install, boot, dock, completed-state,
+main/subagent navigation and retention-watcher acceptance. No npm publish, Git tag or GitHub Release has occurred.

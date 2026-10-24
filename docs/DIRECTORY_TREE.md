@@ -162,6 +162,10 @@ dsh-turn-performance-meter/
 │   ├── dsh-021-contract.test.js       Phase 11.0: the 0.2.1-rc.2 compatibility layer — the same wire-contract matrix
 │   │                                  re-pinned against the new reference commit, the retained 0.2.0 evidence, the
 │   │                                  client injection/dock declaration, frozen cadence and rate gates
+│   ├── dsh-021-rc3-contract.test.js    Phase 13.0: the 0.2.1-rc.3 layer — rc.3 reference, injections/bundle patch,
+│   │                                  dock seat, wire evidence, retainInfo/generation semantics, frozen invariants
+│   ├── dsh-engine-range.test.js        Release Phase A: v0.1.7 `engines.dsh` range — manifest shape, the eight-row
+│   │                                  boundary matrix via the installed host evaluator, engines-over-peer priority
 │   ├── background-settlement.test.js  Phase 9.3.1: a settlement ingested with no projection in between must project
 │   │                                  the newest settled turn first; completed identity and memo behaviour
 │   ├── rate-publication.test.js       Phase 9.4: the shared rate-publication policy as a pure function

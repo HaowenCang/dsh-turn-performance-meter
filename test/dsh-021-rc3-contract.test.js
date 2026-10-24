@@ -13,9 +13,15 @@
  * changes in this phase. The `src/client/**` seat, the wire-evidence adapter and
  * the metric arithmetic are the Phase 12.0/12.0R code, unchanged.
  *
+ * Release Phase A (v0.1.7) then replaced the exact peer with the
+ * `engines.dsh` range `>=0.2.1-rc.2 <0.2.2-0`, which admits both rc.2 and rc.3
+ * (and later non-breaking 0.2.1-line runtimes). The wire evidence below was
+ * established on rc.3 and is not restamped; only the live compatibility
+ * declaration moved.
+ *
  * What this file pins:
  *
- *   compatibility metadata   exact peer `0.2.1-rc.3`, release version still 0.1.6
+ *   compatibility metadata   v0.1.7 `engines.dsh` range, no DSH peer, no engines.node
  *   evidence boundary        the rc.2 and 0.2.0 layers stay as historical records
  *   shipped declaration      three Cordis injections, bundle patch, one dock seat
  *   host entry               the bundle row id/name the rc.3 loader resolves
@@ -87,32 +93,30 @@ const clientBundle = () => readFile(new URL('../client.js', import.meta.url), 'u
 // Compatibility metadata and the evidence boundary
 // ---------------------------------------------------------------------------
 
-test('the DSH peer is pinned exactly to 0.2.1-rc.3 while the release version stays 0.1.6', async () => {
+test('the v0.1.7 manifest declares the exact engines.dsh range, with no DSH peer and no node engine', async () => {
   const manifest = await manifestOf()
 
   /**
-   * Exact version only. `^0.2.1-rc.3`, `~0.2.1-rc.3`, `>=0.2.1-rc.3`, `0.2.x`,
-   * `*` and the dual `0.2.1-rc.2 || 0.2.1-rc.3` range are all rejected here: each
-   * would admit a runtime this project has not exercised, and the dual range
-   * would erase the evidence boundary between the rc.2 and rc.3 references.
+   * Release Phase A moved the compatibility declaration from the exact Phase
+   * 13.0 peer to one `engines.dsh` range. The bounds are pinned literally:
+   * `*`, `>=0.2.1`, `^0.2.1-rc.2` and any `||` union would admit runtimes the
+   * project has not bounded, and an open upper bound would silently admit
+   * 0.2.2+.
    */
-  const range = manifest.peerDependencies['@deepseek-ai/dsh']
-  assert.equal(range, '0.2.1-rc.3')
-  assert.deepEqual(Object.keys(manifest.peerDependencies), ['@deepseek-ai/dsh'], 'the DSH peer is the only peer')
-
-  for (const operator of ['^', '~', '>', '<', '*', '||', 'x', 'X', ' - ']) {
-    assert.equal(range.includes(operator), false, `the peer must not contain the range syntax ${JSON.stringify(operator)}`)
-  }
-  assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
+  assert.equal(manifest.version, '0.1.7', 'the release version is the prepared v0.1.7 release')
+  assert.equal(manifest.engines?.dsh, '>=0.2.1-rc.2 <0.2.2-0', 'the range is exact in both directions')
+  assert.deepEqual(manifest.engines, { dsh: '>=0.2.1-rc.2 <0.2.2-0' }, 'engines.dsh is the only engine entry')
+  assert.equal(Object.hasOwn(manifest.engines, 'node'), false, 'no engines.node constraint is added without evidence')
 
   /**
-   * The compatibility migration moves the peer and nothing else in the
-   * distribution metadata: v0.1.6 stays the release version paired with the
-   * accepted runtime line, and the gate remains the peer rather than an
-   * `engines.dsh` range (the rc.3 checker prefers `engines.dsh` when declared).
+   * The superseded exact peer is removed, not left beside the engines range.
+   * Leaving it would keep a contradictory exact requirement that pnpm would
+   * still try to resolve even though the host evaluator ignores it once
+   * `engines.dsh` is present.
    */
-  assert.equal(manifest.version, '0.1.6', 'the release version is not bumped by a compatibility migration')
-  assert.equal(manifest.engines, undefined, 'the compatibility gate is the exact peer, not an engines.dsh declaration')
+  assert.equal(manifest.peerDependencies, undefined, 'the exact @deepseek-ai/dsh peer is removed')
+  assert.equal(manifest.version === '0.1.6', false, 'the unreleased 0.1.6 working-tree state is superseded')
+
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
   assert.deepEqual(manifest.files, ['index.js', 'client.js', 'lib/client.js', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE'])
 })
@@ -131,7 +135,7 @@ test('the 0.2.1-rc.3 reference commit is pinned beside the three historical comm
   }
 })
 
-test('the rc.2 and 0.2.0 contract layers are retained as historical evidence with the current-peer guard', async () => {
+test('the rc.2 and 0.2.0 contract layers are retained as historical evidence with the current-declaration guard', async () => {
   /**
    * A migration may not rewrite the evidence for the runtime it verified. The
    * historical layers keep their identity line and their own reference commit;
@@ -141,19 +145,22 @@ test('the rc.2 and 0.2.0 contract layers are retained as historical evidence wit
   const rc2Layer = await readFile(new URL('./dsh-021-contract.test.js', import.meta.url), 'utf8')
   assert.match(rc2Layer, /DSH 0\.2\.1-rc\.2 compatibility layer/, 'the rc.2 layer keeps its Phase 11.0 identity')
   assert.ok(rc2Layer.includes(REFERENCE_021_RC2), 'the rc.2 layer keeps its reference commit')
+  const declarationGuard = "assert.equal(manifest.engines?.dsh, '>=0.2.1-rc.2 <0.2.2-0'"
   assert.ok(
-    rc2Layer.includes("assert.equal(range, '0.2.1-rc.3'"),
-    'the rc.2 layer carries the current-peer guard so the layers cannot drift apart',
+    rc2Layer.includes(declarationGuard),
+    'the rc.2 layer carries the current-declaration guard so the layers cannot drift apart',
   )
 
   const rc20Layer = await readFile(new URL('./dsh-020-contract.test.js', import.meta.url), 'utf8')
   assert.match(rc20Layer, /DSH 0\.2\.0-rc\.2 compatibility layer/, 'the 0.2.0 layer keeps its Phase 9.3 identity')
   assert.ok(rc20Layer.includes(REFERENCE_020), 'the 0.2.0 layer keeps its reference commit')
-  assert.ok(rc20Layer.includes("assert.equal(range, '0.2.1-rc.3'"), 'the 0.2.0 layer carries the current-peer guard')
+  assert.ok(rc20Layer.includes(declarationGuard), 'the 0.2.0 layer carries the current-declaration guard')
 
   // No stale working-tree peer claim survives in a layer that is still normative.
   for (const layer of [rc2Layer, rc20Layer]) {
-    assert.equal(layer.includes("assert.equal(range, '0.2.1-rc.2'"), false, 'the normative peer guard is the rc.3 target')
+    assert.equal(layer.includes('const range = manifest.peerDependencies'), false, 'the live guard is not a peer read')
+    assert.equal(layer.includes("assert.equal(range, '0.2.1-rc.2'"), false, 'the superseded exact pin is gone')
+    assert.equal(layer.includes("assert.equal(range, '0.2.1-rc.3'"), false, 'the superseded exact pin is gone')
   }
 })
 

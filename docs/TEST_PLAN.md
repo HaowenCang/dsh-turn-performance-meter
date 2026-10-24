@@ -1341,3 +1341,56 @@ test changed in this round. `npm run verify` (structure + full runner) is green;
 passes; `git diff --check` is clean; `client.js` is byte-identical to `lib/client.js` at 629,459 bytes, SHA-256
 `BA6F8862D56EAA47D4D7DD27DAAE69CAF07983C0F5418B2E51BB8E22603E6EC1`; the frozen constants are unchanged. Test totals
 therefore carry over exactly: this phase proves the runtime acceptance item, not a new deterministic surface.
+
+## 19. Release Phase A — v0.1.7 `engines.dsh` range and dual-runtime acceptance
+
+### 19.1 What this phase changes
+
+Only the compatibility declaration and its evidence change. `package.json` becomes version `0.1.7` with
+`"engines": { "dsh": ">=0.2.1-rc.2 <0.2.2-0" }`, and the exact `@deepseek-ai/dsh` peer is removed. No production code,
+no bundle bytes and no metric/rendering/lifecycle semantics change. Historical compatibility layers keep their wire
+evidence and reference commits; only their working-declaration guards move to `engines.dsh`.
+
+### 19.2 Deterministic matrix
+
+| Surface | Tests | Result |
+|---|---|---|
+| `test/dsh-engine-range.test.js` (new) | 6 | 6/6 PASS — manifest shape; eight-row range matrix; inclusive rc.2 / exclusive `0.2.2-0`; `engines.dsh` priority over a mismatched peer; non-DSH peer irrelevance |
+| `test/dsh-021-rc3-contract.test.js` (updated metadata) | 14 (file total) | PASS — v0.1.7 `engines.dsh`, no peer, no `engines.node`; all rc.3 wire/dock/retention assertions unchanged |
+| `test/dsh-021-contract.test.js` (updated cross-file guard) | 17 (file total) | PASS — rc.2 wire evidence untouched; historical `687f282e…` retained |
+| `test/dsh-020-contract.test.js` (updated cross-file guard) | 14 (file total) | PASS — 0.2.0 evidence untouched; historical `639ed015…` retained |
+| `test/session-navigation-recovery.test.js` (protected original) | 25 | 25/25 PASS |
+| `test/resource-lifecycle.test.js` (protected original) | 6 | 6/6 PASS |
+
+Full suite: **966 tests, 966 pass, 0 fail, 0 cancelled, 0 skipped, 0 todo** (960 pre-existing + 6 new).
+
+### 19.3 Evaluator and version gate
+
+The four accept directions (`0.2.1-rc.2`, `0.2.1-rc.3`, `0.2.1-rc.4`, `0.2.1`) and four reject directions
+(`0.2.0-rc.2`, `0.2.1-rc.1`, `0.2.2-rc.1`, `0.2.2`) were decided by the installed host evaluator, not by a reimplemented
+comparator; the portable mirror in the committed test agrees with every row. Priority: a valid `engines.dsh` plus a
+deliberately mismatched DSH peer is accepted (the peer is ignored); a failing `engines.dsh` plus a matching peer is
+rejected on the engines requirement.
+
+### 19.4 Real-runtime acceptance (reported, not a deterministic substitute)
+
+| Runtime | Checks | Result |
+|---|---|---|
+| DSH `0.2.1-rc.3` | boot 20/20, R4 14/14, R6 13/13, boot-HTTP 19/19, dock 7/7 | **73/73 PASS**, 0 FAIL, 0 NOT OBSERVED |
+| DSH `0.2.1-rc.2` | Phase 12.0R scenario 76 checks, boot-HTTP 19/19, dock 7/7 | **PASS**, 0 failure |
+
+The acceptance covers install from a temporary local tarball (not a published version), served boot graph with the three
+Cordis injections, no `skippedBundles`, no version exemption, dock/one-root, completed-card tokens equal to the durable
+turn, main↔subagent navigation recovery, and retention-watcher release/re-arm on both runtimes. `0.2.1-rc.4` and
+`0.2.1` are **range decisions only** and are not reported as device-verified.
+
+### 19.5 Limits and evidence classes
+
+- The real-runtime results are local **REAL DSH OBSERVATION** evidence under `dev/release-v017/` and `_release-v017/`
+  (git-local-excluded), not CI and not an independent replay.
+- No existing desktop/web/user profile is used or modified; each runtime has its own disposable `DSH_HOME`, profile,
+  port and headless Chrome profile.
+- The `0.2.1-rc.4` and `0.2.1` rows are semver gate results, not runtime acceptance. The `0.2.0` and `0.2.2` lines are
+  rejected.
+- The canonical release tarball is produced after the release-prep commit from the verified clean source; it is not the
+  temporary acceptance tarball.

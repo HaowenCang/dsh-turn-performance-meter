@@ -834,3 +834,173 @@ exact peer pins exactly one runtime by design. The recorded corpora keep the ver
 `test/dsh-021-rc3-contract.test.js` is the narrow layer that asserts the wire shapes, the metadata and the
 `retainInfo`/generation semantics against the rc.3 target; `test/dsh-021-contract.test.js` and
 `test/dsh-020-contract.test.js` are retained as the rc.2 and 0.2.0 historical records.
+
+## 17. Release Phase A — v0.1.7 `engines.dsh` compatibility range
+
+| Item | Value |
+|---|---|
+| Status | **RELEASE PREPARED — not published to npm, not tagged, no GitHub Release** |
+| Release version | `0.1.7` |
+| Live declaration | `"engines": { "dsh": ">=0.2.1-rc.2 <0.2.2-0" }` |
+| Removed declaration | `"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.3" }` (and the superseded exact `0.2.1-rc.2` pin it replaced) |
+| Device-verified runtimes | DSH `0.2.1-rc.2` and DSH `0.2.1-rc.3` — isolated install + real-browser acceptance |
+| Range-decision only | DSH `0.2.1-rc.4`, DSH `0.2.1` — semver decision, **not** device-verified |
+| Unsupported | the `0.2.0` line and the `0.2.2` line |
+| Version exemption | none used; `allow-version --accept-risk` is not part of this release |
+
+### 17.1 Why the declaration moved from an exact peer to `engines.dsh`
+
+The exact peer worked, but it forced a new plugin release for every DSH version on the same compatible line: v0.1.6
+declared exact `0.2.1-rc.2`, the Phase 13.0 working tree declared exact `0.2.1-rc.3`, and neither could load on the
+other runtime even though every consumed declaration is byte-identical (§16). The host evaluator already supported an
+own `engines.dsh` range that decides alone; v0.1.7 therefore declares one bounded range and removes the DSH peer
+entirely. The bounds are deliberate: `>=0.2.1-rc.2` keeps the accepted rc.2 floor, `<0.2.2-0` excludes the whole
+`0.2.2` line (the `-0` sentinel sorts below every real `0.2.2` prerelease and below `0.2.2` itself).
+
+### 17.2 Evaluator semantics — verified, not assumed
+
+The evaluator is `packages/boot/app-boot/src/plugin-compatibility.ts`. It is **byte-identical** between the rc.2
+reference (`687f282e8625c6b8d11ff58211a90524be2e4317`) and the rc.3 reference
+(`1f81c047fc48fa190a683e469daa699857e9afe8`): `git diff --stat 687f282e..1f81c047 --
+packages/boot/app-boot/src/plugin-compatibility.ts packages/boot/app-boot/src/compatibility-preflight.ts
+packages/boot/app-boot/src/profile.ts` is empty. `compatibility-preflight.ts` and `profile.ts` call the same evaluator;
+there is no second installation rule.
+
+The precedence and comparison are, in the installed source:
+
+```ts
+function satisfies(runtimeVersion: string, range: string): boolean {
+  return range.trim() !== '' && semver.satisfies(runtimeVersion, range, { includePrerelease: true })
+}
+function unmetRequirements(fields, runtimeVersion) {
+  const engines = Object.hasOwn(fields, 'engines') ? objectOf(fields.engines, 'Plugin manifest engines') : {}
+  if (Object.hasOwn(engines, 'dsh')) {
+    const range = engines.dsh
+    if (typeof range !== 'string') throw new Error('Plugin manifest engines.dsh must be a string')
+    return satisfies(runtimeVersion, range) ? {} : { 'engines.dsh': range }
+  }
+  if (!Object.hasOwn(fields, 'peerDependencies')) return {}
+  // … every @deepseek-ai/dsh / @deepseek-ai/dsh-* peer must match
+}
+```
+
+Confirmed semantics for this release:
+
+- an own `engines.dsh` **decides alone**; `peerDependencies` are ignored when it is present;
+- the comparison is semver, with **`includePrerelease: true`**;
+- an unmet `engines.dsh` is reported as `requirements: { "engines.dsh": <range> }` and is the only condition that
+  skips a profile bundle (`profile.ts`) or disables a loader row (`compatibility-preflight.ts`);
+- a matching range returns `undefined` — no diagnostic, no exemption, no `allow-version --accept-risk` step;
+- `engines.dsh` is not an npm/pnpm engine key (`engines.node` / `engines.npm` / `engines.pnpm` are the package-manager
+  keys), so pnpm does not block the install on it; the host evaluator is the gate.
+
+The installed evaluator was executed directly, from both isolated toolchains, rather than reimplemented:
+`@deepseek-ai/dsh-app-boot/lib/index.js` exposes `getDshRuntimeVersion()` and `evaluatePluginCompatibility()`; the rc.2
+install reports `0.2.1-rc.2` and the rc.3 install reports `0.2.1-rc.3`.
+
+### 17.3 Version matrix — executed against the installed evaluator
+
+The v0.1.7 manifest was passed to `evaluatePluginCompatibility(manifest, {}, runtimeVersion)` with both installed
+evaluators; both returned the same decisions.
+
+| DSH runtime | Requirement decision | Interpretation |
+|---|---|---|
+| `0.2.0-rc.2` | **REJECT** | below the accepted floor |
+| `0.2.1-rc.1` | **REJECT** | below the accepted floor |
+| `0.2.1-rc.2` | **ACCEPT** | device-verified (this release) |
+| `0.2.1-rc.3` | **ACCEPT** | device-verified (this release) |
+| `0.2.1-rc.4` | **ACCEPT** | range decision only — **not** device-verified |
+| `0.2.1` | **ACCEPT** | range decision only — **not** device-verified |
+| `0.2.2-rc.1` | **REJECT** | above the capped line |
+| `0.2.2` | **REJECT** | above the capped line |
+
+Each REJECT returned exactly `requirements: { "engines.dsh": ">=0.2.1-rc.2 <0.2.2-0" }`; each ACCEPT returned
+`undefined`. `0.2.1-rc.4` and `0.2.1` are statements about the range, not runtime acceptance.
+
+### 17.4 Precedence test — the host's own implementation wins
+
+A test-only manifest declaring both fields was evaluated by the installed host evaluator:
+
+| Test manifest | Runtime | Result |
+|---|---|---|
+| `engines.dsh = ">=0.2.1-rc.2 <0.2.2-0"` **and** peer `"@deepseek-ai/dsh": "0.0.0-deliberately-mismatched"` | `0.2.1-rc.2`, `0.2.1-rc.3` | **COMPATIBLE** — the mismatched peer is ignored |
+| `engines.dsh = "^9.9.9"` **and** peer `"@deepseek-ai/dsh": "0.2.1-rc.2"` | `0.2.1-rc.2` | **REJECT**, `requirements: { "engines.dsh": "^9.9.9" }` — a matching peer cannot rescue a failing engines range |
+| no `engines`, peer `"@deepseek-ai/dsh": "0.2.1-rc.2"` | `0.2.1-rc.2` / `0.2.1-rc.3` | ACCEPT / REJECT — the documented peer-only fallback is unchanged |
+
+The production manifest is different from these test manifests on purpose: it carries **no** `peerDependencies` at all.
+
+### 17.5 Committed tests
+
+- `test/dsh-engine-range.test.js` (new) pins the manifest shape, the eight-row range matrix, the inclusive/exclusive
+  bounds, the `engines.dsh` priority rule, and the non-DSH-peer irrelevance. It resolves the installed host evaluator
+  from `DSH_APP_BOOT_LIB` or the sibling isolated toolchains and uses it for the decision; a spec-faithful portable
+  comparator keeps the same assertions self-contained when no installed evaluator is resolvable, so no test is
+  skipped or weakened.
+- `test/dsh-021-rc3-contract.test.js` (the rc.3 normative layer) now pins the v0.1.7 manifest: `engines.dsh` exact,
+  no `peerDependencies`, no `engines.node`, release version `0.1.7`.
+- `test/dsh-021-contract.test.js` and `test/dsh-020-contract.test.js` stay as the rc.2 and 0.2.0 historical layers.
+  Their wire-shape evidence is untouched; only their cross-file working-declaration guard changed, from the superseded
+  exact-peer read to the `engines.dsh` read. No old test was deleted or weakened.
+- Suite: **966 tests, 966 pass, 0 fail, 0 skipped, 0 todo** (960 pre-existing + 6 in the new range file).
+
+### 17.6 Isolated install acceptance — two disposable runtimes
+
+Two fresh, disposable profiles were created in their own `DSH_HOME` directories and each received the temporary local
+v0.1.7 tarball (never a published version):
+
+| Item | rc.2 profile | rc.3 profile |
+|---|---|---|
+| Toolchain | `_phase11-runtime/dsh-0.2.1-rc.2` | `_phase13-runtime/dsh-0.2.1-rc.3` |
+| `DSH_HOME` | `_release-v017/rc2/dsh-home` | `_release-v017/rc3/dsh-home` |
+| Profile | `tpm-v017-rc2` | `tpm-v017-rc3` |
+| Host port | `50251` | `50252` |
+| Headless CDP port | `9251` | `9252` |
+| Install command | `dsh plugin --profile tpm-v017-rc2 add "file:<temp>.tgz"` | `dsh plugin --profile tpm-v017-rc3 add "file:<temp>.tgz"` |
+| Install result | exit 0, `+ dsh-turn-performance-meter` | exit 0, `+ dsh-turn-performance-meter` |
+| Installed manifest | `0.1.7`, `engines.dsh` exact, **no peer**, no exemption | same |
+| pnpm lock | records `engines: {dsh: '>=0.2.1-rc.2 <0.2.2-0'}`, no peer resolution | same |
+
+Both hosts then passed the same checks (all **PASS**, no NOT OBSERVED item):
+
+- token URL serves the SPA (200) and the token-less root is fenced (401);
+- the plugin row is present in the served `__DSH_BOOT__` graph with `inject` = the three Cordis packages
+  (`dsh-api-session-controller`, `dsh-client-locale`, `dsh-client-ui-conversation`) and `immediately: true`; all three
+  injected rows are present;
+- the served plugin body is the installed `client.js` plus the 83-byte module trailer, and the installed client is
+  byte-identical to the accepted bundle (`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`);
+- the installed host evaluator accepts the installed manifest; `skippedBundles` contains no plugin and the host logs
+  contain no `skipping profile bundle` / `is incompatible with dsh` diagnostic; `compatibility.json` does not exist
+  (no exemption);
+- real browser: `[data-slot="conversation.input.dock"]` present, exactly one `.dsh-tpm-root` inside it, one plugin style
+  element, seat above and spanning the composer column;
+- real model turns on both runtimes: model route `DeepSeek-V4.1-Flash` + `High`, Full access, a completed card whose
+  tokens equal the durable turn;
+- published navigation/lifecycle scenarios on both runtimes: main → real subagent child → main round trips with
+  identity rebind + navigation resync, `feedRevision == lastSourceRevision`, one retention watch, one active plugin
+  subscription, no stuck tool/waiting state, retirement releases the watch and re-visit re-arms exactly one.
+
+Per-runtime results: rc.3 — boot `20/20`, R4 navigation `14/14`, R6 retention `13/13`, boot-HTTP `19/19`, dock `7/7`;
+rc.2 — published Phase 12.0R scenario `PASS` (76 checks, 0 failure), boot-HTTP `19/19`, dock `7/7`. Evidence is local,
+under the git-local-excluded `dev/release-v017/` and `_release-v017/` (host logs, served page/boot graph, served plugin
+body, screenshots, run summaries). No test was used as a substitute for a real-runtime observation, and no unexecuted
+scenario is claimed as executed.
+
+### 17.7 Claim boundary
+
+- `0.2.1-rc.2` and `0.2.1-rc.3` are **device-verified** for v0.1.7 by the acceptance above.
+- `0.2.1-rc.4` and `0.2.1` are **range decisions only**. The range deliberately allows install on future
+  non-breaking `0.2.1`-line runtimes, but those have not been exercised; no device compatibility is claimed for them.
+- The `0.2.0` line and the `0.2.2` line are **not supported** — the evaluator rejects them.
+- The range is not a wildcard and has a closed upper bound; `*`, `>=0.2.1`, `^0.2.1-rc.2` and `||` unions were rejected
+  as release declarations.
+
+### 17.8 Historical releases and artifacts
+
+- `v0.1.6` remains published with its original exact peer `"@deepseek-ai/dsh": "0.2.1-rc.2"`; it is **not** restamped
+  or re-scoped, and its npm package, Git tag, GitHub Release and canonical tarball are untouched.
+- `v0.1.7` is the first release that declares an `engines.dsh` range. At this point it is **RELEASE PREPARED**, not
+  published: no npm publish, no Git tag, no GitHub Release, no uploaded asset.
+- The release-prep commit and this documentation do not change production source or either bundle: `client.js` /
+  `lib/client.js` stay 651,961 bytes at
+  `07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`, and the frozen constants remain
+  `DEFAULT_PRESENTATION_REFRESH_MS = 100`, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`.

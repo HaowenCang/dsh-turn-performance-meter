@@ -1963,3 +1963,42 @@ v0.1.6 release prep.**
 recovery behaviour is unchanged; the additional lifecycle fix commit on `fix/session-navigation-resync` releases the
 `retainInfo` watcher of an inactive retired session and re-arms one on activation, with a 120-session deterministic
 regression and focused real DSH acceptance. No release has occurred; v0.1.7 remains future work.
+
+## Release Phase A — v0.1.7 release preparation (2026-10-24)
+
+- [x] **Baseline verified read-only.** `main`; `HEAD == origin/main == 1c63b98c5c2d365a382e7b8b74b42360b005af01`;
+      divergence `0 0`; tracked tree clean; the four canonical `0.1.5`/`0.1.6` artifacts unchanged and matching their
+      sidecars; bundle `07F717FA…7ED69`; npm has `0.1.1`–`0.1.6` and no `0.1.7`; GitHub has `v0.1.0`–`v0.1.6` and no
+      `v0.1.7` tag/Release.
+- [x] **Manifest migrated to the bounded `engines.dsh` range.** `version` `0.1.7`; `engines = { dsh:
+      ">=0.2.1-rc.2 <0.2.2-0" }`; exact DSH `peerDependencies` removed; no other peer, no exemption config, no
+      `engines.node`; all other manifest fields preserved.
+- [x] **Evaluator semantics verified, not assumed.** Installed `dsh-app-boot` evaluator (rc.2 and rc.3, identical source)
+      gives `engines.dsh` precedence, uses `semver.satisfies(..., { includePrerelease: true })`, needs no
+      `allow-version --accept-risk`, and has no second installation blocker. Eight-row matrix matches the expected
+      ACCEPT/REJECT table; a test-only manifest with a valid engines range and a mismatched peer is accepted, and the
+      reverse is rejected on the engines requirement.
+- [x] **Contract tests updated without weakening.** Current-version assertions moved to `0.1.7` + `engines.dsh`;
+      historical rc.2/0.2.0 wire-shape evidence and reference commits retained; new `test/dsh-engine-range.test.js`
+      (6 tests). Suite **966/966, 0 fail, 0 skipped, 0 todo**; navigation **25/25**, resource lifecycle **6/6**.
+- [x] **Deterministic gates.** `npm run build:client`, `npm run verify`, `node scripts/verify-sanitization.mjs`,
+      `git diff --check` all pass; `client.js == lib/client.js` 651,961 B SHA-256 `07F717FA…7ED69`; frozen constants
+      unchanged; no production-code or bundle byte change.
+- [x] **Isolated dual-runtime install acceptance.** Disposable profiles on DSH `0.2.1-rc.2` and `0.2.1-rc.3` installed a
+      temporary local v0.1.7 tarball (404,662 B, SHA-256 `98D5BEA3…26BB`), booted real hosts, passed install/boot graph,
+      3 client injections, no `skippedBundles`, no exemption, dock/one-root, real model completed card, main↔subagent
+      navigation recovery, and retention-watcher release/re-arm. rc.3: boot 20/20, R4 14/14, R6 13/13, HTTP 19/19, dock
+      7/7. rc.2: Phase 12.0R scenario PASS (76 checks, 0 failure), HTTP 19/19, dock 7/7. `0.2.1-rc.4`/`0.2.1` remain
+      semver-gate-only, not device-verified.
+- [x] **Docs updated.** README, CHANGELOG, `docs/DSH_API_NOTES.md` §17, this log, TEST_PLAN, TASKS and DIRECTORY_TREE
+      mark v0.1.7 as RELEASE PREPARED (not published).
+- [x] **Release-prep commit + push.** Ordinary commit `chore(release): prepare v0.1.7`; `HEAD == origin/main ==
+      RELEASE_SOURCE`; divergence `0 0`; historical tags/packages/Releases untouched.
+- [x] **Canonical tarball produced once** from the committed, clean RELEASE_SOURCE, with SHA-256 sidecar and recorded
+      SHA-256/SHA-1/SHA-512/packed manifest/file list. No second pack.
+- [ ] **npm publish — NOT executed in Phase A.** The release owner runs the single local publish command and completes
+      npm 2FA.
+- [ ] **Tag / GitHub Release / Phase B — NOT executed.** Annotated tag, GitHub Release and three-way byte verification
+      start only after the registry accepts the publish.
+
+**Status: PASS — v0.1.7 RELEASE PREPARED; AWAITING NPM 2FA.** No npm publish, Git tag or GitHub Release has occurred.

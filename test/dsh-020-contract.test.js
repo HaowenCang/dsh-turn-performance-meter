@@ -39,7 +39,7 @@
  *   stream chunks            `reasoning-delta`, `text-delta`, `tool-call-delta`, `usage`, `finish`
  *   transient retirement     the bare `settle-assistant`
  *   window changes           `replace`, `prepend`, `append`, `settle-assistant`
- *   compatibility metadata   `peerDependencies` pinned exactly
+ *   compatibility metadata   the historical exact peer and the live `engines.dsh` guard
  *
  * Declaration sites for each group are recorded in `docs/DSH_API_NOTES.md` §14.
  */
@@ -110,40 +110,41 @@ function settlementEntry(type, seq, time, options) {
 // Compatibility metadata
 // ---------------------------------------------------------------------------
 
-test('the historical 0.2.0-rc.2 peer pairing is retained as evidence, and the working tree peer moved to the 0.2.1 line', async () => {
+test('the historical 0.2.0-rc.2 peer pairing is retained as evidence, and the working tree declares the v0.1.7 engines.dsh range', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   /**
-   * Phase 11.0 moved the working-tree peer to `0.2.1-rc.2`, and Phase 13.0 moved
-   * it on to `0.2.1-rc.3`. This file remains the 0.2.0-rc.2 contract record —
-   * every shape assertion below was established against the reference commit
-   * named here — and it must not silently re-authorise the runtime it was
-   * written for. The exact pin for the current target and its own reference
+   * Phase 11.0 moved the working-tree peer to `0.2.1-rc.2`, Phase 13.0 moved it
+   * on to `0.2.1-rc.3`, and release Phase A (v0.1.7) replaced the exact-peer
+   * model with the `engines.dsh` range. This file remains the 0.2.0-rc.2
+   * contract record — every shape assertion below was established against the
+   * reference commit named here — and it must not silently re-authorise the
+   * runtime it was written for. The live declaration and its own reference
    * commit live in `test/dsh-021-rc3-contract.test.js`; this assertion is the
    * cross-file guard that the historical record and the current manifest cannot
    * drift apart.
    */
   assert.equal(REFERENCE_020, '639ed015397290b3745d163aafe02ffee4aa3f84', 'the 0.2.0-rc.2 evidence commit is retained')
 
-  const range = manifest.peerDependencies['@deepseek-ai/dsh']
-  assert.equal(range, '0.2.1-rc.3', 'the working tree declares the Phase 13.0 target runtime')
-  assert.equal(range === '0.2.0-rc.2', false, 'the historical runtime is no longer the declared peer')
-  assert.deepEqual(Object.keys(manifest.peerDependencies), ['@deepseek-ai/dsh'], 'the DSH peer is the only peer')
+  assert.equal(manifest.version, '0.1.7', 'the working tree is the prepared v0.1.7 release')
+  assert.equal(manifest.engines?.dsh, '>=0.2.1-rc.2 <0.2.2-0', 'the working tree declares the v0.1.7 engines.dsh range')
+  assert.deepEqual(manifest.engines, { dsh: '>=0.2.1-rc.2 <0.2.2-0' }, 'the dsh range is the only engine constraint')
+  assert.equal(Object.hasOwn(manifest.engines, 'node'), false, 'no engines.node constraint is added without evidence')
+  assert.equal(manifest.peerDependencies, undefined, 'the superseded exact DSH peer is removed from the published manifest')
 
   /**
-   * Exact version only. `^0.2.1-rc.2`, `>=0.2.1-rc.2`, `0.2.x`, `*` and the
-   * dual `0.2.0-rc.2 || 0.2.1-rc.2` range are all rejected here. Each of them
-   * would admit a runtime this project has never exercised, and the dual range
-   * in particular would blur the evidence boundary between the two references.
+   * The historical pairing was an **exact** version and is no longer the
+   * published declaration. None of the superseded exact pins may survive as
+   * the live requirement, and the range may not be widened to a wildcard, an
+   * open upper bound, or a union that would blur the evidence boundary between
+   * the 0.2.0-rc.2 and 0.2.1-rc.2 references.
    */
-  for (const operator of ['^', '~', '>', '<', '*', '||', 'x', 'X', ' - ']) {
-    assert.equal(range.includes(operator), false, `the peer must not contain the range syntax ${JSON.stringify(operator)}`)
+  assert.equal(manifest.engines.dsh === '0.2.0-rc.2', false, 'the historical runtime is no longer an exact peer')
+  assert.equal(manifest.engines.dsh === '0.2.1-rc.2', false, 'the 0.2.1-rc.2 runtime is no longer an exact peer')
+  for (const forbidden of ['*', '||', ' - ', 'x', 'X']) {
+    assert.equal(manifest.engines.dsh.includes(forbidden), false, `the range must not contain ${JSON.stringify(forbidden)}`)
   }
-  assert.match(range, /^\d+\.\d+\.\d+-rc\.\d+$/, 'the peer is an exact prerelease version, not a range')
-
-  // v0.1.6 is the release version paired with the accepted runtime line; a
-  // compatibility migration moves the peer, not the release version.
-  assert.equal(manifest.version, '0.1.6', 'the release version is unchanged by the peer migration')
+  assert.match(manifest.engines.dsh, /^>=\d+\.\d+\.\d+-rc\.\d+ <\d+\.\d+\.\d+-0$/, 'the range keeps both exact bounds')
 })
 
 // ---------------------------------------------------------------------------
