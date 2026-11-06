@@ -1004,3 +1004,56 @@ scenario is claimed as executed.
   `lib/client.js` stay 651,961 bytes at
   `07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`, and the frozen constants remain
   `DEFAULT_PRESENTATION_REFRESH_MS = 100`, `MIN_RATE_SAMPLES = 3`, `MIN_RATE_ELAPSED_MS = 100`.
+
+## 18. v0.1.8 — `engines.dsh` range `>=0.2.1-rc.3 <0.2.2` (DSH 0.2.2-rc.1 admission)
+
+| Item | Value |
+|---|---|
+| Status | working tree, **unreleased** — no publish, tag or GitHub Release |
+| Live declaration | `"engines": { "dsh": ">=0.2.1-rc.3 <0.2.2" }` |
+| Previous declaration | `">=0.2.1-rc.2 <0.2.2-0"` (v0.1.7, published) |
+| New runtime examined | DSH `0.2.2-rc.1`, npm `latest`/`next` on 2026-11-06, integrity `sha512-ijR9UEVYkG15Q/Q79JzvzLBzQOQfc63VLr9n6flpwHPhr5IKn2UxthnSoto/P9l7qGd7pPvI1Ra6TW7LH3oKpg==` |
+| Isolated install | `E:\Projects\DSHarness\_phase14-runtime\dsh-0.2.2-rc.1` (`npm install --save-exact --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1`) — 330 `@deepseek-ai` packages |
+| Version exemption | none |
+
+### 18.1 Why
+
+On `0.2.2-rc.1` the installed evaluator (unchanged precedence: own `engines.dsh` decides alone, `includePrerelease: true`)
+returned `requirements: { "engines.dsh": ">=0.2.1-rc.2 <0.2.2-0" }` for v0.1.7, so `profile.ts` would put the bundle in
+`skippedBundles` and the meter would not load. The `-0` sentinel was the deliberate cap of §17.
+
+The v0.1.8 range drops the `-0`: with `includePrerelease: true`, `<0.2.2` admits every `0.2.2-*` prerelease and still
+rejects the `0.2.2` release. The floor rises to `0.2.1-rc.3`.
+
+### 18.2 Evaluator decisions — executed
+
+| Runtime | rc.3 evaluator | 0.2.2-rc.1 evaluator |
+|---|---|---|
+| `0.2.1-rc.2` | — | **REJECT** |
+| `0.2.1-rc.3` | ACCEPT | ACCEPT |
+| `0.2.1-rc.5` | ACCEPT | ACCEPT |
+| `0.2.2-rc.1` | ACCEPT | ACCEPT |
+| `0.2.2` | — | **REJECT** |
+
+### 18.3 Consumed contracts, installed `0.2.1-rc.3` vs installed `0.2.2-rc.1`
+
+| Contract | Result |
+|---|---|
+| `dsh-api-session-controller` `contract/events.d.ts` (`SessionEventWindow`, change kinds, `MutableSessionEventSource`) | byte-identical |
+| `assistant-stream.d.ts` (llm, session-controller, client sessions) | byte-identical |
+| `sessions.binding(id): SessionBinding \| undefined`, `retainInfo(id)`, `retain(...)` | signatures unchanged; `SessionListEntry.projectionValues` narrowed to summary values (not read by the plugin) |
+| `Session` / snapshot | prompt echo now published on Host acceptance; `readAttachment` takes an `ImageAttachmentRef` — neither is read by the plugin |
+| `dsh-session` event types (`turn/*`, `assistant/*`, `tool/*`) | comment-only changes |
+| `conversation.input.dock` | unchanged `{ kind: 'list'; scope: 'session'; owner: InputZone }`; new docs ask fixed overlays to portal — the plugin has none |
+| `dsh-client-ui-renderer` | byte-identical |
+| `dsh-client-locale` `register()` | still requires only the two baseline locales; new languages (de/es/fr/ja/pt/ru) fall back to English |
+| `dsh-client-modules` loader | additive `asset()` / `resolveAsset` hook |
+| `dsh-app-boot` | new optional `dsh.bundle.platforms` admission; the plugin omits it, so every Host OS is allowed |
+
+### 18.4 Claim boundary
+
+- `0.2.1-rc.3` remains the only device-verified runtime in the range.
+- `0.2.2-rc.1` is accepted by its own host evaluator and statically compared (§18.3); **no** real-browser acceptance has
+  been run on it.
+- `0.2.1-rc.2` is no longer admitted by the working tree; published v0.1.7 still admits it.
+- Other `0.2.2` prereleases and `0.2.1-rc.4`/`rc.5`/`0.2.1` are range decisions only.

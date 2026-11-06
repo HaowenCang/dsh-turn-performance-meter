@@ -26,7 +26,8 @@
  *
  * Phase 13.0 moved the working-tree peer to `0.2.1-rc.3`, and release Phase A
  * (v0.1.7) replaced the exact peer with the `engines.dsh` range
- * `>=0.2.1-rc.2 <0.2.2-0`. This file remains the 0.2.1-rc.2 record: its
+ * `>=0.2.1-rc.2 <0.2.2-0`; v0.1.8 moved it to `>=0.2.1-rc.3 <0.2.2`, so the
+ * rc.2 runtime is no longer admitted. This file remains the 0.2.1-rc.2 record: its
  * wire-shape evidence is not restamped, and only the cross-file guard below
  * tracks the live declaration so the layers cannot drift apart. The rc.3
  * normative layer is `test/dsh-021-rc3-contract.test.js`; the historical
@@ -119,7 +120,7 @@ function settlementEntry(type, seq, time, options) {
 // Compatibility metadata
 // ---------------------------------------------------------------------------
 
-test('the historical 0.2.1-rc.2 pairing is retained as evidence, and the working tree declares the v0.1.7 engines.dsh range', async () => {
+test('the historical 0.2.1-rc.2 pairing is retained as evidence, and the working tree declares the v0.1.8 engines.dsh range', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
   /**
@@ -133,9 +134,9 @@ test('the historical 0.2.1-rc.2 pairing is retained as evidence, and the working
    * superseded exact-peer model as if it were still current. The range is
    * pinned literally: no wildcard, no open upper bound, and no `||` union.
    */
-  assert.equal(manifest.version, '0.1.7', 'the working tree is the prepared v0.1.7 release')
-  assert.equal(manifest.engines?.dsh, '>=0.2.1-rc.2 <0.2.2-0', 'the live declaration is the v0.1.7 engines.dsh range')
-  assert.deepEqual(manifest.engines, { dsh: '>=0.2.1-rc.2 <0.2.2-0' }, 'the dsh range is the only engine constraint')
+  assert.equal(manifest.version, '0.1.8', 'the working tree is the prepared v0.1.8 release')
+  assert.equal(manifest.engines?.dsh, '>=0.2.1-rc.3 <0.2.2', 'the live declaration is the v0.1.8 engines.dsh range')
+  assert.deepEqual(manifest.engines, { dsh: '>=0.2.1-rc.3 <0.2.2' }, 'the dsh range is the only engine constraint')
   assert.equal(Object.hasOwn(manifest.engines, 'node'), false, 'no engines.node constraint is added without evidence')
   assert.equal(manifest.peerDependencies, undefined, 'the superseded exact DSH peer is removed from the published manifest')
 
@@ -145,7 +146,7 @@ test('the historical 0.2.1-rc.2 pairing is retained as evidence, and the working
   for (const forbidden of ['*', '||', ' - ']) {
     assert.equal(manifest.engines.dsh.includes(forbidden), false, `the range must not contain ${JSON.stringify(forbidden)}`)
   }
-  assert.match(manifest.engines.dsh, /^>=\d+\.\d+\.\d+-rc\.\d+ <\d+\.\d+\.\d+-0$/, 'the range keeps both exact bounds')
+  assert.match(manifest.engines.dsh, /^>=\d+\.\d+\.\d+-rc\.\d+ <\d+\.\d+\.\d+$/, 'the range keeps both exact bounds')
 })
 
 test('the 0.2.0-rc.2 contract file is retained as historical evidence rather than restamped', async () => {
@@ -159,7 +160,7 @@ test('the 0.2.0-rc.2 contract file is retained as historical evidence rather tha
   assert.match(historical, /DSH 0\.2\.0-rc\.2 compatibility layer/, 'the historical file keeps its Phase 9.3 identity')
   assert.ok(historical.includes(REFERENCE_020), 'the historical file keeps the 0.2.0-rc.2 reference commit')
   assert.ok(
-    historical.includes("assert.equal(manifest.engines?.dsh, '>=0.2.1-rc.2 <0.2.2-0'"),
+    historical.includes("assert.equal(manifest.engines?.dsh, '>=0.2.1-rc.3 <0.2.2'"),
     'the historical file carries the current-declaration guard so the two files cannot drift apart',
   )
 })

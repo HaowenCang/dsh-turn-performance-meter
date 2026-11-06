@@ -8,6 +8,17 @@ provides two UI modes: a compact live meter during execution and a completed tur
 重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计
 卡片。完成态卡片按整个 turn 聚合。
 
+> **`v0.1.8` (working tree, unreleased).** The `engines.dsh` range moves to `">=0.2.1-rc.3 <0.2.2"`. The floor rises
+> to `0.2.1-rc.3` (rc.2 is no longer admitted) and the bare `<0.2.2` bound admits the `0.2.2` prereleases, including
+> `0.2.2-rc.1`, which the `<0.2.2-0` bound of v0.1.7 rejected; the `0.2.2` release is still rejected. No production
+> source or bundle change. `0.2.2-rc.1` is accepted by its own host evaluator and its consumed contracts were compared
+> statically against rc.3; it is **not** device-verified.
+>
+> **`v0.1.8`（工作树，未发布）。** `engines.dsh` 范围改为 `">=0.2.1-rc.3 <0.2.2"`：下限升至 `0.2.1-rc.3`（不再接纳
+> rc.2），无 `-0` 的 `<0.2.2` 上限接纳 `0.2.2` 预发布版本（含 v0.1.7 的 `<0.2.2-0` 所拒绝的 `0.2.2-rc.1`），仍拒绝
+> `0.2.2` 正式版。无生产源码或 bundle 变更。`0.2.2-rc.1` 已由其自身宿主评估器接受，所消费契约已与 rc.3 做静态比对；
+> **尚未**实机验证。
+
 > **`v0.1.7` — RELEASE PREPARED, awaiting npm publish (2FA). Not yet released.** Version `0.1.7` is the first release
 > that declares an `engines.dsh` range, `">=0.2.1-rc.2 <0.2.2-0"`, instead of an exact `@deepseek-ai/dsh` peer. It
 > carries the Phase 12.0/12.0R navigation-recovery and retention fixes, supports DSH `0.2.1-rc.2` **and**
@@ -59,11 +70,13 @@ React layer never re-derives a metric.
 ## 2. Support status / 支持状态
 
 ```text
-Version (working tree): 0.1.7 — RELEASE PREPARED (not published; awaits npm publish + tag/release)
-Supported runtimes:     DSH >=0.2.1-rc.2 <0.2.2-0 via engines.dsh
-                        device-verified: 0.2.1-rc.2 and 0.2.1-rc.3
-                        range-only (not device-verified): 0.2.1-rc.4, 0.2.1
-                        rejected: the 0.2.0 line and the 0.2.2 line
+Version (working tree): 0.1.8 — unreleased
+Supported runtimes:     DSH >=0.2.1-rc.3 <0.2.2 via engines.dsh
+                        device-verified: 0.2.1-rc.3
+                        host-evaluator + static contract check (not device-verified): 0.2.2-rc.1
+                        range-only (not device-verified): 0.2.1-rc.4, 0.2.1-rc.5, 0.2.1, other 0.2.2 prereleases
+                        rejected: the 0.2.0 line, 0.2.1-rc.2 and earlier, the 0.2.2 release and later
+Previous (v0.1.7):      DSH >=0.2.1-rc.2 <0.2.2-0 (device-verified on 0.2.1-rc.2 and 0.2.1-rc.3)
 Compatibility status:   RELEASE PREPARED — engines.dsh accepted by both accepted runtimes; no exemption used
 Released:               v0.1.6 -> DSH 0.2.1-rc.2   (exact peer, unchanged)
                         v0.1.5 -> DSH 0.2.0-rc.2
@@ -89,6 +102,8 @@ plugin v0.1.6  ->  DSH 0.2.1-rc.2   reference commit 687f282e8625c6b8d11ff58211a
 plugin v0.1.7  ->  DSH >=0.2.1-rc.2 <0.2.2-0   engines.dsh (device-verified on 0.2.1-rc.2 and 0.2.1-rc.3;
                    reference commits 687f282e8625c6b8d11ff58211a90524be2e4317 and
                    1f81c047fc48fa190a683e469daa699857e9afe8)
+plugin v0.1.8  ->  DSH >=0.2.1-rc.3 <0.2.2   engines.dsh (device-verified on 0.2.1-rc.3; 0.2.2-rc.1 accepted by its
+                   host evaluator and statically compared, not device-verified)
 ```
 
 **Release Phase A — `v0.1.7` prepared (not published).** The 0.1.7 working tree replaces the exact
@@ -299,6 +314,7 @@ prerequisite follows §2.1: **install a runtime the plugin version you are insta
 
 | Installing | Required DSH |
 |---|---|
+| `@0.1.8` (working tree, unreleased) | `>=0.2.1-rc.3 <0.2.2` (`engines.dsh`); device-verified on `0.2.1-rc.3`; `0.2.2-rc.1` accepted, not device-verified |
 | `@0.1.7` (prepared; not yet on npm — §3.2, §3.3) | `>=0.2.1-rc.2 <0.2.2-0` (`engines.dsh`); device-verified on `0.2.1-rc.2` and `0.2.1-rc.3` |
 | `@0.1.6` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.2.1-rc.2` (exact peer) |
 | `@0.1.5` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
@@ -306,7 +322,7 @@ prerequisite follows §2.1: **install a runtime the plugin version you are insta
 | `@0.1.3` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.1.7-rc.2` |
-| the development checkout (§3.4) | `>=0.2.1-rc.2 <0.2.2-0` (`engines.dsh`) |
+| the development checkout (§3.4) | `>=0.2.1-rc.3 <0.2.2` (`engines.dsh`) |
 
 ```powershell
 # released v0.1.6 artifacts (npm / GitHub Release)
@@ -325,13 +341,15 @@ npm install -g @deepseek-ai/dsh@0.1.7-rc.2
 
 Do not install an arbitrary latest DSH and assume the plugin runs on it: 0.1.7 accepts exactly the bounded range
 `>=0.2.1-rc.2 <0.2.2-0`, of which `0.2.1-rc.2` and `0.2.1-rc.3` are device-verified; the historical releases are exact
-claims. The `0.2.0` and `0.2.2` lines are rejected by 0.1.7.
+claims. The `0.2.0` and `0.2.2` lines are rejected by 0.1.7. 0.1.8 accepts `>=0.2.1-rc.3 <0.2.2`: it drops `0.2.1-rc.2`
+and admits the `0.2.2` prereleases (including `0.2.2-rc.1`), but still rejects the `0.2.2` release.
 
 插件声明有界的 DSH 要求，而 DSH 会拒绝启动要求不满足的插件，因此前置条件遵循 §2.1：**安装所要安装的插件版本实际支持的
 运行时。**
 
 | 安装对象 | 所需 DSH |
 |---|---|
+| `@0.1.8`（工作树，未发布） | `>=0.2.1-rc.3 <0.2.2`（`engines.dsh`）；已在 `0.2.1-rc.3` 实机验证；`0.2.2-rc.1` 被接受，未实机验证 |
 | `@0.1.7`（已准备，尚未进入 npm——§3.2、§3.3） | `>=0.2.1-rc.2 <0.2.2-0`（`engines.dsh`）；已在 `0.2.1-rc.2` 与 `0.2.1-rc.3` 实机验证 |
 | `@0.1.6`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.2.1-rc.2`（精确 peer） |
 | `@0.1.5`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
@@ -339,10 +357,11 @@ claims. The `0.2.0` and `0.2.2` lines are rejected by 0.1.7.
 | `@0.1.3`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.2`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.1`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.1.7-rc.2` |
-| 开发检出目录（§3.4） | `>=0.2.1-rc.2 <0.2.2-0`（`engines.dsh`） |
+| 开发检出目录（§3.4） | `>=0.2.1-rc.3 <0.2.2`（`engines.dsh`） |
 
 不要安装任意“最新”DSH 并假定插件可在其上运行：0.1.7 只接受有界范围 `>=0.2.1-rc.2 <0.2.2-0`，其中
-`0.2.1-rc.2` 与 `0.2.1-rc.3` 已经实机验证；历史发布各自是精确声明。0.1.7 会拒绝 `0.2.0` 与 `0.2.2` 系列。
+`0.2.1-rc.2` 与 `0.2.1-rc.3` 已经实机验证；历史发布各自是精确声明。0.1.7 会拒绝 `0.2.0` 与 `0.2.2` 系列。0.1.8 接受
+`>=0.2.1-rc.3 <0.2.2`：不再接纳 `0.2.1-rc.2`，接纳 `0.2.2` 预发布版本（含 `0.2.2-rc.1`），但仍拒绝 `0.2.2` 正式版。
 
 ### 3.2 npm, the default installation / npm 默认安装
 

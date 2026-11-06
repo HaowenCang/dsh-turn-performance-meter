@@ -1,8 +1,11 @@
 /**
- * Release Phase A — v0.1.7 `engines.dsh` compatibility range.
+ * `engines.dsh` compatibility range — v0.1.8.
  *
- * v0.1.7 replaces the exact `@deepseek-ai/dsh` peer with one `engines.dsh`
- * range, `>=0.2.1-rc.2 <0.2.2-0`. The host compatibility evaluator
+ * v0.1.7 replaced the exact `@deepseek-ai/dsh` peer with one `engines.dsh`
+ * range, `>=0.2.1-rc.2 <0.2.2-0`. v0.1.8 moves it to `>=0.2.1-rc.3 <0.2.2`:
+ * the floor rises to rc.3 and the bare `<0.2.2` bound admits every 0.2.2
+ * prerelease (including 0.2.2-rc.1) while rejecting the 0.2.2 release itself.
+ * The host compatibility evaluator
  * (`packages/boot/app-boot/src/plugin-compatibility.ts`) gives an own
  * `engines.dsh` range precedence and ignores `peerDependencies`; it compares
  * with `semver.satisfies(runtime, range, { includePrerelease: true })`. This
@@ -34,7 +37,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const REPO_ROOT = dirname(fileURLToPath(new URL('../package.json', import.meta.url)))
-const RANGE = '>=0.2.1-rc.2 <0.2.2-0'
+const RANGE = '>=0.2.1-rc.3 <0.2.2'
 
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 
@@ -47,6 +50,7 @@ function evaluatorCandidates() {
   const parent = dirname(REPO_ROOT)
   return [
     process.env.DSH_APP_BOOT_LIB,
+    join(parent, '_phase14-runtime', 'dsh-0.2.2-rc.1', 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js'),
     join(parent, '_phase13-runtime', 'dsh-0.2.1-rc.3', 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js'),
     join(parent, '_phase11-runtime', 'dsh-0.2.1-rc.2', 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js'),
   ].filter(candidate => typeof candidate === 'string' && candidate !== '' && existsSync(candidate))
@@ -154,7 +158,7 @@ function evaluate(manifestValue, runtimeVersion) {
 
 test('the published declaration carries exactly one engines.dsh range and no DSH peer', () => {
   assert.equal(manifest.name, 'dsh-turn-performance-meter')
-  assert.equal(manifest.version, '0.1.7', 'the release version is the prepared v0.1.7 release')
+  assert.equal(manifest.version, '0.1.8', 'the working tree is the prepared v0.1.8 release')
   assert.deepEqual(manifest.engines, { dsh: RANGE }, 'engines.dsh is the only engine entry')
   assert.equal(Object.hasOwn(manifest.engines, 'node'), false, 'no engines.node constraint is added without evidence')
   assert.equal(manifest.peerDependencies, undefined, 'the superseded exact DSH peer is removed, not left beside the range')
@@ -163,7 +167,7 @@ test('the published declaration carries exactly one engines.dsh range and no DSH
   /** The range must not be widened to a wildcard or an open bound. */
   assert.equal(manifest.engines.dsh.includes('*'), false, 'no wildcard')
   assert.equal(manifest.engines.dsh.includes('||'), false, 'no union')
-  assert.match(manifest.engines.dsh, /^>=0\.2\.1-rc\.2 <0\.2\.2-0$/, 'both bounds are exact and ordered')
+  assert.match(manifest.engines.dsh, /^>=0\.2\.1-rc\.3 <0\.2\.2$/, 'both bounds are exact and ordered')
 
   /** The rest of the distribution metadata is preserved. */
   assert.equal(manifest.exports['.'], './index.js')
@@ -189,7 +193,7 @@ test('the release machine decides the matrix with the installed host evaluator, 
    */
   assert.notEqual(hostEvaluator, null, 'an installed DSH app-boot evaluator must be resolvable on the release machine')
   assert.ok(
-    ['0.2.1-rc.2', '0.2.1-rc.3'].includes(hostEvaluator.runtimeVersion),
+    ['0.2.1-rc.3', '0.2.2-rc.1'].includes(hostEvaluator.runtimeVersion),
     `the installed evaluator should be one of the accepted runtimes, got ${hostEvaluator.runtimeVersion}`,
   )
   assert.equal(typeof hostEvaluator.evaluate, 'function')
@@ -206,15 +210,19 @@ test('the release machine decides the matrix with the installed host evaluator, 
 const MATRIX = [
   ['0.2.0-rc.2', false],
   ['0.2.1-rc.1', false],
-  ['0.2.1-rc.2', true],
+  ['0.2.1-rc.2', false],
   ['0.2.1-rc.3', true],
-  ['0.2.1-rc.4', true],
+  ['0.2.1-rc.5', true],
   ['0.2.1', true],
-  ['0.2.2-rc.1', false],
+  ['0.2.2-alpha.3', true],
+  ['0.2.2-rc.1', true],
+  ['0.2.2-rc.9', true],
   ['0.2.2', false],
+  ['0.2.3-rc.1', false],
+  ['0.3.0', false],
 ]
 
-test('the engines.dsh range accepts exactly the >=0.2.1-rc.2 <0.2.2-0 matrix', () => {
+test('the engines.dsh range accepts exactly the >=0.2.1-rc.3 <0.2.2 matrix', () => {
   for (const [runtimeVersion, expected] of MATRIX) {
     const decision = evaluate(manifest, runtimeVersion)
     assert.equal(decision.accepted, expected, `runtime ${runtimeVersion} must be ${expected ? 'ACCEPT' : 'REJECT'}`)
@@ -226,19 +234,20 @@ test('the engines.dsh range accepts exactly the >=0.2.1-rc.2 <0.2.2-0 matrix', (
   }
 })
 
-test('the boundary is inclusive at rc.2 and exclusive at the 0.2.2-0 prerelease', () => {
-  /** The lower bound is inclusive: rc.2 itself is accepted. */
-  assert.equal(evaluate(manifest, '0.2.1-rc.2').accepted, true)
-  /** rc.1 is below the lower bound and rejected. */
-  assert.equal(evaluate(manifest, '0.2.1-rc.1').accepted, false)
+test('the boundary is inclusive at rc.3 and exclusive at the 0.2.2 release', () => {
+  /** The lower bound is inclusive: rc.3 itself is accepted. */
+  assert.equal(evaluate(manifest, '0.2.1-rc.3').accepted, true)
+  /** rc.2 is below the raised lower bound and rejected. */
+  assert.equal(evaluate(manifest, '0.2.1-rc.2').accepted, false)
   /**
-   * `<0.2.2-0` excludes the whole 0.2.2 line: the `-0` sentinel sorts below
-   * every real prerelease of 0.2.2, and below the 0.2.2 release itself.
+   * `<0.2.2` admits the 0.2.2 prereleases: a prerelease sorts below its
+   * release, and the host compares with `includePrerelease: true`. The 0.2.2
+   * release itself is excluded.
    */
-  assert.equal(satisfiesRange('0.2.2-0', RANGE), false)
-  assert.equal(satisfiesRange('0.2.2-rc.1', RANGE), false)
+  assert.equal(satisfiesRange('0.2.2-0', RANGE), true)
+  assert.equal(satisfiesRange('0.2.2-rc.1', RANGE), true)
   assert.equal(satisfiesRange('0.2.2', RANGE), false)
-  assert.equal(evaluate(manifest, '0.2.2-rc.1').accepted, false)
+  assert.equal(evaluate(manifest, '0.2.2-rc.1').accepted, true)
   assert.equal(evaluate(manifest, '0.2.2').accepted, false)
 })
 
@@ -255,19 +264,19 @@ test('the host evaluator gives engines.dsh precedence over a deliberately mismat
    */
   const priorityManifest = {
     name: 'dsh-turn-performance-meter',
-    version: '0.1.7',
+    version: '0.1.8',
     engines: { dsh: RANGE },
     peerDependencies: { '@deepseek-ai/dsh': '0.0.0-deliberately-mismatched' },
   }
 
-  for (const runtimeVersion of ['0.2.1-rc.2', '0.2.1-rc.3']) {
+  for (const runtimeVersion of ['0.2.1-rc.3', '0.2.2-rc.1']) {
     const decision = evaluate(priorityManifest, runtimeVersion)
     assert.equal(decision.accepted, true, `engines.dsh must decide alone on ${runtimeVersion}`)
   }
   /** Negative control on the same shape: a failing engines range decides alone too. */
   const reverseManifest = {
     name: 'dsh-turn-performance-meter',
-    version: '0.1.7',
+    version: '0.1.8',
     engines: { dsh: '^9.9.9' },
     peerDependencies: { '@deepseek-ai/dsh': '0.2.1-rc.2' },
   }
@@ -288,7 +297,7 @@ test('the host evaluator gives engines.dsh precedence over a deliberately mismat
 test('a non-DSH peer is irrelevant once engines.dsh decides', () => {
   const withNonDshPeer = {
     name: 'dsh-turn-performance-meter',
-    version: '0.1.7',
+    version: '0.1.8',
     engines: { dsh: RANGE },
     peerDependencies: { 'left-pad': '^1.0.0' },
   }

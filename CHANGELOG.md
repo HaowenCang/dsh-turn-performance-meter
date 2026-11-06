@@ -7,6 +7,24 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
+## 0.1.8 — Unreleased — 2026-11-06
+
+### Compatibility
+
+- The `engines.dsh` range moves from `">=0.2.1-rc.2 <0.2.2-0"` to `">=0.2.1-rc.3 <0.2.2"`.
+  - **Added:** the `0.2.2` prereleases, including DSH `0.2.2-rc.1` (now npm `latest`). The v0.1.7 `-0` upper bound
+    rejected them, so the host silently skipped the plugin bundle on `0.2.2-rc.1`. The host evaluator compares with
+    `includePrerelease: true`, so a bare `<0.2.2` admits every `0.2.2-*` prerelease.
+  - **Dropped:** DSH `0.2.1-rc.2` and earlier (the floor rises to `0.2.1-rc.3`).
+  - **Still rejected:** the `0.2.2` release and later.
+- `0.2.2-rc.1` evidence: its installed `dsh-app-boot` evaluator accepts the 0.1.8 manifest, and the consumed contracts
+  (`SessionEventWindow`, `sessions.binding()` / `retainInfo()`, the assistant-stream decoder, the `conversation.input.dock`
+  slot, the locale service) were compared against the installed `0.2.1-rc.3` packages and found unchanged or additively
+  changed. It is **not** device-verified — no real-browser acceptance has been run on `0.2.2-rc.1`.
+- No production source, bundle, constant or wire-shape change; `client.js` / `lib/client.js` are unchanged.
+- Tests: `test/dsh-engine-range.test.js` carries the new 12-row matrix and resolves the `0.2.2-rc.1` host evaluator
+  first; the rc.3, rc.2 and 0.2.0 contract layers' working-declaration guards track the new range. 966/966 pass.
+
 ## 0.1.7 — RELEASE PREPARED (awaiting npm publish) — 2026-10-24
 
 **RELEASE PREPARED, NOT PUBLISHED.** Version `0.1.7` is the first release that declares an `engines.dsh` range instead

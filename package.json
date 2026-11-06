@@ -1,6 +1,6 @@
 {
   "name": "dsh-turn-performance-meter",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "license": "MIT",
   "type": "module",
   "description": "Turn-level live and completed throughput/latency telemetry for DeepSeek Harness agent workflows.",
@@ -38,7 +38,7 @@
     "verify": "node scripts/verify-structure.mjs && node --test test/*.test.js"
   },
   "engines": {
-    "dsh": ">=0.2.1-rc.2 <0.2.2-0"
+    "dsh": ">=0.2.1-rc.3 <0.2.2"
   },
   "publishConfig": {
     "access": "public",
