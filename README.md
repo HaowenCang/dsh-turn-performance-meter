@@ -8,23 +8,22 @@ provides two UI modes: a compact live meter during execution and a completed tur
 重试、shell 命令、文件写入/编辑以及最终回答的场景。插件包含两种 UI：执行过程中的紧凑实时统计，以及 turn 完成后的统计
 卡片。完成态卡片按整个 turn 聚合。
 
-> **`v0.1.8` (working tree, unreleased).** The `engines.dsh` range moves to `">=0.2.1-rc.3 <0.2.2"`. The floor rises
+> **`v0.1.8` — released 2026-11-06.** The `engines.dsh` range moves to `">=0.2.1-rc.3 <0.2.2"`. The floor rises
 > to `0.2.1-rc.3` (rc.2 is no longer admitted) and the bare `<0.2.2` bound admits the `0.2.2` prereleases, including
 > `0.2.2-rc.1`, which the `<0.2.2-0` bound of v0.1.7 rejected; the `0.2.2` release is still rejected. No production
 > source or bundle change. `0.2.2-rc.1` is accepted by its own host evaluator and its consumed contracts were compared
 > statically against rc.3; it is **not** device-verified.
 >
-> **`v0.1.8`（工作树，未发布）。** `engines.dsh` 范围改为 `">=0.2.1-rc.3 <0.2.2"`：下限升至 `0.2.1-rc.3`（不再接纳
+> **`v0.1.8` —— 2026-11-06 发布。** `engines.dsh` 范围改为 `">=0.2.1-rc.3 <0.2.2"`：下限升至 `0.2.1-rc.3`（不再接纳
 > rc.2），无 `-0` 的 `<0.2.2` 上限接纳 `0.2.2` 预发布版本（含 v0.1.7 的 `<0.2.2-0` 所拒绝的 `0.2.2-rc.1`），仍拒绝
 > `0.2.2` 正式版。无生产源码或 bundle 变更。`0.2.2-rc.1` 已由其自身宿主评估器接受，所消费契约已与 rc.3 做静态比对；
 > **尚未**实机验证。
 
-> **`v0.1.7` — RELEASE PREPARED, awaiting npm publish (2FA). Not yet released.** Version `0.1.7` is the first release
+> **`v0.1.7` — released 2026-10-24.** Version `0.1.7` is the first release
 > that declares an `engines.dsh` range, `">=0.2.1-rc.2 <0.2.2-0"`, instead of an exact `@deepseek-ai/dsh` peer. It
 > carries the Phase 12.0/12.0R navigation-recovery and retention fixes, supports DSH `0.2.1-rc.2` **and**
 > `0.2.1-rc.3` (both device-verified by isolated install + real-browser acceptance), and changes no TPS, TTFT,
-> estimator, curve, rendering or lifecycle algorithm. The canonical `dsh-turn-performance-meter-0.1.7.tgz` is built and
-> hash-verified locally; **it has not been published to npm, tagged, or attached to a GitHub Release.** See §2.1.
+> estimator, curve, rendering or lifecycle algorithm. It is published on npm and as a GitHub Release. See §2.1.
 >
 > **`v0.1.6` remains published for DSH `0.2.1-rc.2`** and is not restamped: its npm package, Git tag, GitHub Release
 > and `dsh-turn-performance-meter-0.1.6.tgz` keep the original exact `"@deepseek-ai/dsh": "0.2.1-rc.2"` declaration.
@@ -32,11 +31,10 @@ provides two UI modes: a compact live meter during execution and a completed tur
 > **`v0.1.5` remains published for DSH `0.2.0-rc.2`** and is not restamped. The historical releases are separately
 > bounded exact claims, not one range.
 >
-> **`v0.1.7` — 发布准备完成，等待 npm 发布（2FA），尚未发布。** 版本 `0.1.7` 是首个使用 `engines.dsh` 范围
+> **`v0.1.7` —— 2026-10-24 发布。** 版本 `0.1.7` 是首个使用 `engines.dsh` 范围
 > （`">=0.2.1-rc.2 <0.2.2-0"`）取代精确 `@deepseek-ai/dsh` peer 的发布。它包含 Phase 12.0/12.0R 的会话导航恢复与
 > retention 修复，同时支持 DSH `0.2.1-rc.2` 与 `0.2.1-rc.3`（两者均通过隔离安装 + 真实浏览器验收），且不改变任何
-> TPS、TTFT、估计器、曲线、渲染或生命周期算法。canonical `dsh-turn-performance-meter-0.1.7.tgz` 已在本地构建并完成
-> 哈希校验，但**尚未发布到 npm、尚未打 tag、也尚未上传 GitHub Release**。详见 §2.1。
+> TPS、TTFT、估计器、曲线、渲染或生命周期算法。已发布到 npm 与 GitHub Release。详见 §2.1。
 >
 > **`v0.1.6` 继续面向 DSH `0.2.1-rc.2` 发布**，不改写：其 npm 包、Git tag、GitHub Release 与
 > `dsh-turn-performance-meter-0.1.6.tgz` 保留原有的精确 `"@deepseek-ai/dsh": "0.2.1-rc.2"` 声明。
@@ -70,15 +68,17 @@ React layer never re-derives a metric.
 ## 2. Support status / 支持状态
 
 ```text
-Version (working tree): 0.1.8 — unreleased
+Version:                0.1.8 — released 2026-11-06
 Supported runtimes:     DSH >=0.2.1-rc.3 <0.2.2 via engines.dsh
                         device-verified: 0.2.1-rc.3
                         host-evaluator + static contract check (not device-verified): 0.2.2-rc.1
                         range-only (not device-verified): 0.2.1-rc.4, 0.2.1-rc.5, 0.2.1, other 0.2.2 prereleases
                         rejected: the 0.2.0 line, 0.2.1-rc.2 and earlier, the 0.2.2 release and later
 Previous (v0.1.7):      DSH >=0.2.1-rc.2 <0.2.2-0 (device-verified on 0.2.1-rc.2 and 0.2.1-rc.3)
-Compatibility status:   RELEASE PREPARED — engines.dsh accepted by both accepted runtimes; no exemption used
-Released:               v0.1.6 -> DSH 0.2.1-rc.2   (exact peer, unchanged)
+Compatibility status:   engines.dsh accepted by the 0.2.1-rc.3 and 0.2.2-rc.1 host evaluators; no exemption used
+Released:               v0.1.8 -> DSH >=0.2.1-rc.3 <0.2.2   (engines.dsh)
+                        v0.1.7 -> DSH >=0.2.1-rc.2 <0.2.2-0 (engines.dsh)
+                        v0.1.6 -> DSH 0.2.1-rc.2   (exact peer, unchanged)
                         v0.1.5 -> DSH 0.2.0-rc.2
                         v0.1.4 -> DSH 0.2.0-rc.2
                         v0.1.3 -> DSH 0.2.0-rc.2
@@ -87,7 +87,8 @@ Released:               v0.1.6 -> DSH 0.2.1-rc.2   (exact peer, unchanged)
 Primary distribution:   npm
 Fallback distribution:  GitHub Release .tgz
 Development:            link checkout
-Verification:           local automated suite + real DSH browser acceptance on 0.2.1-rc.2 and 0.2.1-rc.3
+Verification:           local automated suite + real DSH browser acceptance on 0.2.1-rc.2 and 0.2.1-rc.3;
+                        0.2.2-rc.1 host-evaluator decision + static contract comparison (no browser acceptance)
 ```
 
 ### 2.1 Compatibility baseline / 兼容性基线
@@ -106,7 +107,7 @@ plugin v0.1.8  ->  DSH >=0.2.1-rc.3 <0.2.2   engines.dsh (device-verified on 0.2
                    host evaluator and statically compared, not device-verified)
 ```
 
-**Release Phase A — `v0.1.7` prepared (not published).** The 0.1.7 working tree replaces the exact
+**Release Phase A — `v0.1.7` (released 2026-10-24).** The 0.1.7 working tree replaces the exact
 `@deepseek-ai/dsh` peer with one bounded `engines.dsh` range, `">=0.2.1-rc.2 <0.2.2-0"`, and removes the old peer from
 the published manifest. The host evaluator gives an own `engines.dsh` range precedence over DSH peers, compares it with
 semver including prereleases, and needs no version exemption — verified against the installed evaluator, the reference
@@ -116,10 +117,9 @@ into a disposable profile and accepted by a real browser host; `0.2.1-rc.4` and 
 are not device-verified, while the `0.2.0` and `0.2.2` lines are rejected. The deterministic suite is **966 tests, 966
 pass, 0 fail, 0 skipped, 0 todo**; production source and both bundles are byte-identical to the accepted artifact
 (`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`). Full record: `docs/DSH_API_NOTES.md` §17 and
-`docs/IMPLEMENTATION_LOG.md` Release Phase A. The prepared tarball has **not** been published, tagged or attached to a
-GitHub Release.
+`docs/IMPLEMENTATION_LOG.md` Release Phase A.
 
-**Release Phase A —— `v0.1.7` 已准备（未发布）。** 0.1.7 工作树用一个有界 `engines.dsh` 范围
+**Release Phase A —— `v0.1.7`（2026-10-24 发布）。** 0.1.7 工作树用一个有界 `engines.dsh` 范围
 （`">=0.2.1-rc.2 <0.2.2-0"`）取代精确 `@deepseek-ai/dsh` peer，并从发布清单中删除旧 peer。宿主评估器优先采用自身
 `engines.dsh` 范围、以包含预发布版本的 semver 比较，且无需版本豁免——已通过已安装评估器、参考源码
 （`packages/boot/app-boot/src/plugin-compatibility.ts`，rc.2 与 rc.3 逐字节相同）以及同时声明两种字段的测试用 Manifest
@@ -127,7 +127,7 @@ GitHub Release.
 验收通过；`0.2.1-rc.4` 与 `0.2.1` 仅为范围判定、未经实机验证；`0.2.0` 与 `0.2.2` 系列被拒绝。确定性测试为
 **966 tests、966 pass、0 fail、0 skipped、0 todo**；生产源码与两个 bundle 与已验收产物逐字节一致
 （`07F717FA4BA11425A034B3DD81E122C208D99D1783E4C0F919C409118137ED69`）。完整记录见 `docs/DSH_API_NOTES.md` §17 与
-`docs/IMPLEMENTATION_LOG.md` Release Phase A。已准备的 tarball **尚未**发布、尚未打 tag、也尚未上传 GitHub Release。
+`docs/IMPLEMENTATION_LOG.md` Release Phase A。
 
 **`0.2.1-rc.2` is the normative runtime for `v0.1.6`.** Phase 11.0 moved the development target to it
 and re-audited every DSH declaration this plugin reads — the session event envelope, the session-controller event window
@@ -314,9 +314,9 @@ prerequisite follows §2.1: **install a runtime the plugin version you are insta
 
 | Installing | Required DSH |
 |---|---|
-| `@0.1.8` (working tree, unreleased) | `>=0.2.1-rc.3 <0.2.2` (`engines.dsh`); device-verified on `0.2.1-rc.3`; `0.2.2-rc.1` accepted, not device-verified |
-| `@0.1.7` (prepared; not yet on npm — §3.2, §3.3) | `>=0.2.1-rc.2 <0.2.2-0` (`engines.dsh`); device-verified on `0.2.1-rc.2` and `0.2.1-rc.3` |
-| `@0.1.6` (npm / GitHub Release, §3.2, §3.3) | `@deepseek-ai/dsh@0.2.1-rc.2` (exact peer) |
+| `@0.1.8` (npm / GitHub Release, §3.2, §3.3) | `>=0.2.1-rc.3 <0.2.2` (`engines.dsh`); device-verified on `0.2.1-rc.3`; `0.2.2-rc.1` accepted, not device-verified |
+| `@0.1.7` (npm / GitHub Release, historical) | `>=0.2.1-rc.2 <0.2.2-0` (`engines.dsh`); device-verified on `0.2.1-rc.2` and `0.2.1-rc.3` |
+| `@0.1.6` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.1-rc.2` (exact peer) |
 | `@0.1.5` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.4` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.3` (npm / GitHub Release, historical) | `@deepseek-ai/dsh@0.2.0-rc.2` |
@@ -325,10 +325,14 @@ prerequisite follows §2.1: **install a runtime the plugin version you are insta
 | the development checkout (§3.4) | `>=0.2.1-rc.3 <0.2.2` (`engines.dsh`) |
 
 ```powershell
+# released v0.1.8 (npm / GitHub Release): a runtime in the declared range
+npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+npm install -g @deepseek-ai/dsh@0.2.2-rc.1   # accepted by the host evaluator; not device-verified
+
 # released v0.1.6 artifacts (npm / GitHub Release)
 npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 
-# prepared v0.1.7 (not yet on npm): any device-verified runtime in the declared range
+# released v0.1.7: any device-verified runtime in its declared range
 npm install -g @deepseek-ai/dsh@0.2.1-rc.2
 npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 
@@ -349,9 +353,9 @@ and admits the `0.2.2` prereleases (including `0.2.2-rc.1`), but still rejects t
 
 | 安装对象 | 所需 DSH |
 |---|---|
-| `@0.1.8`（工作树，未发布） | `>=0.2.1-rc.3 <0.2.2`（`engines.dsh`）；已在 `0.2.1-rc.3` 实机验证；`0.2.2-rc.1` 被接受，未实机验证 |
-| `@0.1.7`（已准备，尚未进入 npm——§3.2、§3.3） | `>=0.2.1-rc.2 <0.2.2-0`（`engines.dsh`）；已在 `0.2.1-rc.2` 与 `0.2.1-rc.3` 实机验证 |
-| `@0.1.6`（npm / GitHub Release，§3.2、§3.3） | `@deepseek-ai/dsh@0.2.1-rc.2`（精确 peer） |
+| `@0.1.8`（npm / GitHub Release，§3.2、§3.3） | `>=0.2.1-rc.3 <0.2.2`（`engines.dsh`）；已在 `0.2.1-rc.3` 实机验证；`0.2.2-rc.1` 被接受，未实机验证 |
+| `@0.1.7`（npm / GitHub Release，历史版本） | `>=0.2.1-rc.2 <0.2.2-0`（`engines.dsh`）；已在 `0.2.1-rc.2` 与 `0.2.1-rc.3` 实机验证 |
+| `@0.1.6`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.1-rc.2`（精确 peer） |
 | `@0.1.5`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.4`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
 | `@0.1.3`（npm / GitHub Release，历史版本） | `@deepseek-ai/dsh@0.2.0-rc.2` |
@@ -374,31 +378,24 @@ Pin the version for a reproducible install:
 固定版本以获得可复现的安装：
 
 ```powershell
-dsh plugin --profile web add dsh-turn-performance-meter@0.1.6
+dsh plugin --profile web add dsh-turn-performance-meter@0.1.8
 ```
 
-The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.6` exactly. Both install a frozen
+The unversioned command resolves npm's `latest` dist-tag; the pinned form resolves `0.1.8` exactly. Both install a frozen
 copy of the published artifact.
 
-无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.6`。两者安装的都是已发布产物的冻结副本。
-
-**`v0.1.7` 已准备但尚未发布**，因此 `latest` 与固定版本形式目前仍解析到已发布的 `0.1.6` 产物。待发布负责人完成 npm
-2FA 发布（Release Phase B）后，同样的命令才会解析到 `0.1.7`；在此之前 GitHub Release tarball 也不可用。
-
-**`v0.1.7` is prepared but not yet published**, so `latest` and the pinned form still resolve the published `0.1.6`
-artifact. Only after the release owner completes the npm 2FA publish (Release Phase B) do the same commands resolve
-`0.1.7`; the v0.1.7 GitHub Release tarball is not available before that either.
+无版本号命令解析 npm 的 `latest` dist-tag；固定版本形式精确解析 `0.1.8`。两者安装的都是已发布产物的冻结副本。
 
 ### 3.3 GitHub Release tarball (offline fallback) / GitHub Release tarball（离线回退）
 
-Download `dsh-turn-performance-meter-0.1.6.tgz` from the
-[v0.1.6 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.6), then install it:
+Download `dsh-turn-performance-meter-0.1.8.tgz` from the
+[v0.1.8 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.8), then install it:
 
-从 [v0.1.6 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.6) 下载
-`dsh-turn-performance-meter-0.1.6.tgz` 后安装：
+从 [v0.1.8 release](https://github.com/HaowenCang/dsh-turn-performance-meter/releases/tag/v0.1.8) 下载
+`dsh-turn-performance-meter-0.1.8.tgz` 后安装：
 
 ```powershell
-dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.6.tgz"
+dsh plugin --profile web add "file:C:/path/to/dsh-turn-performance-meter-0.1.8.tgz"
 ```
 
 This is the offline and immutable fallback, and the asset is the same tarball the npm registry serves. `file:` on a
@@ -414,8 +411,8 @@ Verify the download before installing:
 安装前校验下载内容：
 
 ```powershell
-Get-FileHash .\dsh-turn-performance-meter-0.1.6.tgz -Algorithm SHA256
-Get-Content .\dsh-turn-performance-meter-0.1.6.tgz.sha256
+Get-FileHash .\dsh-turn-performance-meter-0.1.8.tgz -Algorithm SHA256
+Get-Content .\dsh-turn-performance-meter-0.1.8.tgz.sha256
 ```
 
 ### 3.4 Development checkout / 开发检出
@@ -648,9 +645,9 @@ this repository is a local test result, not CI. The implementation log keeps the
 ```text
 dsh-turn-performance-meter/
 ├─ README.md
-├─ CHANGELOG.md                      Release history (0.1.7 prepared)
+├─ CHANGELOG.md                      Release history (0.1.8)
 ├─ LICENSE                           MIT
-├─ package.json                      version 0.1.7 (RELEASE PREPARED), engines.dsh, scripts: test / build:client / verify
+├─ package.json                      version 0.1.8, engines.dsh, scripts: test / build:client / verify
 ├─ cordis.patch.yml                  Bundle row insertion; the only DSH composition this plugin adds
 ├─ index.js                          host entry (no-op by design; telemetry is client-side)
 ├─ client.js                         GENERATED browser bundle (npm run build:client)

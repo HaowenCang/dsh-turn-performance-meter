@@ -839,7 +839,7 @@ exact peer pins exactly one runtime by design. The recorded corpora keep the ver
 
 | Item | Value |
 |---|---|
-| Status | **RELEASE PREPARED — not published to npm, not tagged, no GitHub Release** |
+| Status | **released 2026-10-24** (npm + tag `v0.1.7` + GitHub Release); originally recorded here as prepared |
 | Release version | `0.1.7` |
 | Live declaration | `"engines": { "dsh": ">=0.2.1-rc.2 <0.2.2-0" }` |
 | Removed declaration | `"peerDependencies": { "@deepseek-ai/dsh": "0.2.1-rc.3" }` (and the superseded exact `0.2.1-rc.2` pin it replaced) |
@@ -1009,7 +1009,7 @@ scenario is claimed as executed.
 
 | Item | Value |
 |---|---|
-| Status | working tree, **unreleased** — no publish, tag or GitHub Release |
+| Status | **released 2026-11-06** — tag `v0.1.8`, GitHub Release with the canonical `.tgz` + `.sha256` |
 | Live declaration | `"engines": { "dsh": ">=0.2.1-rc.3 <0.2.2" }` |
 | Previous declaration | `">=0.2.1-rc.2 <0.2.2-0"` (v0.1.7, published) |
 | New runtime examined | DSH `0.2.2-rc.1`, npm `latest`/`next` on 2026-11-06, integrity `sha512-ijR9UEVYkG15Q/Q79JzvzLBzQOQfc63VLr9n6flpwHPhr5IKn2UxthnSoto/P9l7qGd7pPvI1Ra6TW7LH3oKpg==` |

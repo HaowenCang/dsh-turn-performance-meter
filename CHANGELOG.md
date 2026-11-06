@@ -7,7 +7,7 @@ user of the plugin reads.
 Distribution status: published to the public npm registry as `dsh-turn-performance-meter`, with the GitHub Release
 `.tgz` retained as an offline, immutable fallback.
 
-## 0.1.8 — Unreleased — 2026-11-06
+## 0.1.8 — 2026-11-06
 
 ### Compatibility
 
@@ -25,12 +25,10 @@ Distribution status: published to the public npm registry as `dsh-turn-performan
 - Tests: `test/dsh-engine-range.test.js` carries the new 12-row matrix and resolves the `0.2.2-rc.1` host evaluator
   first; the rc.3, rc.2 and 0.2.0 contract layers' working-declaration guards track the new range. 966/966 pass.
 
-## 0.1.7 — RELEASE PREPARED (awaiting npm publish) — 2026-10-24
+## 0.1.7 — 2026-10-24
 
-**RELEASE PREPARED, NOT PUBLISHED.** Version `0.1.7` is the first release that declares an `engines.dsh` range instead
-of an exact `@deepseek-ai/dsh` peer. The release-prep commit is on `main`; `npm publish`, the Git tag and the GitHub
-Release happen only after the release owner completes npm 2FA (Release Phase B). Until the registry accepts the
-canonical tarball, read every "prepared" statement in this entry as *not yet distributed*.
+Version `0.1.7` is the first release that declares an `engines.dsh` range instead of an exact `@deepseek-ai/dsh`
+peer.
 
 ### Fixes
 
